@@ -82,7 +82,7 @@ Suggested values:
 | `CLOUD_SQL_INSTANCE` | `saturn-pg` |
 | `CLOUD_SQL_DATABASE` | `saturn` |
 | `CLOUD_SQL_USER` | `saturn` |
-| `CLOUD_SQL_TIER` | `db-g1-small` |
+| `CLOUD_SQL_TIER` | `db-g1-small` (Enterprise edition) |
 | `REDIS_INSTANCE` | `saturn-redis` |
 | `REDIS_TIER` | `BASIC` |
 | `REDIS_SIZE_GB` | `1` |

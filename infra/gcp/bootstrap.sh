@@ -69,17 +69,37 @@ if ! gcloud services vpc-peerings list \
 fi
 
 echo "Ensuring serverless VPC connector ${VPC_CONNECTOR}"
-gcloud compute networks vpc-access connectors describe "${VPC_CONNECTOR}" \
-  --region "${GCP_REGION}" >/dev/null 2>&1 || \
-gcloud compute networks vpc-access connectors create "${VPC_CONNECTOR}" \
-  --region "${GCP_REGION}" \
-  --network "${VPC_NETWORK}" \
-  --range "${VPC_CONNECTOR_RANGE}"
+if gcloud compute networks vpc-access connectors describe "${VPC_CONNECTOR}" \
+  --region "${GCP_REGION}" >/dev/null 2>&1; then
+  state="$(gcloud compute networks vpc-access connectors describe "${VPC_CONNECTOR}" \
+    --region "${GCP_REGION}" --format='value(state)')"
+  if [[ "${state}" != "READY" ]]; then
+    echo "Connector ${VPC_CONNECTOR} is ${state}; recreating"
+    gcloud compute networks vpc-access connectors delete "${VPC_CONNECTOR}" \
+      --region "${GCP_REGION}" --quiet
+    gcloud compute networks vpc-access connectors create "${VPC_CONNECTOR}" \
+      --region "${GCP_REGION}" \
+      --network "${VPC_NETWORK}" \
+      --range "${VPC_CONNECTOR_RANGE}" \
+      --min-instances 2 \
+      --max-instances 3 \
+      --machine-type e2-micro
+  fi
+else
+  gcloud compute networks vpc-access connectors create "${VPC_CONNECTOR}" \
+    --region "${GCP_REGION}" \
+    --network "${VPC_NETWORK}" \
+    --range "${VPC_CONNECTOR_RANGE}" \
+    --min-instances 2 \
+    --max-instances 3 \
+    --machine-type e2-micro
+fi
 
 echo "Ensuring Cloud SQL instance ${CLOUD_SQL_INSTANCE}"
 gcloud sql instances describe "${CLOUD_SQL_INSTANCE}" >/dev/null 2>&1 || \
 gcloud sql instances create "${CLOUD_SQL_INSTANCE}" \
   --database-version POSTGRES_16 \
+  --edition enterprise \
   --region "${GCP_REGION}" \
   --tier "${CLOUD_SQL_TIER}" \
   --storage-auto-increase \
