@@ -1,0 +1,15 @@
+.venv
+venv
+__pycache__
+.pytest_cache
+.git
+.github
+.gitignore
+infra
+*.md
+tests
+.pytest_cache
+.mypy_cache
+*.db
+.DS_Store
+.env

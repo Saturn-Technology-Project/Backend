@@ -1,0 +1,46 @@
+name: Provision Google Cloud Resources
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION }}
+  GAR_LOCATION: ${{ vars.GAR_LOCATION }}
+  GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY || 'saturn' }}
+  CLOUD_SQL_INSTANCE: ${{ vars.CLOUD_SQL_INSTANCE || 'saturn-pg' }}
+  CLOUD_SQL_DATABASE: ${{ vars.CLOUD_SQL_DATABASE || 'saturn' }}
+  CLOUD_SQL_USER: ${{ vars.CLOUD_SQL_USER || 'saturn' }}
+  CLOUD_SQL_TIER: ${{ vars.CLOUD_SQL_TIER || 'db-g1-small' }}
+  REDIS_INSTANCE: ${{ vars.REDIS_INSTANCE || 'saturn-redis' }}
+  REDIS_TIER: ${{ vars.REDIS_TIER || 'BASIC' }}
+  REDIS_SIZE_GB: ${{ vars.REDIS_SIZE_GB || '1' }}
+  VPC_NETWORK: ${{ vars.VPC_NETWORK || 'default' }}
+  VPC_CONNECTOR: ${{ vars.SERVERLESS_VPC_CONNECTOR || 'saturn-vpc' }}
+  VPC_CONNECTOR_RANGE: ${{ vars.SERVERLESS_VPC_CONNECTOR_RANGE || '10.8.0.0/28' }}
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Bootstrap Google Cloud resources
+        run: bash infra/gcp/bootstrap.sh
+        env:
+          CLOUD_SQL_PASSWORD: ${{ secrets.CLOUD_SQL_PASSWORD }}
