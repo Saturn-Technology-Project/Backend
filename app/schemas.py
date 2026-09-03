@@ -260,10 +260,10 @@ class SubscriptionInvoiceRead(BaseModel):
 
 
 class SubscriptionPaymentRead(BaseModel):
-    brand: str
-    last4: str
-    exp: str
-    demo: bool = True
+    brand: str = ""
+    last4: str = ""
+    exp: str = ""
+    demo: bool = False
 
 
 class SubscriptionRead(BaseModel):
@@ -427,8 +427,8 @@ class AdminOrgSummary(ORMModel):
     agent_count: int
     tool_count: int = 0
     connection_count: int = 0
-    runtime_status: str = "connected"
-    mcp_status: str = "disconnected"
+    runtime_status: str = "disconnected"
+    mcp_status: str = "none"
     last_heartbeat_at: datetime | None = None
 
 
@@ -450,10 +450,10 @@ class AdminOrgUpdateRequest(BaseModel):
 
 
 class AdminHealthCheck(BaseModel):
-    runtime: str = "connected"
-    mcp: str = "disconnected"
-    agents: str = "ok"
-    policies: str = "ok"
+    runtime: str = "disconnected"
+    mcp: str = "none"
+    agents: str = "none"
+    policies: str = "none"
     database: str = "ok"
     score: int = 100
     issues: list[str] = Field(default_factory=list)

@@ -25,7 +25,6 @@ PLAN_CATALOG = {
     "enterprise": {"name": "Saturn Enterprise", "amount": "990.00"},
 }
 ADDON_AMOUNT = "200.00"
-DEMO_PAYMENT = {"brand": "visa", "last4": "4242", "exp": "12/28", "demo": True}
 
 
 def _money(value: Any) -> str:
@@ -150,44 +149,26 @@ def _persist_billing(org: Organization, billing: dict[str, Any]) -> dict[str, An
 def ensure_billing(org: Organization) -> dict[str, Any]:
     billing = copy.deepcopy(org.billing) if isinstance(org.billing, dict) else {}
     changed = False
-    if not isinstance(billing.get("payment"), dict):
-        billing["payment"] = dict(DEMO_PAYMENT)
+    payment = billing.get("payment")
+    if isinstance(payment, dict) and payment.get("demo"):
+        billing["payment"] = {}
+        billing["invoices"] = []
         changed = True
-    invoices = billing.get("invoices")
-    if not isinstance(invoices, list) or not invoices:
-        now = utcnow()
-        current = _month_start(now)
-        previous = _month_start(current - timedelta(days=1))
-        lines = [plan_line(org.plan), *addon_lines(org)]
-        billing["invoices"] = [
-            _invoice_from_lines(period=previous, lines=lines, paid=True),
-            _invoice_from_lines(period=current, lines=lines, paid=False),
-        ]
+    if not isinstance(billing.get("invoices"), list):
+        billing["invoices"] = []
         changed = True
-        invoices = billing["invoices"]
-    has_open = any(
-        isinstance(item, dict) and str(item.get("status") or "") == "open"
-        for item in invoices or []
-    )
-    if not has_open:
-        lines = [plan_line(org.plan), *addon_lines(org)]
-        total = sum((Decimal(line.amount) for line in lines), Decimal("0.00"))
-        if total > 0:
-            issued = [
-                _parse_dt(item.get("issued_at"))
-                for item in invoices or []
-                if isinstance(item, dict)
-            ]
-            latest = max((item for item in issued if item is not None), default=utcnow())
-            billing.setdefault("invoices", []).append(
-                _invoice_from_lines(
-                    period=_next_month(_month_start(latest)), lines=lines, paid=False
-                )
-            )
-            changed = True
     if changed:
         return _persist_billing(org, billing)
     return billing
+
+
+def _payment_on_file(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or raw.get("demo"):
+        return {}
+    last4 = str(raw.get("last4") or "").strip()
+    if not last4:
+        return {}
+    return raw
 
 
 def serialize_subscription(org: Organization) -> SubscriptionRead:
@@ -198,7 +179,7 @@ def serialize_subscription(org: Organization) -> SubscriptionRead:
         if isinstance(item, dict)
     ]
     invoices.sort(key=lambda item: item.issued_at, reverse=True)
-    payment_raw = billing.get("payment") if isinstance(billing.get("payment"), dict) else {}
+    payment_raw = _payment_on_file(billing.get("payment"))
     now = utcnow()
     return SubscriptionRead(
         organization_id=org.id,
@@ -208,10 +189,10 @@ def serialize_subscription(org: Organization) -> SubscriptionRead:
         addons=addon_lines(org),
         renews_on=_next_month(_month_start(now)),
         payment=SubscriptionPaymentRead(
-            brand=str(payment_raw.get("brand") or DEMO_PAYMENT["brand"]),
-            last4=str(payment_raw.get("last4") or DEMO_PAYMENT["last4"]),
-            exp=str(payment_raw.get("exp") or DEMO_PAYMENT["exp"]),
-            demo=bool(payment_raw.get("demo", True)),
+            brand=str(payment_raw.get("brand") or ""),
+            last4=str(payment_raw.get("last4") or ""),
+            exp=str(payment_raw.get("exp") or ""),
+            demo=False,
         ),
         invoices=invoices,
     )
@@ -225,6 +206,8 @@ async def get_subscription(session: AsyncSession, org: Organization) -> Subscrip
 
 async def pay_invoice(session: AsyncSession, org: Organization, invoice_id: str) -> SubscriptionRead:
     billing = ensure_billing(org)
+    if not _payment_on_file(billing.get("payment")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No payment method on file")
     invoices = billing.get("invoices") if isinstance(billing.get("invoices"), list) else []
     target = None
     for item in invoices:

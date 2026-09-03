@@ -41,8 +41,20 @@ async def test_onboard_org_and_manage_members(client):
     assert org["name"] == "Acme"
     assert org["user_count"] == 1
     assert org["agent_count"] == 0
+    assert org["runtime_status"] == "disconnected"
+    assert org["mcp_status"] == "none"
+    assert org["last_heartbeat_at"] is None
+    assert org["health"]["runtime"] == "disconnected"
+    assert org["health"]["mcp"] == "none"
+    assert org["health"]["agents"] == "none"
+    assert org["health"]["policies"] == "none"
+    assert "Connector not connected" in org["health"]["issues"]
     assert org["members"][0]["email"] == "admin@acme.test"
     assert org["members"][0]["role"] == "admin"
+
+    runtimes = (await client.get("/admin/runtimes")).json()
+    assert all(item["id"] != f"runtime_{org['id']}" for item in runtimes)
+    assert all(item["organization_id"] != org["id"] for item in runtimes)
 
     listed = (await client.get("/admin/orgs")).json()
     assert any(item["id"] == org["id"] for item in listed)

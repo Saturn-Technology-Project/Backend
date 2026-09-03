@@ -105,7 +105,6 @@ class ConnectorService:
         raw = "conn_" + secrets.token_urlsafe(32)
         connector.token_hash = hash_token(raw)
         connector.enrollment_token = raw
-        connector.last_seen_at = utcnow()
         await session.flush()
         return enrollment_payload(connector.id, raw)
 

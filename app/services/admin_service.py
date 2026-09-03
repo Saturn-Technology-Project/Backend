@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import HTTPException, status as http_status
 from sqlalchemy import func, select
@@ -8,10 +8,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
-from app.core.ids import new_id, utcnow
-from app.models import Action, Agent, AuditLog, Employee, McpServer, Organization, Payment, Policy, Run, Tool, User
+from app.core.ids import new_id
+from app.models import (
+    Action,
+    Agent,
+    AuditLog,
+    Connector,
+    Employee,
+    McpServer,
+    Organization,
+    Payment,
+    Policy,
+    Run,
+    Tool,
+    User,
+)
 from app.models.enums import ActorType
 from app.services.access import permissions_for_role, resolve_permissions
+from app.services.agent_hub import agent_hub
 from app.services.audit_service import audit_service
 from app.services.auth_service import hash_password
 from app.services.mcp_gateway import mcp_gateway
@@ -21,7 +35,6 @@ settings = get_settings()
 PLANS = {"trial", "starter", "enterprise"}
 ORG_STATUSES = {"active", "trial", "suspended"}
 DEPLOYMENTS = {"cloud", "customer_vpc", "on_prem"}
-HEARTBEAT_STALE = timedelta(minutes=15)
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -30,6 +43,24 @@ def _aware(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+def _parse_heartbeat(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return _aware(value)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return _aware(datetime.fromisoformat(text.replace("Z", "+00:00")))
+
+
+def _live_connector(organization_id: str) -> dict | None:
+    return agent_hub.connector_snapshot(organization_id)
+
+
+def _runtime_connected(organization_id: str) -> bool:
+    live = _live_connector(organization_id)
+    return bool(live and live.get("connected"))
 
 
 class AdminService:
@@ -102,21 +133,20 @@ class AdminService:
             )
             or 0
         )
-        last_run = await session.scalar(
-            select(func.max(Run.updated_at)).where(Run.organization_id == org.id)
-        )
-        last_event = await session.scalar(
-            select(func.max(AuditLog.created_at)).where(AuditLog.organization_id == org.id)
-        )
-        heartbeat = _aware(last_run) or _aware(last_event) or _aware(org.created_at)
+        connector = (
+            await session.execute(select(Connector).where(Connector.organization_id == org.id))
+        ).scalar_one_or_none()
+        heartbeat = _parse_heartbeat(
+            (_live_connector(org.id) or {}).get("last_heartbeat_at")
+        ) or _aware(connector.last_seen_at if connector is not None else None)
         snap = mcp_gateway.snapshot(org.id)
-        mcp_status = snap["status"]
+        mcp_status = snap["status"] if int(snap["total"] or 0) else "none"
         if org.status == "suspended":
             runtime_status = "disconnected"
-        elif heartbeat and utcnow() - heartbeat > HEARTBEAT_STALE and agent_count == 0:
-            runtime_status = "disconnected"
+        elif _runtime_connected(org.id):
+            runtime_status = "connected"
         else:
-            runtime_status = "connected" if org.status != "suspended" else "disconnected"
+            runtime_status = "disconnected"
         return {
             "id": org.id,
             "name": org.name,
@@ -153,32 +183,28 @@ class AdminService:
     async def org_health(self, session: AsyncSession, org: Organization) -> dict:
         await mcp_gateway.connect_organization(session, org.id)
         snap = mcp_gateway.snapshot(org.id)
+        summary = await self.org_snapshot(session, org)
         issues: list[str] = []
-        runtime = "ok" if org.status != "suspended" else "down"
-        mcp = "ok" if snap["status"] == "connected" else ("degraded" if snap["status"] == "degraded" else "down")
-        agents = await session.scalar(
-            select(func.count()).select_from(Agent).where(Agent.organization_id == org.id)
-        )
+        agents = summary["agent_count"]
         policies = await session.scalar(
             select(func.count()).select_from(Policy).where(Policy.organization_id == org.id)
         )
-        if org.status == "suspended":
-            issues.append("Organization is suspended")
-        if snap["status"] != "connected":
-            missing = int(snap["total"]) - int(snap["connected"])
-            if missing:
-                issues.append(f"{missing} MCP tool{'s' if missing != 1 else ''} degraded")
-            elif int(snap["total"]) == 0:
-                issues.append("No MCP connections")
+        mcp = snap["status"] if int(snap["total"] or 0) else "none"
         checks = {
-            "runtime": "connected" if runtime == "ok" else "disconnected",
-            "mcp": snap["status"],
-            "agents": "ok" if int(agents or 0) else "missing",
-            "policies": "ok" if int(policies or 0) else "missing",
+            "runtime": summary["runtime_status"],
+            "mcp": mcp,
+            "agents": "ok" if int(agents or 0) else "none",
+            "policies": "ok" if int(policies or 0) else "none",
             "database": "ok",
         }
-        if checks["agents"] == "missing":
-            issues.append("No agents deployed")
+        if org.status == "suspended":
+            issues.append("Organization is suspended")
+        if checks["runtime"] != "connected":
+            issues.append("Connector not connected")
+        if int(snap["total"] or 0) > 0 and snap["status"] != "connected":
+            missing = int(snap["total"]) - int(snap["connected"])
+            if missing:
+                issues.append(f"{missing} MCP server{'s' if missing != 1 else ''} unreachable")
         score = 100
         if checks["runtime"] != "connected":
             score -= 40
@@ -186,8 +212,6 @@ class AdminService:
             score -= 15
         if checks["mcp"] == "disconnected":
             score -= 25
-        if checks["agents"] != "ok":
-            score -= 10
         return {**checks, "score": max(score, 0), "issues": issues}
 
     async def list_agents(self, session: AsyncSession, organization_id: str) -> list[Agent]:
@@ -329,8 +353,13 @@ class AdminService:
         rows = []
         for snap in await self.list_orgs(session):
             org = await self.get_org(session, snap["id"])
+            live = _live_connector(org.id)
+            heartbeat = _parse_heartbeat((live or {}).get("last_heartbeat_at")) or snap[
+                "last_heartbeat_at"
+            ]
+            runtime_ok = snap["runtime_status"] == "connected"
+            connector_ok = bool(live and live.get("connected"))
             gateway = mcp_gateway.snapshot(org.id)
-            heartbeat = snap["last_heartbeat_at"]
             rows.append(
                 {
                     "organization_id": org.id,
@@ -339,23 +368,23 @@ class AdminService:
                         {
                             "id": "runtime",
                             "name": "Agent Runtime",
-                            "status": snap["runtime_status"],
-                            "last_heartbeat_at": heartbeat,
-                            "version": org.runtime_version,
+                            "status": "connected" if runtime_ok else "disconnected",
+                            "last_heartbeat_at": heartbeat if runtime_ok else None,
+                            "version": org.runtime_version if runtime_ok else None,
                         },
                         {
                             "id": "gateway",
                             "name": "MCP Gateway",
-                            "status": gateway["status"],
-                            "last_heartbeat_at": heartbeat,
+                            "status": gateway["status"] if int(gateway["total"] or 0) else "none",
+                            "last_heartbeat_at": heartbeat if connector_ok else None,
                             "detail": f"{gateway['connected']}/{gateway['total']} servers",
                         },
                         {
                             "id": "connector",
                             "name": "Connector",
-                            "status": "healthy" if gateway["status"] == "connected" else gateway["status"],
-                            "version": org.runtime_version,
-                            "last_heartbeat_at": heartbeat,
+                            "status": "connected" if connector_ok else "disconnected",
+                            "version": org.runtime_version if connector_ok else None,
+                            "last_heartbeat_at": heartbeat if connector_ok else None,
                         },
                     ],
                 }
@@ -369,9 +398,32 @@ class AdminService:
             .group_by(Run.organization_id)
         )
         active_map = {row[0]: int(row[1]) for row in (await session.execute(running)).all()}
+        agents = list(
+            (
+                await session.execute(
+                    select(Agent).where(Agent.runtime_id.isnot(None)).order_by(Agent.created_at.asc())
+                )
+            ).scalars().all()
+        )
+        grouped: dict[tuple[str, str], list[Agent]] = {}
+        for agent in agents:
+            runtime_id = str(agent.runtime_id or "").strip()
+            if not runtime_id:
+                continue
+            grouped.setdefault((agent.organization_id, runtime_id), []).append(agent)
+        orgs = {
+            org.id: org
+            for org in (await session.execute(select(Organization))).scalars().all()
+        }
         rows = []
-        for snap in await self.list_orgs(session):
-            org = await self.get_org(session, snap["id"])
+        for (organization_id, runtime_id), members in grouped.items():
+            org = orgs.get(organization_id)
+            if org is None:
+                continue
+            live = _live_connector(organization_id)
+            member_ids = {agent.id for agent in members}
+            live_ids = set((live or {}).get("agent_ids") or [])
+            connected = bool(live and live.get("connected") and (member_ids & live_ids))
             last_failed = (
                 await session.execute(
                     select(AuditLog)
@@ -383,22 +435,27 @@ class AdminService:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            last_error = last_failed.result if last_failed is not None else None
+            heartbeat = _parse_heartbeat((live or {}).get("last_heartbeat_at"))
+            if heartbeat is None:
+                seen = [_aware(agent.last_seen_at) for agent in members]
+                seen = [item for item in seen if item is not None]
+                heartbeat = max(seen) if seen else None
             rows.append(
                 {
-                    "id": f"runtime_{org.id}",
+                    "id": runtime_id,
                     "organization_id": org.id,
                     "organization_name": org.name,
-                    "status": "healthy" if snap["runtime_status"] == "connected" else "disconnected",
+                    "status": "healthy" if connected else "disconnected",
                     "region": org.runtime_region,
                     "version": org.runtime_version,
                     "deployment_mode": org.deployment_mode,
                     "active_runs": active_map.get(org.id, 0),
-                    "agent_count": snap["agent_count"],
-                    "last_heartbeat_at": snap["last_heartbeat_at"],
-                    "last_error": last_error,
+                    "agent_count": len(members),
+                    "last_heartbeat_at": heartbeat,
+                    "last_error": last_failed.result if last_failed is not None else None,
                 }
             )
+        rows.sort(key=lambda item: (item["organization_name"], item["id"]))
         return rows
 
     async def mcp_summary(self, session: AsyncSession) -> dict:

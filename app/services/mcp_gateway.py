@@ -45,10 +45,14 @@ class McpGateway:
         return links
 
     def _connect_server(self, server: McpServer) -> GatewayLink:
+        from app.services.agent_hub import agent_hub
+
         existing = self._links.get(server.id)
-        if existing is not None and existing.connected and existing.endpoint == server.endpoint:
+        live = agent_hub.connector_snapshot(server.organization_id)
+        connector_up = bool(live and live.get("connected"))
+        connected = connector_up and server.status == "active" and bool(server.endpoint)
+        if existing is not None and existing.connected == connected and existing.endpoint == server.endpoint:
             return existing
-        connected = server.status == "active" and bool(server.endpoint)
         link = GatewayLink(
             server_id=server.id,
             organization_id=server.organization_id,
@@ -56,7 +60,9 @@ class McpGateway:
             endpoint=server.endpoint,
             connected=connected,
             connected_at=utcnow() if connected else None,
-            error=None if connected else "MCP server is not active",
+            error=None if connected else (
+                "Connector not connected" if not connector_up else "MCP server is not active"
+            ),
         )
         self._links[server.id] = link
         return link

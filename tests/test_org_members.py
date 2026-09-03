@@ -17,7 +17,8 @@ async def test_seed_admin_has_org_access(client):
     members = (await client.get("/org/members")).json()
     assert any(member["email"] == "rick@saturn.ai" for member in members)
     org = (await client.get("/org")).json()
-    assert org["mcp_gateway"]["connected"] >= 1
+    assert org["mcp_gateway"]["connected"] == 0
+    assert org["mcp_gateway"]["total"] == 3
     assert any(agent["id"] == "agent_customer_ops" for agent in org["agents"])
 
 
