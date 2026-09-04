@@ -10,7 +10,7 @@ from app.models import Agent, Employee, User
 from app.models.enums import ActorType, AgentStatus, AuditEvent
 from app.schemas import AgentEnrollResponse, AgentUpdate
 from app.services.access import allows
-from app.services.agent_config import merge_settings
+from app.services.agent_config import default_instructions, merge_settings
 from app.services.audit_service import audit_service
 from app.services.auth_service import hash_token
 from app.services.mapping_service import mapping_service
@@ -60,6 +60,7 @@ class AgentService:
             description=description,
             model=model,
             status=AgentStatus.ACTIVE,
+            settings={"instructions": default_instructions(name, description)},
         )
         session.add(agent)
         await session.flush()

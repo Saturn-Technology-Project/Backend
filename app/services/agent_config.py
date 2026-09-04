@@ -34,6 +34,25 @@ ADMIN_KEYS = {
     "max_tool_calls",
     "max_runtime_minutes",
 }
+GENERIC_DUTY = (
+    "Your responsibility is to complete the operator's request using your assigned tools."
+)
+
+
+def default_instructions(name: str = "", description: str = "") -> str:
+    who = (name or "").strip() or "a Saturn agent"
+    duty = (description or "").strip() or GENERIC_DUTY
+    return (
+        f"You are {who}.\n\n"
+        f"{duty}\n\n"
+        "Do not perform actions outside your assigned role.\n\n"
+        "When a tool result is enough, answer in one short sentence."
+    )
+
+
+def resolved_instructions(agent: Agent) -> str:
+    text = str((agent.settings or {}).get("instructions") or "").strip()
+    return text or default_instructions(agent.name, agent.description)
 
 
 def infer_provider(model: str) -> str:
@@ -129,7 +148,7 @@ def public_settings(agent: Agent) -> dict[str, Any]:
     model = str(raw.get("model") or agent.model or "claude-sonnet")
     provider = _one(raw.get("provider"), PROVIDERS, infer_provider(model))
     return {
-        "instructions": str(raw.get("instructions") or ""),
+        "instructions": resolved_instructions(agent),
         "response_style": _one(raw.get("response_style"), RESPONSE_STYLES, "professional"),
         "autonomy": _one(raw.get("autonomy"), AUTONOMY, "execute_when_allowed"),
         "tools": _tools(raw.get("tools")) if "tools" in raw else None,
@@ -166,8 +185,7 @@ def assigned_tool_names(settings: dict[str, Any] | None, catalog: list[str]) -> 
 
 
 def system_prompt(agent: Agent) -> str:
-    text = str((agent.settings or {}).get("instructions") or "").strip()
-    return text or agent.description
+    return resolved_instructions(agent)
 
 
 def command_payload(agent: Agent, wallet: Wallet | None = None) -> dict[str, Any]:

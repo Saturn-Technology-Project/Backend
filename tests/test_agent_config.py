@@ -1,4 +1,10 @@
-from app.services.agent_config import assigned_tool_names, infer_provider, public_settings, system_prompt
+from app.services.agent_config import (
+    assigned_tool_names,
+    default_instructions,
+    infer_provider,
+    public_settings,
+    system_prompt,
+)
 from app.models.agent import Agent
 from tests.test_ws import _login, ws_client
 
@@ -22,7 +28,11 @@ def test_assigned_tools_and_prompt_defaults():
     )
     catalog = ["billing.get_invoice", "billing.refund", "crm.get_customer"]
     assert assigned_tool_names(agent.settings, catalog) == catalog
-    assert system_prompt(agent) == "Fallback prompt"
+    prompt = system_prompt(agent)
+    assert prompt == default_instructions("Billing", "Fallback prompt")
+    assert prompt.startswith("You are Billing.")
+    assert "Fallback prompt" in prompt
+    assert public_settings(agent)["instructions"] == prompt
     assert public_settings(agent)["tools"] is None
     assert public_settings(agent)["provider"] == "anthropic"
     assert public_settings(agent)["base_url"] == "https://api.anthropic.com"

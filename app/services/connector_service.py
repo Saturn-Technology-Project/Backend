@@ -11,6 +11,7 @@ from app.core.ids import new_id, utcnow
 from app.models import Agent, Connector, McpServer, Tool
 from app.models.enums import AgentStatus, ToolStatus, ToolType
 from app.schemas import ConnectorEnrollResponse, ConnectorRead
+from app.services.agent_config import default_instructions
 from app.services.agent_hub import agent_hub
 from app.services.auth_service import hash_token
 from app.services.mapping_service import mapping_service
@@ -156,15 +157,17 @@ class ConnectorService:
             wanted_id = ident if ident.startswith("agent_") else _slug_id("agent", ident)
             agent = await session.get(Agent, wanted_id) or await session.get(Agent, ident)
             if agent is None:
+                label = _display_name(ident, "agent") or name or ident
                 agent = Agent(
                     id=wanted_id,
                     organization_id=connector.organization_id,
-                    name=_display_name(ident, "agent") or name or ident,
+                    name=label,
                     description=role,
                     model="claude-sonnet",
                     status=AgentStatus.ACTIVE,
                     connector_id=connector.id,
                     runtime_id=runtime_id or None,
+                    settings={"instructions": default_instructions(label, role)},
                 )
                 session.add(agent)
                 await session.flush()
