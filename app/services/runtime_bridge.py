@@ -88,6 +88,7 @@ async def runtime_payload(
         "system_prompt": system_prompt(agent),
         "model": settings["model"],
         "provider": settings["provider"],
+        "base_url": settings["base_url"],
         "temperature": settings["temperature"],
         "max_output": settings["max_output"],
         "response_style": settings["response_style"],

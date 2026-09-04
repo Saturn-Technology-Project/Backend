@@ -8,7 +8,13 @@ from app.models import Agent, Wallet
 
 RESPONSE_STYLES = ("concise", "professional", "detailed")
 AUTONOMY = ("suggest_only", "execute_when_allowed", "fully_autonomous")
-PROVIDERS = ("openai", "anthropic", "google")
+PROVIDERS = ("openai", "google", "deepseek", "anthropic", "custom")
+PROVIDER_BASE_URLS = {
+    "openai": "https://api.openai.com",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "anthropic": "https://api.anthropic.com",
+    "deepseek": "https://api.deepseek.com",
+}
 CUSTOMER_KEYS = {
     "instructions",
     "response_style",
@@ -17,6 +23,7 @@ CUSTOMER_KEYS = {
     "knowledge",
     "provider",
     "model",
+    "base_url",
     "temperature",
     "max_output",
 }
@@ -35,7 +42,20 @@ def infer_provider(model: str) -> str:
         return "openai"
     if "gemini" in name or name.startswith("google"):
         return "google"
-    return "anthropic"
+    if "deepseek" in name:
+        return "deepseek"
+    if name.startswith("claude") or "anthropic" in name:
+        return "anthropic"
+    return "custom"
+
+
+def _url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not (text.startswith("https://") or text.startswith("http://")):
+        return ""
+    return text.rstrip("/")
 
 
 def _one(value: Any, allowed: tuple[str, ...], default: str) -> str:
@@ -97,17 +117,26 @@ def _tools(value: Any) -> list[str] | None:
     return names
 
 
+def resolved_base_url(provider: str, override: Any = "") -> str:
+    custom = _url(override)
+    if provider == "custom":
+        return custom
+    return custom or PROVIDER_BASE_URLS.get(provider, "")
+
+
 def public_settings(agent: Agent) -> dict[str, Any]:
     raw = dict(agent.settings or {})
     model = str(raw.get("model") or agent.model or "claude-sonnet")
+    provider = _one(raw.get("provider"), PROVIDERS, infer_provider(model))
     return {
         "instructions": str(raw.get("instructions") or ""),
         "response_style": _one(raw.get("response_style"), RESPONSE_STYLES, "professional"),
         "autonomy": _one(raw.get("autonomy"), AUTONOMY, "execute_when_allowed"),
         "tools": _tools(raw.get("tools")) if "tools" in raw else None,
         "knowledge": _knowledge(raw.get("knowledge")),
-        "provider": _one(raw.get("provider"), PROVIDERS, infer_provider(model)),
+        "provider": provider,
         "model": model,
+        "base_url": resolved_base_url(provider, raw.get("base_url")),
         "temperature": _float(raw.get("temperature"), 0.2, 0, 2),
         "max_output": _int(raw.get("max_output"), 4000, 1, 128_000),
         "environment": str(raw.get("environment") or ""),

@@ -1,6 +1,14 @@
-from app.services.agent_config import assigned_tool_names, public_settings, system_prompt
+from app.services.agent_config import assigned_tool_names, infer_provider, public_settings, system_prompt
 from app.models.agent import Agent
 from tests.test_ws import _login, ws_client
+
+
+def test_infer_provider_for_known_and_custom_models():
+    assert infer_provider("gpt-4o") == "openai"
+    assert infer_provider("gemini-2.5-pro") == "google"
+    assert infer_provider("deepseek-chat") == "deepseek"
+    assert infer_provider("claude-sonnet") == "anthropic"
+    assert infer_provider("llama-3.1-70b") == "custom"
 
 
 def test_assigned_tools_and_prompt_defaults():
@@ -16,6 +24,8 @@ def test_assigned_tools_and_prompt_defaults():
     assert assigned_tool_names(agent.settings, catalog) == catalog
     assert system_prompt(agent) == "Fallback prompt"
     assert public_settings(agent)["tools"] is None
+    assert public_settings(agent)["provider"] == "anthropic"
+    assert public_settings(agent)["base_url"] == "https://api.anthropic.com"
 
     agent.settings = {
         "instructions": "Verify the invoice first.",
@@ -24,6 +34,12 @@ def test_assigned_tools_and_prompt_defaults():
     assert assigned_tool_names(agent.settings, catalog) == ["billing.refund"]
     assert system_prompt(agent) == "Verify the invoice first."
     assert public_settings(agent)["tools"] == ["billing.refund", "missing.tool"]
+
+    agent.model = "llama-3.1-70b"
+    agent.settings = {"provider": "custom", "model": "llama-3.1-70b", "base_url": "https://llm.example.com/v1"}
+    settings = public_settings(agent)
+    assert settings["provider"] == "custom"
+    assert settings["base_url"] == "https://llm.example.com/v1"
 
 
 def test_patch_agent_settings_persists_and_pushes_to_connector():
@@ -37,8 +53,9 @@ def test_patch_agent_settings_persists_and_pushes_to_connector():
                     "response_style": "concise",
                     "autonomy": "suggest_only",
                     "tools": ["billing.get_payment", "billing.refund"],
-                    "provider": "openai",
-                    "model": "gpt-5.6",
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "base_url": "",
                     "temperature": 0.1,
                     "max_output": 2000,
                 }
@@ -46,12 +63,20 @@ def test_patch_agent_settings_persists_and_pushes_to_connector():
         )
         assert updated.status_code == 200, updated.text
         body = updated.json()
-        assert body["model"] == "gpt-5.6"
+        assert body["model"] == "deepseek-chat"
+        assert body["settings"]["provider"] == "deepseek"
         assert body["settings"]["instructions"].startswith("Investigate billing")
         assert body["settings"]["response_style"] == "concise"
         assert body["settings"]["autonomy"] == "suggest_only"
         assert body["settings"]["tools"] == ["billing.get_payment", "billing.refund"]
         assert body["pushed"] is False
+        activity = client.get("/activity").json()
+        prompts = [item for item in activity if item["event"] == "prompt_updated"]
+        assert prompts
+        assert prompts[-1]["result"] == body["name"]
+        assert prompts[-1]["payload"]["agent_id"] == "agent_customer_ops"
+        assert prompts[-1]["payload"]["prompt"].startswith("Investigate billing")
+        assert prompts[-1]["actor_type"] == "user"
 
         enroll = client.post("/connectors/enroll").json()
         with client.websocket_connect(
@@ -71,7 +96,8 @@ def test_patch_agent_settings_persists_and_pushes_to_connector():
             replayed = connector_ws.receive_json()
             assert replayed["type"] == "command"
             assert replayed["command"] == "config.update"
-            assert replayed["payload"]["model"] == "gpt-5.6"
+            assert replayed["payload"]["model"] == "deepseek-chat"
+            assert replayed["payload"]["provider"] == "deepseek"
 
             live = client.patch(
                 "/agents/agent_customer_ops",

@@ -123,6 +123,10 @@ class AuthService:
                 existing.is_platform_admin = True
                 await session.flush()
             return
+        email = (settings.seed_user_email or "").strip().lower()
+        password = settings.seed_user_password or ""
+        if not email or not password:
+            return
         org = await session.get(Organization, settings.default_org_id)
         if org is None:
             return
@@ -130,9 +134,9 @@ class AuthService:
             User(
                 id=settings.default_actor_id,
                 organization_id=org.id,
-                email=settings.seed_user_email.strip().lower(),
-                name=settings.seed_user_name,
-                password_hash=hash_password(settings.seed_user_password),
+                email=email,
+                name=(settings.seed_user_name or "Admin").strip() or "Admin",
+                password_hash=hash_password(password),
                 status="active",
                 is_platform_admin=True,
             )

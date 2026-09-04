@@ -25,19 +25,19 @@ API-only from this directory:
 docker compose up --build
 ```
 
-The API container still talks to Postgres on the internal Docker network. Existing demo catalog rows are removed by migration `009_remove_demo_catalog`.
+The API container still talks to Postgres on the internal Docker network.
 
 ## Auth
+
+Set `SEED_USER_EMAIL` and `SEED_USER_PASSWORD` in `.env` (see `.env.example`). Those values bootstrap the first platform admin. Do not commit them.
 
 ```bash
 TOKEN=$(curl -s -X POST localhost:8000/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"rick@saturn.ai","password":"saturn"}' | python -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+  -d "{\"email\":\"$SEED_USER_EMAIL\",\"password\":\"$SEED_USER_PASSWORD\"}" | python -c 'import sys,json; print(json.load(sys.stdin)["token"])')
 
 curl -s localhost:8000/auth/me -H "Authorization: Bearer $TOKEN"
 ```
-
-Bootstrap operator: `rick@saturn.ai` / `saturn` (org admin and platform admin). Override with `SEED_USER_EMAIL` / `SEED_USER_PASSWORD`.
 
 ## Org members
 
@@ -76,10 +76,10 @@ CONNECTOR_TOKEN=conn_...
 CONNECTOR_ID=conn_...
 ```
 
-Or enroll a running Connector:
+Or enroll a running Connector (`CONNECTOR_URL` is the Connector HTTP API on the host where it runs):
 
 ```bash
-curl -s -X PUT localhost:4400/enrollment \
+curl -s -X PUT "$CONNECTOR_URL/enrollment" \
   -H "Content-Type: application/json" \
   -d '{"token":"conn_...","cloudWs":"ws://host.docker.internal:8000/ws/connectors"}'
 ```
@@ -102,7 +102,7 @@ Per-agent `/ws/agents` enrollment still works for a single runtime without a Con
 
 ## Platform admin
 
-The bootstrap operator is a platform admin (`is_platform_admin`). The Admin Dashboard uses these endpoints to onboard tenants and inspect the whole fleet:
+The bootstrap user is a platform admin (`is_platform_admin`). The Admin Dashboard uses these endpoints to onboard tenants and inspect the whole fleet:
 
 ```bash
 curl -s localhost:8000/admin/stats -H "Authorization: Bearer $TOKEN"

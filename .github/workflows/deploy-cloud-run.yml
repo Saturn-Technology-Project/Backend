@@ -61,6 +61,7 @@ jobs:
           SEED_USER_NAME: ${{ vars.SEED_USER_NAME }}
           SEED_USER_PASSWORD: ${{ secrets.SEED_USER_PASSWORD }}
           SESSION_TTL_DAYS: ${{ vars.SESSION_TTL_DAYS }}
+          CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
         run: |
           python3 - <<'PY'
           import os
@@ -72,10 +73,13 @@ jobs:
               "DEFAULT_ORG_ID": os.environ.get("DEFAULT_ORG_ID") or "org_saturn",
               "DEFAULT_ACTOR_ID": os.environ.get("DEFAULT_ACTOR_ID") or "user_operator",
               "SEED_USER_EMAIL": os.environ["SEED_USER_EMAIL"],
-              "SEED_USER_NAME": os.environ.get("SEED_USER_NAME") or "Rick",
+              "SEED_USER_NAME": os.environ.get("SEED_USER_NAME") or "Admin",
               "SEED_USER_PASSWORD": os.environ["SEED_USER_PASSWORD"],
               "SESSION_TTL_DAYS": os.environ.get("SESSION_TTL_DAYS") or "7",
           }
+          cors = (os.environ.get("CORS_ORIGINS") or "").strip()
+          if cors:
+              values["CORS_ORIGINS"] = cors
           Path("cloud-run.env.yaml").write_text(
               "".join(f'{key}: "{value}"\n' for key, value in values.items()),
               encoding="utf-8",

@@ -125,6 +125,7 @@ Backend only:
 | `REDIS_URL` | secret |
 | `SEED_USER_EMAIL` | secret |
 | `SEED_USER_PASSWORD` | secret |
+| `CORS_ORIGINS` | variable, optional, comma-separated browser origins if the API is called cross-origin |
 
 Frontend / Dashboard:
 

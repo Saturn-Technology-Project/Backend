@@ -7,10 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ids import new_id, utcnow
 from app.models import Agent, Employee, User
-from app.models.enums import AgentStatus
+from app.models.enums import ActorType, AgentStatus, AuditEvent
 from app.schemas import AgentEnrollResponse, AgentUpdate
 from app.services.access import allows
 from app.services.agent_config import merge_settings
+from app.services.audit_service import audit_service
 from app.services.auth_service import hash_token
 from app.services.mapping_service import mapping_service
 from app.services.wallet_service import wallet_service
@@ -82,6 +83,7 @@ class AgentService:
             or body.per_tx_limit is not None
         ) and not admin:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
+        previous_prompt = str((agent.settings or {}).get("instructions") or "")
         if body.name is not None:
             name = body.name.strip()
             if name:
@@ -95,6 +97,21 @@ class AgentService:
             model = str((agent.settings or {}).get("model") or "").strip()
             if model:
                 agent.model = model
+            next_prompt = str((agent.settings or {}).get("instructions") or "")
+            if "instructions" in body.settings and next_prompt != previous_prompt:
+                await audit_service.log(
+                    session,
+                    event=AuditEvent.PROMPT_UPDATED,
+                    actor_type=ActorType.USER,
+                    actor_id=user.id,
+                    organization_id=user.organization_id,
+                    result=agent.name,
+                    payload={
+                        "agent_id": agent.id,
+                        "previous": previous_prompt,
+                        "prompt": next_prompt,
+                    },
+                )
         if body.model is not None:
             agent.model = body.model
             settings = dict(agent.settings or {})

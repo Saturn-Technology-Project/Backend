@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""Dial the Saturn control plane as an Agent runtime.
+"""Development helper: dial `/ws/agents` as a single runtime.
 
-Keeps a logical connection: if the WebSocket drops, reconnect with
-exponential backoff and jitter. Heartbeats keep the session alive.
-Command ids are remembered so a replay after reconnect is not executed twice.
-
-Prefer the TypeScript Saturn Agent Runtime for MCP execution:
+Not Saturn Connector. Prefer Connector enrollment for production.
 
     SATURN_CLOUD_WS=ws://localhost:8000/ws/agents \\
     SATURN_AGENT_ID=<agent_id> \\

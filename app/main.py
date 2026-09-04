@@ -1,7 +1,10 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import (
     activity,
@@ -26,6 +29,15 @@ from app.db.seed import seed_if_empty
 from app.models import *  # noqa: F401,F403
 
 settings = get_settings()
+
+
+def _cors_origins() -> list[str]:
+    raw = (settings.cors_origins or "").strip()
+    if not raw:
+        return ["http://localhost:3000", "http://localhost:3001"]
+    if raw == "*":
+        return ["*"]
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def _sqlite() -> bool:
@@ -56,13 +68,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_origins = _cors_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_origins,
+    allow_credentials="*" not in _origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(_request: Request, exc: Exception):
+    if isinstance(exc, (HTTPException, StarletteHTTPException)):
+        raise exc
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
 
 app.include_router(auth.router)
 app.include_router(admin.router)
@@ -88,13 +109,18 @@ async def root():
 
 @app.get("/health")
 async def health():
-    operational = "operational"
+    db_status = "down"
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+        db_status = "operational"
+    except Exception:
+        db_status = "down"
+    ok = db_status == "operational"
     return {
-        "status": "ok",
+        "status": "ok" if ok else "error",
         "services": [
-            {"id": "runtime", "name": "Agent Runtime", "status": operational},
-            {"id": "gateway", "name": "MCP Gateway", "status": operational},
-            {"id": "policy", "name": "Policy Engine", "status": operational},
-            {"id": "wallet", "name": "Wallet", "status": operational},
+            {"id": "api", "name": "API", "status": "operational"},
+            {"id": "database", "name": "Database", "status": db_status},
         ],
     }

@@ -89,16 +89,23 @@ class AdminService:
         except Exception:
             db_status = "down"
         mcp_errors = 0
+        runtime_connected = False
         for org in (await session.execute(select(Organization))).scalars():
             snap = mcp_gateway.snapshot(org.id)
             mcp_errors += max(0, int(snap["total"]) - int(snap["connected"]))
+            if _runtime_connected(org.id):
+                runtime_connected = True
         mcp_status = "degraded" if mcp_errors else "operational"
         events = await self.list_events(session, limit=12)
         return {
             "stats": stats,
             "services": [
                 {"id": "api", "name": "API", "status": "operational"},
-                {"id": "runtime", "name": "Agent Runtime", "status": "operational"},
+                {
+                    "id": "runtime",
+                    "name": "Agent Runtime",
+                    "status": "operational" if runtime_connected else "down",
+                },
                 {"id": "gateway", "name": "MCP Gateway", "status": mcp_status},
                 {"id": "database", "name": "Database", "status": db_status},
             ],

@@ -12,12 +12,13 @@ class Settings(BaseSettings):
     default_actor_id: str = "user_operator"
     skip_db_bootstrap: bool = False
     session_ttl_days: int = 7
-    seed_user_email: str = "rick@saturn.ai"
-    seed_user_name: str = "Rick"
-    seed_user_password: str = "saturn"
+    seed_user_email: str = ""
+    seed_user_name: str = "Admin"
+    seed_user_password: str = ""
+    cors_origins: str = "http://localhost:3000,http://localhost:3001"
     x402_network: str = "base-sepolia"
     x402_asset_address: str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
-    x402_pay_to: str = "0x00000000000000000000000000000000000C0DE"
+    x402_pay_to: str = ""
     in_process_runtime: bool = False
 
 
