@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import public_ws_url
 from app.core.ids import new_id, utcnow
 from app.models import Agent, Connector, McpServer, Tool
 from app.models.enums import AgentStatus, ToolStatus, ToolType
@@ -22,7 +23,9 @@ def enrollment_payload(connector_id: str, token: str) -> ConnectorEnrollResponse
     return ConnectorEnrollResponse(
         connector_id=connector_id,
         token=token,
-        ws_url=f"/ws/connectors?connector_id={connector_id}&token={token}",
+        ws_url=public_ws_url(
+            f"/ws/connectors?connector_id={connector_id}&token={token}"
+        ),
     )
 
 

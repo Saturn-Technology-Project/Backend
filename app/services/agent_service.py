@@ -5,6 +5,7 @@ import secrets
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import public_ws_url
 from app.core.ids import new_id, utcnow
 from app.models import Agent, Employee, User
 from app.models.enums import ActorType, AgentStatus, AuditEvent
@@ -21,7 +22,7 @@ def enrollment_payload(agent_id: str, token: str) -> AgentEnrollResponse:
     return AgentEnrollResponse(
         agent_id=agent_id,
         token=token,
-        ws_url=f"/ws/agents?agent_id={agent_id}&token={token}",
+        ws_url=public_ws_url(f"/ws/agents?agent_id={agent_id}&token={token}"),
     )
 
 

@@ -112,7 +112,7 @@ Shared by all three repos:
 | `GCP_REGION` | variable | all |
 | `GAR_LOCATION` | variable | all |
 | `GAR_REPOSITORY` | variable | all |
-| `BACKEND_PUBLIC_URL` | variable | frontend, dashboard |
+| `BACKEND_PUBLIC_URL` | variable | frontend, dashboard, backend (`PUBLIC_WS_URL`) |
 
 Backend only:
 
@@ -134,7 +134,7 @@ Frontend / Dashboard:
 | `FRONTEND_CLOUD_RUN_SERVICE` | variable, e.g. `saturn-frontend` |
 | `DASHBOARD_CLOUD_RUN_SERVICE` | variable, e.g. `saturn-dashboard` |
 
-`BACKEND_PUBLIC_URL` is the Cloud Run URL of the API, for example `https://saturn-backend-xxxxx.run.app`. Frontend and Dashboard bake this into the `/saturn-api` rewrite at image build time.
+`BACKEND_PUBLIC_URL` is the Cloud Run URL of the API, for example `https://saturn-backend-xxxxx.run.app`. Frontend and Dashboard bake this into the `/saturn-api` HTTP rewrite. Backend copies it to `PUBLIC_WS_URL` so enroll returns `wss://saturn-backend-…/ws/connectors`. Connector must dial that origin, not the console.
 
 ## Deploy
 
