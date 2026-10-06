@@ -10,6 +10,7 @@ from app.models.associations import (
 from app.models.audit import AuditLog
 from app.models.connector import Connector
 from app.models.conversation import ConversationMessage
+from app.models.credential import OrgCredential
 from app.models.employee import Employee
 from app.models.invitation import Invitation
 from app.models.mcp_server import McpServer
@@ -30,6 +31,7 @@ __all__ = [
     "AuthSession",
     "Connector",
     "ConversationMessage",
+    "OrgCredential",
     "Employee",
     "Invitation",
     "McpServer",

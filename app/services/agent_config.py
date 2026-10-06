@@ -26,6 +26,7 @@ CUSTOMER_KEYS = {
     "base_url",
     "temperature",
     "max_output",
+    "model_connection_id",
 }
 ADMIN_KEYS = {
     "environment",
@@ -158,6 +159,7 @@ def public_settings(agent: Agent) -> dict[str, Any]:
         "base_url": resolved_base_url(provider, raw.get("base_url")),
         "temperature": _float(raw.get("temperature"), 0.2, 0, 2),
         "max_output": _int(raw.get("max_output"), 4000, 1, 128_000),
+        "model_connection_id": str(raw.get("model_connection_id") or ""),
         "environment": str(raw.get("environment") or ""),
         "region": str(raw.get("region") or ""),
         "max_concurrent_runs": _int(raw.get("max_concurrent_runs"), 5, 1, 1_000),

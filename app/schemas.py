@@ -640,3 +640,34 @@ class X402SettleResponse(BaseModel):
     transaction: str | None = None
     network: str | None = None
     errorReason: str | None = None
+
+
+class CredentialRead(BaseModel):
+    id: str
+    kind: str
+    name: str
+    provider: str = ""
+    model: str = ""
+    base_url: str = ""
+    secret_name: str = ""
+    broker_id: str = ""
+    allowed_paths: list[str] = Field(default_factory=list)
+    has_secret: bool = False
+
+
+class CredentialSecretRead(BaseModel):
+    id: str
+    secret: str = ""
+
+
+class CredentialWrite(BaseModel):
+    id: str | None = None
+    kind: str
+    name: str = ""
+    provider: str = ""
+    model: str = ""
+    base_url: str = ""
+    secret_name: str = ""
+    broker_id: str = ""
+    allowed_paths: list[str] = Field(default_factory=list)
+    secret: str | None = None
