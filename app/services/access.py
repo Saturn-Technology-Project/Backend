@@ -89,6 +89,20 @@ def is_org_admin(permissions: Any | None) -> bool:
     return allows(permissions, "team", "write")
 
 
+def may_edit_agent(employee: Any, agent_id: str) -> bool:
+    if employee is None:
+        return False
+    permissions = getattr(employee, "permissions", None)
+    if allows(permissions, "team", "write"):
+        return True
+    if not allows(permissions, "agents", "write"):
+        return False
+    edits = getattr(employee, "agent_edit_ids", None)
+    if edits is None:
+        return True
+    return agent_id in set(edits)
+
+
 def permission_catalog() -> dict[str, Any]:
     return {
         "resources": [

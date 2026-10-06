@@ -10,6 +10,7 @@ from app.models.organization import Organization
 from app.schemas import (
     InviteCreateResponse,
     InviteRead,
+    MeUpdateRequest,
     MemberInviteRequest,
     MemberRead,
     MemberUpdateRequest,
@@ -54,6 +55,7 @@ def serialize_member(employee: Employee) -> MemberRead:
         status=employee.status,
         permissions=normalize_permissions(employee.permissions),
         agent_ids=[agent.id for agent in employee.agents],
+        agent_edit_ids=None if employee.agent_edit_ids is None else list(employee.agent_edit_ids),
         mcp_server_ids=[server.id for server in employee.mcp_servers],
         created_at=employee.created_at,
     )
@@ -108,6 +110,24 @@ async def get_org(session: SessionDep, user: CurrentUser):
     )
 
 
+@router.patch("/me", response_model=MemberRead)
+async def update_me(body: MeUpdateRequest, session: SessionDep, user: CurrentUser):
+    employee = await mapping_service.require_employee(session, user)
+    updated = await member_service.update_member(
+        session,
+        user,
+        employee.id,
+        name=body.name,
+        title=body.title,
+        role=None,
+        permissions=None,
+        status=None,
+        agent_ids=None,
+        mcp_server_ids=None,
+    )
+    return serialize_member(updated)
+
+
 @router.get("/users", response_model=list[OrgUserRead])
 async def list_org_users(session: SessionDep, user: CurrentUser, _access: TeamRead):
     members = await member_service.list_members(session, user.organization_id)
@@ -146,6 +166,7 @@ async def update_member(
         permissions=body.permissions.model_dump() if body.permissions is not None else None,
         status=body.status,
         agent_ids=body.agent_ids,
+        agent_edit_ids=body.agent_edit_ids,
         mcp_server_ids=body.mcp_server_ids,
     )
     return serialize_member(employee)

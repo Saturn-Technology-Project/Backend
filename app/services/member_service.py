@@ -263,6 +263,7 @@ class MemberService:
         status: str | None,
         agent_ids: list[str] | None,
         mcp_server_ids: list[str] | None,
+        agent_edit_ids: list[str] | None = None,
         organization_id: str | None = None,
     ) -> Employee:
         from fastapi import status as http_status
@@ -314,6 +315,9 @@ class MemberService:
             agent_ids=agent_ids,
             mcp_server_ids=mcp_server_ids,
         )
+        if agent_edit_ids is not None:
+            assigned = {agent.id for agent in employee.agents}
+            employee.agent_edit_ids = [agent_id for agent_id in agent_edit_ids if agent_id in assigned]
         await session.flush()
         loaded = await self.load_member(session, employee.id)
         assert loaded is not None

@@ -215,6 +215,26 @@ class ApprovalRead(ORMModel):
     resolved_at: datetime | None = None
 
 
+class ConversationMessageWrite(BaseModel):
+    input: str
+    output: str = ""
+    status: str = "running"
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+
+
+class ConversationMessageRead(BaseModel):
+    id: str
+    agent_id: str
+    input: str
+    output: str = ""
+    status: str
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class ApprovalDecisionRead(BaseModel):
     status: str
     action: str
@@ -305,6 +325,7 @@ class UserRead(ORMModel):
     users: list[OrgUserRead] = Field(default_factory=list)
     assigned_agent_ids: list[str] = Field(default_factory=list)
     assigned_mcp_server_ids: list[str] = Field(default_factory=list)
+    agent_edit_ids: list[str] | None = None
     mcp_gateway: McpGatewayRead | None = None
     permissions: dict[str, str] = Field(default_factory=dict)
     role: str | None = None
@@ -334,7 +355,13 @@ class MemberUpdateRequest(BaseModel):
     permissions: AccessPermissions | None = None
     status: str | None = None
     agent_ids: list[str] | None = None
+    agent_edit_ids: list[str] | None = None
     mcp_server_ids: list[str] | None = None
+
+
+class MeUpdateRequest(BaseModel):
+    name: str | None = None
+    title: str | None = None
 
 
 class MemberPasswordResetRequest(BaseModel):
@@ -351,6 +378,7 @@ class MemberRead(ORMModel):
     status: str
     permissions: dict[str, str]
     agent_ids: list[str] = Field(default_factory=list)
+    agent_edit_ids: list[str] | None = None
     mcp_server_ids: list[str] = Field(default_factory=list)
     created_at: datetime
 

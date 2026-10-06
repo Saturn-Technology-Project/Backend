@@ -7,12 +7,22 @@ from app.api.deps import (
     AgentsWrite,
     CurrentUser,
     SessionDep,
+    TeamWrite,
 )
-from app.schemas import AgentCreate, AgentEnrollResponse, AgentRead, AgentUpdate
+from app.schemas import (
+    AgentCreate,
+    AgentEnrollResponse,
+    AgentRead,
+    AgentUpdate,
+    ConversationMessageRead,
+    ConversationMessageWrite,
+)
 from app.services.agent_config import command_payload, public_settings
 from app.services.agent_hub import agent_hub
 from app.services.agent_service import agent_service
+from app.services.conversation_service import conversation_service
 from app.services.mapping_service import mapping_service
+from app.services.removal_service import removal_service
 from app.services.wallet_service import wallet_service
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -43,6 +53,61 @@ async def list_agents(session: SessionDep, user: CurrentUser, _access: AgentsRea
     await mapping_service.bind_workspace(session, user)
     agents = await agent_service.list_agents(session, user)
     return [serialize_agent(agent) for agent in agents]
+
+
+def serialize_message(message) -> ConversationMessageRead:
+    return ConversationMessageRead(
+        id=message.id,
+        agent_id=message.agent_id,
+        input=message.input,
+        output=message.output or "",
+        status=message.status,
+        actions=list(message.actions or []),
+        error=message.error,
+        created_at=message.created_at,
+        updated_at=message.updated_at,
+    )
+
+
+@router.get("/{agent_id}/messages", response_model=list[ConversationMessageRead])
+async def list_messages(agent_id: str, session: SessionDep, user: CurrentUser, _access: AgentsRead):
+    messages = await conversation_service.list_messages(session, user, agent_id)
+    return [serialize_message(message) for message in messages]
+
+
+@router.post("/{agent_id}/messages", response_model=ConversationMessageRead, status_code=201)
+async def create_message(
+    agent_id: str,
+    body: ConversationMessageWrite,
+    session: SessionDep,
+    user: CurrentUser,
+    _access: AgentsRead,
+):
+    message = await conversation_service.create_message(session, user, agent_id, body.input)
+    return serialize_message(message)
+
+
+@router.put("/{agent_id}/messages/{message_id}", response_model=ConversationMessageRead)
+async def upsert_message(
+    agent_id: str,
+    message_id: str,
+    body: ConversationMessageWrite,
+    session: SessionDep,
+    user: CurrentUser,
+    _access: AgentsRead,
+):
+    message = await conversation_service.upsert_message(
+        session,
+        user,
+        agent_id,
+        message_id,
+        text=body.input,
+        output=body.output,
+        run_status=body.status,
+        actions=body.actions,
+        error=body.error,
+    )
+    return serialize_message(message)
 
 
 @router.get("/{agent_id}", response_model=AgentRead)
@@ -78,6 +143,11 @@ async def update_agent(
         agent.id, "config.update", command_payload(agent, wallet)
     )
     return serialize_agent(agent, pushed=pushed)
+
+
+@router.delete("/{agent_id}", status_code=204)
+async def delete_agent(agent_id: str, session: SessionDep, user: CurrentUser, _access: TeamWrite):
+    await removal_service.delete_agent(session, user, agent_id)
 
 
 @router.get("/{agent_id}/enrollment", response_model=AgentEnrollResponse)

@@ -208,6 +208,7 @@ async def update_org_member(
         permissions=body.permissions.model_dump() if body.permissions is not None else None,
         status=body.status,
         agent_ids=body.agent_ids,
+        agent_edit_ids=body.agent_edit_ids,
         mcp_server_ids=body.mcp_server_ids,
         organization_id=organization_id,
     )

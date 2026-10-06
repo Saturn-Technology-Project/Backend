@@ -10,7 +10,7 @@ from app.core.ids import new_id, utcnow
 from app.models import Agent, Employee, User
 from app.models.enums import ActorType, AgentStatus, AuditEvent
 from app.schemas import AgentEnrollResponse, AgentUpdate
-from app.services.access import allows
+from app.services.access import allows, may_edit_agent
 from app.services.agent_config import default_instructions, merge_settings
 from app.services.audit_service import audit_service
 from app.services.auth_service import hash_token
@@ -78,6 +78,8 @@ class AgentService:
         body: AgentUpdate,
     ) -> Agent:
         agent = await mapping_service.require_org_agent(session, user, agent_id)
+        if not may_edit_agent(employee, agent.id):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot modify this agent")
         admin = allows(employee.permissions, "team", "write")
         if (
             body.runtime_id is not None

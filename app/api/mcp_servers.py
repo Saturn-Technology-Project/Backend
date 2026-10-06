@@ -1,9 +1,10 @@
 from fastapi import APIRouter
 
-from app.api.deps import AgentsRead, CurrentUser, SessionDep
+from app.api.deps import AgentsRead, CurrentUser, SessionDep, TeamWrite
 from app.models import McpServer
 from app.schemas import McpServerRead
 from app.services.mapping_service import mapping_service
+from app.services.removal_service import removal_service
 from app.services.mcp_gateway import mcp_gateway
 
 router = APIRouter(prefix="/mcp-servers", tags=["mcp-servers"])
@@ -29,3 +30,8 @@ async def list_mcp_servers(session: SessionDep, user: CurrentUser, _access: Agen
     await mapping_service.bind_workspace(session, user)
     servers = await mapping_service.list_mcp_servers(session, user)
     return [serialize_mcp_server(server) for server in servers]
+
+
+@router.delete("/{server_id}", status_code=204)
+async def delete_mcp_server(server_id: str, session: SessionDep, user: CurrentUser, _access: TeamWrite):
+    await removal_service.delete_mcp_server(session, user, server_id)

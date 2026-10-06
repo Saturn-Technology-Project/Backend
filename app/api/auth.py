@@ -48,6 +48,7 @@ async def serialize_user(session, user: User) -> UserRead:
     permissions = empty_permissions()
     assigned_agent_ids: list[str] = []
     assigned_mcp_ids: list[str] = []
+    agent_edit_ids: list[str] | None = None
     users: list[OrgUserRead] = []
     if employee is not None:
         permissions = normalize_permissions(employee.permissions)
@@ -61,6 +62,7 @@ async def serialize_user(session, user: User) -> UserRead:
         )
         assigned_agent_ids = [agent.id for agent in employee.agents]
         assigned_mcp_ids = [server.id for server in employee.mcp_servers]
+        agent_edit_ids = None if employee.agent_edit_ids is None else list(employee.agent_edit_ids)
         if allows(permissions, "team", "read"):
             members = await member_service.list_members(session, user.organization_id)
             users = [serialize_org_user(item) for item in members]
@@ -88,6 +90,7 @@ async def serialize_user(session, user: User) -> UserRead:
         users=users,
         assigned_agent_ids=assigned_agent_ids,
         assigned_mcp_server_ids=assigned_mcp_ids,
+        agent_edit_ids=agent_edit_ids,
         mcp_gateway=McpGatewayRead.model_validate(snapshot),
         role=role,
         permissions=permissions,

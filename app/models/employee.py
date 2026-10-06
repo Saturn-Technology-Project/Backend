@@ -22,6 +22,7 @@ class Employee(Base):
     title: Mapped[str] = mapped_column(String(255), default="Operator", nullable=False)
     role: Mapped[str] = mapped_column(String(32), default="operator", nullable=False)
     permissions: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    agent_edit_ids: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
