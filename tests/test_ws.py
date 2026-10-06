@@ -378,6 +378,51 @@ def test_connector_enroll_registers_agents_mcp_and_routes_commands():
                 assert ack_cmd["run"]["agent_id"] == "agent_billing"
 
 
+def test_pair_session_evaluates_org_policy():
+    from urllib.parse import urlparse
+
+    with ws_client() as client:
+        denied = client.post("/session/pair")
+        assert denied.status_code == 401
+        user_token = _login(client)
+        paired = client.post("/session/pair")
+        assert paired.status_code == 200, paired.text
+        body = paired.json()
+        assert body["session_id"].startswith("conn_")
+        assert body["token"].startswith("conn_")
+        assert body["token"] != user_token
+        assert body["organization_id"]
+        parsed = urlparse(body["ws_url"])
+        assert parsed.scheme == "ws"
+        path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        with client.websocket_connect(path) as socket:
+            assert socket.receive_json()["type"] == "connection.ack"
+            assert socket.receive_json()["type"] == "connector.registered"
+            socket.send_json(
+                {
+                    "type": "policy.evaluate",
+                    "request_id": "req_refund",
+                    "agent_id": "agent_customer_ops",
+                    "tool_id": "billing.refund",
+                    "arguments": {"amount": 5000},
+                }
+            )
+            decision = socket.receive_json()
+            assert decision["type"] == "policy.decision"
+            assert decision["request_id"] == "req_refund"
+            assert decision["status"] == "deny"
+            socket.send_json(
+                {
+                    "type": "policy.evaluate",
+                    "request_id": "req_small",
+                    "agent_id": "agent_customer_ops",
+                    "tool_id": "billing.refund",
+                    "arguments": {"amount": 10},
+                }
+            )
+            assert socket.receive_json()["status"] == "allow"
+
+
 def test_connector_socket_rejects_bad_token():
     with ws_client() as client:
         _login(client)

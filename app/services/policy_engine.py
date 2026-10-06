@@ -271,6 +271,23 @@ class PolicyEngine:
         tool: Tool,
         arguments: dict[str, Any],
     ) -> EvaluationResult:
+        return await self.evaluate_named(
+            session,
+            organization_id=organization_id,
+            agent=agent,
+            tool_name=tool.name,
+            arguments=arguments,
+        )
+
+    async def evaluate_named(
+        self,
+        session: AsyncSession,
+        *,
+        organization_id: str,
+        agent: Agent,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> EvaluationResult:
         policies = await self._policies(session, organization_id)
         rules: list[PolicyRule] = []
         applicable: dict[str, Policy] = {}
@@ -279,7 +296,7 @@ class PolicyEngine:
                 continue
             applicable[policy.id] = policy
             for rule in policy.rules:
-                if rule.tool == tool.name:
+                if rule.tool == tool_name:
                     rules.append(rule)
         result = evaluate_rules(rules, arguments)
         if result.policy_id and result.policy_id in applicable:

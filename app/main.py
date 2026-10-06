@@ -18,6 +18,7 @@ from app.api import (
     payments,
     policies,
     runs,
+    session,
     tools,
     wallets,
     ws,
@@ -90,6 +91,7 @@ app.include_router(admin.router)
 app.include_router(org.router)
 app.include_router(agents.router)
 app.include_router(connectors.router)
+app.include_router(session.router)
 app.include_router(mcp_servers.router)
 app.include_router(wallets.router)
 app.include_router(runs.router)

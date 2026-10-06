@@ -10,11 +10,14 @@ from app.api.deps import SessionDep
 from app.api.runs import serialize_run
 from app.core.ids import new_id, utcnow
 from app.models import Agent, User
+from app.models.enums import ActorType, AuditEvent
 from app.services.access import allows
 from app.services.agent_hub import agent_hub
+from app.services.audit_service import audit_service
 from app.services.auth_service import auth_service, hash_token
 from app.services.connector_service import connector_service
 from app.services.mapping_service import mapping_service
+from app.services.policy_engine import policy_engine
 from app.services.runtime_bridge import apply_runtime_result
 from app.services.run_service import run_service
 
@@ -334,15 +337,83 @@ async def _handle_connector_message(session, connector, websocket, message: dict
         await websocket.send_json({"type": "pong"})
         return
 
+    if kind == "policy.evaluate":
+        await _evaluate_policy(session, connector, websocket, message)
+        await session.commit()
+        return
+
     agent_id = str(message.get("agent_id") or "")
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
     if not agent_id:
         agent_id = str(payload.get("agent_id") or "")
     agent = await session.get(Agent, agent_id) if agent_id else None
+    if agent is None:
+        run_id = str(message.get("run_id") or payload.get("run_id") or "")
+        if run_id:
+            try:
+                run = await run_service.load_run(session, run_id)
+            except HTTPException:
+                run = None
+            if run is not None:
+                agent = await session.get(Agent, run.agent_id)
     if agent is None or agent.organization_id != connector.organization_id:
         return
     await _handle_agent_message(
         session, agent, message, runtime_id=runtime_id or agent.runtime_id or ""
+    )
+
+
+async def _evaluate_policy(session, connector, websocket, message: dict[str, Any]) -> None:
+    request_id = str(message.get("request_id") or "")
+    agent_id = str(message.get("agent_id") or "")
+    tool_name = str(message.get("tool_id") or message.get("tool") or "")
+    arguments = message.get("arguments") if isinstance(message.get("arguments"), dict) else {}
+    agent = await session.get(Agent, agent_id) if agent_id else None
+    status = "deny"
+    reason = "Unknown agent"
+    policy_id = None
+    if agent is not None and agent.organization_id == connector.organization_id and tool_name:
+        result = await policy_engine.evaluate_named(
+            session,
+            organization_id=connector.organization_id,
+            agent=agent,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        status = result.decision.value
+        reason = result.reason or ""
+        policy_id = result.policy_id
+        await audit_service.log(
+            session,
+            event=AuditEvent.POLICY_EVALUATED,
+            actor_type=ActorType.SYSTEM,
+            actor_id="policy_engine",
+            organization_id=connector.organization_id,
+            tool=tool_name,
+            result=status,
+            payload={
+                "policy_id": result.policy_id,
+                "policy_version": result.policy_version,
+                "matched_rule_id": result.matched_rule_id,
+                "reason": result.reason,
+                "arguments": arguments,
+                "agent_id": agent.id,
+                "run_id": message.get("run_id"),
+                "action_id": message.get("action_id"),
+            },
+        )
+    elif agent is None or agent.organization_id != connector.organization_id:
+        reason = "Unknown agent"
+    else:
+        reason = "Tool is required"
+    await websocket.send_json(
+        {
+            "type": "policy.decision",
+            "request_id": request_id,
+            "status": status,
+            "policy_id": policy_id,
+            "reason": reason,
+        }
     )
 
 
@@ -636,7 +707,7 @@ async def _handle_panel_command(
                 "id": request_id,
                 "command": "run",
                 "agent_id": agent_id,
-                "delivered": agent_hub.is_connected(agent_id),
+                "delivered": str(run.status) not in {"failed", "cancelled"},
                 "run": payload,
             },
         )

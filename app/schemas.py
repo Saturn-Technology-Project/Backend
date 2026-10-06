@@ -68,6 +68,13 @@ class ConnectorEnrollResponse(BaseModel):
     ws_url: str
 
 
+class SessionPairResponse(BaseModel):
+    session_id: str
+    token: str
+    ws_url: str
+    organization_id: str
+
+
 class ToolRead(ORMModel):
     id: str
     name: str
