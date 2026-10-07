@@ -45,6 +45,11 @@ _RUN_EVENTS = {
 }
 
 
+async def _release(session) -> None:
+    if session.in_transaction():
+        await session.commit()
+
+
 def _command_id(message: dict[str, Any]) -> str:
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
     return str(message.get("command_id") or payload.get("command_id") or message.get("id") or "")
@@ -152,6 +157,7 @@ async def _connector_loop(
 ) -> None:
     connector.last_seen_at = utcnow()
     await session.flush()
+    await _release(session)
     await agent_hub.register_connector(
         connector_id=connector.id,
         organization_id=connector.organization_id,
@@ -175,6 +181,7 @@ async def _connector_loop(
     )
     if first_message is not None:
         await _handle_connector_message(session, connector, websocket, first_message)
+        await _release(session)
     try:
         while True:
             raw = await websocket.receive_text()
@@ -186,6 +193,7 @@ async def _connector_loop(
             if not isinstance(message, dict):
                 continue
             await _handle_connector_message(session, connector, websocket, message)
+            await _release(session)
     except WebSocketDisconnect:
         pass
     finally:
@@ -477,6 +485,7 @@ async def _bound_runtime_loop(
 ):
     agent.last_seen_at = utcnow()
     await session.flush()
+    await _release(session)
     await agent_hub.register_agent(
         agent_id=agent.id,
         organization_id=agent.organization_id,
@@ -505,6 +514,7 @@ async def _bound_runtime_loop(
         )
     if first_message is not None:
         await _handle_agent_message(session, agent, first_message, runtime_id=runtime_id)
+        await _release(session)
     try:
         while True:
             raw = await websocket.receive_text()
@@ -516,6 +526,7 @@ async def _bound_runtime_loop(
             await _handle_agent_message(
                 session, agent, message, runtime_id=runtime_id
             )
+            await _release(session)
     except WebSocketDisconnect:
         pass
     finally:
@@ -620,6 +631,7 @@ async def _apply_run_payload(session, agent: Agent, payload: dict[str, Any], com
 async def panel_socket(websocket: WebSocket, session: SessionDep, token: str):
     await websocket.accept()
     user = await auth_service.user_from_token(session, token)
+    await _release(session)
     if user is None:
         await websocket.send_json({"type": "error", "error": "unauthorized"})
         await websocket.close(code=4401, reason="unauthorized")
@@ -638,6 +650,7 @@ async def panel_socket(websocket: WebSocket, session: SessionDep, token: str):
                 await websocket.send_json({"type": "error", "error": "invalid_json"})
                 continue
             await _handle_panel_command(session, user, websocket, message)
+            await _release(session)
     except WebSocketDisconnect:
         pass
     finally:

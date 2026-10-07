@@ -106,4 +106,5 @@ jobs:
             --env-vars-file cloud-run.env.yaml \
             --add-cloudsql-instances "${{ vars.CLOUD_SQL_INSTANCE_CONNECTION_NAME }}" \
             --vpc-connector "${{ vars.SERVERLESS_VPC_CONNECTOR }}" \
-            --vpc-egress private-ranges-only
+            --vpc-egress private-ranges-only \
+            --startup-probe=timeoutSeconds=10,periodSeconds=10,failureThreshold=36,tcpSocket.port=8000

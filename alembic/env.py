@@ -2,7 +2,7 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -30,7 +30,27 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _unblock_postgres(connection: Connection) -> None:
+    """Live App sockets keep a transaction open. ALTER TABLE waits on that lock until Cloud Run kills the new revision."""
+    if connection.dialect.name != "postgresql":
+        return
+    connection.execute(
+        text(
+            """
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND pid <> pg_backend_pid()
+              AND state = 'idle in transaction'
+            """
+        )
+    )
+    connection.execute(text("SET lock_timeout = '60s'"))
+    connection.commit()
+
+
 def do_run_migrations(connection: Connection) -> None:
+    _unblock_postgres(connection)
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
         context.run_migrations()
