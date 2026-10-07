@@ -8,6 +8,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import (
     activity,
+    app_mcp,
     admin,
     agents,
     approvals,
@@ -16,11 +17,13 @@ from app.api import (
     credentials,
     mcp_servers,
     org,
+    saturn_mcp,
     payments,
     policies,
     runs,
     session,
     tools,
+    tool_sets,
     wallets,
     ws,
     x402,
@@ -95,6 +98,8 @@ app.include_router(connectors.router)
 app.include_router(credentials.router)
 app.include_router(session.router)
 app.include_router(mcp_servers.router)
+app.include_router(tool_sets.router)
+app.include_router(saturn_mcp.router)
 app.include_router(wallets.router)
 app.include_router(runs.router)
 app.include_router(tools.router)
@@ -103,6 +108,7 @@ app.include_router(approvals.router)
 app.include_router(payments.router)
 app.include_router(x402.router)
 app.include_router(activity.router)
+app.include_router(app_mcp.router)
 app.include_router(ws.router)
 
 

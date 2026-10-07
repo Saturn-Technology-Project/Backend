@@ -18,11 +18,12 @@ from app.schemas import (
     SubscriptionRead,
 )
 from app.services.organization_service import public_addons
+from app.services.plans import canonical_plan
 
 PLAN_CATALOG = {
-    "trial": {"name": "Saturn Trial", "amount": "0.00"},
-    "starter": {"name": "Saturn Starter", "amount": "290.00"},
-    "enterprise": {"name": "Saturn Enterprise", "amount": "990.00"},
+    "free": {"name": "Free", "amount": "0.00"},
+    "pro": {"name": "Pro", "amount": "0.00"},
+    "enterprise": {"name": "Enterprise", "amount": "0.00"},
 }
 ADDON_AMOUNT = "200.00"
 
@@ -60,9 +61,9 @@ def _parse_dt(value: Any) -> datetime | None:
 
 
 def plan_line(plan: str) -> SubscriptionLineRead:
-    ident = (plan or "trial").strip().lower()
+    ident = canonical_plan(plan)
     if ident not in PLAN_CATALOG:
-        ident = "trial"
+        ident = "free"
     item = PLAN_CATALOG[ident]
     return SubscriptionLineRead(kind="plan", id=ident, name=item["name"], amount=item["amount"])
 

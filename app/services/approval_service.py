@@ -55,6 +55,7 @@ class ApprovalService:
         approval, action, run, agent = await self._load_pending(
             session, approval_id, actor_id, organization_id=organization_id
         )
+        mapped = action.policy_reason in {"tool_set_approval", "saturn_mcp"}
 
         _tool, decision = await run_service.evaluate_action_policy(
             session, action, agent=agent
@@ -103,6 +104,20 @@ class ApprovalService:
             result="approved",
             payload={"approval_id": approval.id},
         )
+
+        if mapped:
+            run.status = RunStatus.RUNNING
+            run.updated_at = utcnow()
+            await session.flush()
+            await agent_hub.notify_connector(
+                run.organization_id,
+                {
+                    "type": "approval.granted",
+                    "run_id": run.id,
+                    "action_id": action.id,
+                },
+            )
+            return await run_service.load_run(session, run.id), action
 
         if agent_hub.is_connected(agent.id):
             run.status = RunStatus.RUNNING
@@ -170,6 +185,14 @@ class ApprovalService:
             tool=action.tool,
             result="rejected",
             payload={"approval_id": approval.id},
+        )
+        await agent_hub.notify_connector(
+            run.organization_id,
+            {
+                "type": "approval.rejected",
+                "run_id": run.id,
+                "action_id": action.id,
+            },
         )
         if agent_hub.is_connected(run.agent_id):
             await agent_hub.send_command(

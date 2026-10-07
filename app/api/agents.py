@@ -44,6 +44,7 @@ def serialize_agent(agent, pushed: bool | None = None) -> AgentRead:
         or agent_hub.last_seen(agent.id)
         or agent.last_seen_at,
         settings=public_settings(agent),
+        tool_set_id=agent.tool_set_id,
         pushed=pushed,
     )
 

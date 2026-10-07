@@ -4,7 +4,7 @@ async def test_subscription_has_no_synthetic_billing(client):
     body = response.json()
     assert body["organization_id"] == "org_saturn"
     assert body["plan"]["kind"] == "plan"
-    assert body["plan"]["id"] in {"trial", "starter", "enterprise"}
+    assert body["plan"]["id"] in {"free", "pro", "enterprise"}
     assert body["payment"]["demo"] is False
     assert body["payment"]["last4"] == ""
     assert body["invoices"] == []

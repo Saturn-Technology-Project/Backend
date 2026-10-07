@@ -30,9 +30,9 @@ from app.services.audit_service import audit_service
 from app.services.auth_service import hash_password
 from app.services.mcp_gateway import mcp_gateway
 from app.services.member_service import member_service
+from app.services.plans import canonical_plan, kind_for_plan
 
 settings = get_settings()
-PLANS = {"trial", "starter", "enterprise"}
 ORG_STATUSES = {"active", "trial", "suspended"}
 DEPLOYMENTS = {"cloud", "customer_vpc", "on_prem"}
 
@@ -106,7 +106,7 @@ class AdminService:
                     "name": "Agent Runtime",
                     "status": "operational" if runtime_connected else "down",
                 },
-                {"id": "gateway", "name": "MCP Gateway", "status": mcp_status},
+                {"id": "gateway", "name": "Saturn MCP", "status": mcp_status},
                 {"id": "database", "name": "Database", "status": db_status},
             ],
             "events": events,
@@ -158,7 +158,8 @@ class AdminService:
             "id": org.id,
             "name": org.name,
             "status": org.status,
-            "plan": org.plan,
+            "plan": canonical_plan(org.plan),
+            "kind": org.kind if org.kind in {"personal", "organization"} else kind_for_plan(org.plan),
             "deployment_mode": org.deployment_mode,
             "runtime_region": org.runtime_region,
             "runtime_version": org.runtime_version,
@@ -248,14 +249,12 @@ class AdminService:
         admin_name: str,
         admin_password: str,
         admin_title: str,
-        plan: str = "trial",
+        plan: str = "free",
     ) -> tuple[Organization, Employee]:
         cleaned_name = name.strip()
         if not cleaned_name:
             raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Organization name is required")
-        cleaned_plan = (plan or "trial").strip().lower()
-        if cleaned_plan not in PLANS:
-            raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Unknown plan")
+        cleaned_plan = canonical_plan(plan, strict=True)
         employee = await self.create_member(
             session,
             organization=None,
@@ -311,11 +310,11 @@ class AdminService:
             org.status = cleaned
             changed["status"] = cleaned
         if plan is not None:
-            cleaned = plan.strip().lower()
-            if cleaned not in PLANS:
-                raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Unknown plan")
+            cleaned = canonical_plan(plan, strict=True)
             org.plan = cleaned
+            org.kind = kind_for_plan(cleaned)
             changed["plan"] = cleaned
+            changed["kind"] = org.kind
         if deployment_mode is not None:
             cleaned = deployment_mode.strip().lower()
             if cleaned not in DEPLOYMENTS:
@@ -381,7 +380,7 @@ class AdminService:
                         },
                         {
                             "id": "gateway",
-                            "name": "MCP Gateway",
+                            "name": "Saturn MCP",
                             "status": gateway["status"] if int(gateway["total"] or 0) else "none",
                             "last_heartbeat_at": heartbeat if connector_ok else None,
                             "detail": f"{gateway['connected']}/{gateway['total']} servers",
@@ -586,7 +585,7 @@ class AdminService:
         *,
         organization: Organization | None,
         org_name: str | None = None,
-        plan: str = "trial",
+        plan: str = "free",
         email: str,
         name: str,
         password: str,
@@ -617,12 +616,16 @@ class AdminService:
 
         resolved_role, resolved_perms = resolve_permissions(role, permissions)
 
+        cleaned_plan = canonical_plan(plan, strict=True)
+        if organization is not None and organization.kind == "personal":
+            raise HTTPException(http_status.HTTP_403_FORBIDDEN, "Personal accounts cannot add members")
         if organization is None:
             organization = Organization(
                 id=new_id("org"),
                 name=(org_name or "").strip() or "Organization",
-                status="trial" if plan == "trial" else "active",
-                plan=plan if plan in PLANS else "trial",
+                status="active",
+                plan=cleaned_plan,
+                kind=kind_for_plan(cleaned_plan),
             )
             session.add(organization)
             await session.flush()

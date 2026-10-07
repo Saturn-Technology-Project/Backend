@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, status
 
-from app.api.deps import CurrentUser, PoliciesRead, PoliciesWrite, SessionDep
+from app.api.deps import CurrentUser, PoliciesRead, PoliciesWrite, SaturnCloud, SessionDep
 from app.schemas import PolicyCreate, PolicyRead, PolicyUpdate
 from app.services.policy_service import policy_service, serialize_policy
 
@@ -23,7 +23,7 @@ async def get_policy(policy_id: str, session: SessionDep, user: CurrentUser, _ac
 
 @router.post("", response_model=PolicyRead, status_code=201)
 async def create_policy(
-    body: PolicyCreate, session: SessionDep, user: CurrentUser, _access: PoliciesWrite
+    body: PolicyCreate, session: SessionDep, user: CurrentUser, _access: PoliciesWrite, _cloud: SaturnCloud
 ):
     if not body.name.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name is required")
@@ -38,6 +38,7 @@ async def update_policy(
     session: SessionDep,
     user: CurrentUser,
     _access: PoliciesWrite,
+    _cloud: SaturnCloud,
 ):
     policy = await policy_service.get_policy(session, policy_id, user.organization_id)
     policy = await policy_service.update_policy(session, policy, body)

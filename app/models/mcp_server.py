@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.ids import utcnow
@@ -23,6 +23,7 @@ class McpServer(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     endpoint: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    auth_ciphertext: Mapped[str] = mapped_column(Text, default="", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     connector_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("connectors.id"), nullable=True, index=True

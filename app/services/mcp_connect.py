@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+import re
+
+from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.ids import new_id
+from app.models import McpServer, Tool, User
+from app.models.enums import ToolStatus, ToolType
+from app.services.credential_service import open_secret, seal
+from app.services.mcp_remote import list_remote_tools
+
+
+def _slug(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return cleaned or "mcp"
+
+
+def _exposed(server_name: str, upstream: str, taken: set[str]) -> str:
+    if upstream not in taken:
+        return upstream
+    prefixed = f"{_slug(server_name)}.{upstream}"
+    if prefixed not in taken:
+        return prefixed
+    index = 2
+    while f"{prefixed}-{index}" in taken:
+        index += 1
+    return f"{prefixed}-{index}"
+
+
+class McpConnectService:
+    async def connect(
+        self,
+        session: AsyncSession,
+        user: User,
+        *,
+        name: str,
+        endpoint: str,
+        authorization: str | None,
+    ) -> McpServer:
+        label = name.strip()
+        url = endpoint.strip()
+        if not label or not url:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name and endpoint are required")
+        existing = await session.scalar(
+            select(McpServer).where(
+                McpServer.organization_id == user.organization_id,
+                McpServer.name == label,
+            )
+        )
+        secret = existing.auth_ciphertext if existing is not None else ""
+        if authorization is not None:
+            secret = seal(authorization.strip()) if authorization.strip() else ""
+        discovered = await list_remote_tools(url, open_secret(secret))
+        if existing is None:
+            server = McpServer(
+                id=new_id("mcp"),
+                organization_id=user.organization_id,
+                name=label,
+                endpoint=url,
+                auth_ciphertext=secret,
+                status="active",
+            )
+            session.add(server)
+            await session.flush()
+        else:
+            server = existing
+            server.endpoint = url
+            server.auth_ciphertext = secret
+            server.status = "active"
+        await self._store_tools(session, server, discovered)
+        result = await session.execute(
+            select(McpServer).options(selectinload(McpServer.tools)).where(McpServer.id == server.id)
+        )
+        return result.scalar_one()
+
+    async def refresh(self, session: AsyncSession, user: User, server_id: str) -> McpServer:
+        server = await session.get(McpServer, server_id)
+        if server is None or server.organization_id != user.organization_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "MCP server not found")
+        if not server.endpoint:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP server has no endpoint")
+        discovered = await list_remote_tools(server.endpoint, open_secret(server.auth_ciphertext))
+        await self._store_tools(session, server, discovered)
+        result = await session.execute(
+            select(McpServer).options(selectinload(McpServer.tools)).where(McpServer.id == server.id)
+        )
+        return result.scalar_one()
+
+    async def _store_tools(self, session: AsyncSession, server: McpServer, discovered: list[dict]) -> None:
+        current = list(
+            (
+                await session.execute(select(Tool).where(Tool.mcp_server_id == server.id))
+            ).scalars().all()
+        )
+        org_tools = list(
+            (
+                await session.execute(select(Tool).where(Tool.organization_id == server.organization_id))
+            ).scalars().all()
+        )
+        by_upstream = {tool.upstream_name or tool.name: tool for tool in current}
+        taken = {tool.name for tool in org_tools if tool.mcp_server_id != server.id}
+        taken.update(tool.name for tool in current)
+        seen: set[str] = set()
+        for item in discovered:
+            upstream = str(item["name"])
+            seen.add(upstream)
+            tool = by_upstream.get(upstream)
+            if tool is None:
+                exposed = _exposed(server.name, upstream, taken)
+                taken.add(exposed)
+                tool = Tool(
+                    id=new_id("tool"),
+                    organization_id=server.organization_id,
+                    name=exposed,
+                    description=str(item.get("description") or ""),
+                    type=ToolType.MCP.value,
+                    mcp_endpoint=server.endpoint,
+                    permissions=["read"],
+                    input_schema=item.get("inputSchema") or {"type": "object", "properties": {}},
+                    upstream_name=upstream,
+                    mcp_server_id=server.id,
+                    status=ToolStatus.ACTIVE.value,
+                )
+                session.add(tool)
+            else:
+                tool.description = str(item.get("description") or tool.description)
+                tool.input_schema = item.get("inputSchema") or tool.input_schema or {}
+                tool.upstream_name = upstream
+                tool.mcp_endpoint = server.endpoint
+                tool.mcp_server_id = server.id
+                tool.status = ToolStatus.ACTIVE.value
+                taken.add(tool.name)
+        for tool in current:
+            if (tool.upstream_name or tool.name) not in seen:
+                tool.status = ToolStatus.DISABLED.value
+        await session.flush()
+
+
+mcp_connect_service = McpConnectService()

@@ -29,6 +29,9 @@ class Agent(Base):
     )
     runtime_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     settings: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    tool_set_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("tool_sets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -18,6 +18,7 @@ async def seed_if_empty(session: AsyncSession) -> None:
                 name="Saturn",
                 status="active",
                 plan="enterprise",
+                kind="organization",
                 deployment_mode="cloud",
                 runtime_region="asia-east1",
                 runtime_version="0.1.0",

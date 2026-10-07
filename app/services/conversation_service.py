@@ -22,6 +22,7 @@ class ConversationService:
             .where(
                 ConversationMessage.agent_id == agent_id,
                 ConversationMessage.user_id == user.id,
+                ConversationMessage.organization_id == user.organization_id,
             )
             .order_by(ConversationMessage.created_at.asc())
         )
@@ -84,7 +85,11 @@ class ConversationService:
             session.add(current)
             await session.flush()
             return current
-        if current.user_id != user.id or current.agent_id != agent.id:
+        if (
+            current.user_id != user.id
+            or current.agent_id != agent.id
+            or current.organization_id != user.organization_id
+        ):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Message not found")
         if (
             current.status == "running"
@@ -104,6 +109,7 @@ class ConversationService:
             await session.execute(
                 delete(ConversationMessage).where(
                     ConversationMessage.user_id == user.id,
+                    ConversationMessage.organization_id == user.organization_id,
                     ConversationMessage.agent_id == agent.id,
                     ConversationMessage.created_at > current.created_at,
                 )

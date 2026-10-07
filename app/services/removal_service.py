@@ -16,6 +16,7 @@ from app.models import (
     Payment,
     Run,
     Tool,
+    ToolSetItem,
     User,
     Wallet,
 )
@@ -67,6 +68,9 @@ class RemovalService:
         await self._drop_json_id(session, agent.organization_id, "agent", agent.id)
         self._unlink_loaded(session, agent, ("agents",))
         session.expire(agent, ["runs", "wallet", "employees", "mcp_servers", "policies"])
+        for obj in list(session.identity_map.values()):
+            if isinstance(obj, Employee) and "agents" in obj.__dict__:
+                session.expire(obj, ["agents"])
         await session.delete(agent)
         await session.flush()
 
@@ -80,6 +84,8 @@ class RemovalService:
         await session.execute(
             delete(agent_mcp_servers).where(agent_mcp_servers.c.mcp_server_id == server.id)
         )
+        tool_ids = select(Tool.id).where(Tool.mcp_server_id == server.id)
+        await session.execute(delete(ToolSetItem).where(ToolSetItem.tool_id.in_(tool_ids)))
         await session.execute(delete(Tool).where(Tool.mcp_server_id == server.id))
         for obj in list(session.identity_map.values()):
             if isinstance(obj, Tool) and obj.mcp_server_id == server.id:
@@ -87,6 +93,11 @@ class RemovalService:
         await self._drop_json_id(session, server.organization_id, "mcp", server.id)
         self._unlink_loaded(session, server, ("mcp_servers",))
         session.expire(server, ["tools", "employees", "agents"])
+        for obj in list(session.identity_map.values()):
+            if isinstance(obj, Employee) and "mcp_servers" in obj.__dict__:
+                session.expire(obj, ["mcp_servers"])
+            if isinstance(obj, Agent) and "mcp_servers" in obj.__dict__:
+                session.expire(obj, ["mcp_servers"])
         await session.delete(server)
         await session.flush()
 

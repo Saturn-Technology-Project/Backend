@@ -34,6 +34,7 @@ async def test_onboard_org_and_manage_members(client):
             "admin_name": "Acme Admin",
             "admin_password": "password1",
             "admin_title": "Founder",
+            "plan": "enterprise",
         },
     )
     assert created.status_code == 201, created.text
@@ -110,13 +111,14 @@ async def test_platform_overview_and_org_lifecycle(client):
             "admin_email": "ops@prism.test",
             "admin_name": "Prism Ops",
             "admin_password": "password1",
-            "plan": "trial",
+            "plan": "free",
         },
     )
     assert created.status_code == 201, created.text
     org = created.json()
-    assert org["plan"] == "trial"
-    assert org["status"] == "trial"
+    assert org["plan"] == "free"
+    assert org["kind"] == "personal"
+    assert org["status"] == "active"
     assert "health" in org
 
     patched = await client.patch(
@@ -126,6 +128,7 @@ async def test_platform_overview_and_org_lifecycle(client):
     assert patched.status_code == 200, patched.text
     assert patched.json()["status"] == "suspended"
     assert patched.json()["plan"] == "enterprise"
+    assert patched.json()["kind"] == "organization"
 
     assert (await client.get("/admin/connections")).status_code == 200
     assert (await client.get("/admin/runtimes")).status_code == 200

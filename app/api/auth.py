@@ -6,6 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.api.agents import serialize_agent
 from app.api.deps import CurrentUser, SessionDep
 from app.api.mcp_servers import serialize_mcp_server
+from app.api.tool_sets import serialize_tool_set
 from app.models import Employee, User
 from app.schemas import (
     AcceptInviteRequest,
@@ -22,6 +23,8 @@ from app.services.auth_service import auth_service
 from app.services.mapping_service import mapping_service
 from app.services.mcp_gateway import mcp_gateway
 from app.services.member_service import member_service
+from app.services.app_mcp_service import app_mcp_service
+from app.services.tool_set_service import tool_set_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _bearer = HTTPBearer(auto_error=False)
@@ -73,7 +76,12 @@ async def serialize_user(session, user: User) -> UserRead:
     ]
     servers = [
         serialize_mcp_server(server)
-        for server in await mapping_service.list_org_mcp_servers(session, user.organization_id)
+        for server in await mapping_service.list_mcp_servers(session, user)
+    ]
+    app_mcp = await app_mcp_service.read(session, user.id)
+    tool_sets = [
+        serialize_tool_set(item)
+        for item in await tool_set_service.list_sets(session, user.organization_id)
     ]
     snapshot = mcp_gateway.snapshot(user.organization_id)
     return UserRead(
@@ -87,6 +95,8 @@ async def serialize_user(session, user: User) -> UserRead:
         employee=employee_read,
         agents=agents,
         mcp_servers=servers,
+        app_mcp=app_mcp,
+        tool_sets=tool_sets,
         users=users,
         assigned_agent_ids=assigned_agent_ids,
         assigned_mcp_server_ids=assigned_mcp_ids,

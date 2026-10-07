@@ -4,6 +4,7 @@ from typing import Any
 
 from app.models.organization import Organization
 from app.schemas import OrgAddonRead, OrganizationRead
+from app.services.plans import canonical_plan, kind_for_plan
 
 
 def public_addons(raw: Any) -> list[OrgAddonRead]:
@@ -30,6 +31,7 @@ def serialize_organization(org: Organization) -> OrganizationRead:
     return OrganizationRead(
         id=org.id,
         name=org.name,
-        plan=org.plan or "trial",
+        plan=canonical_plan(org.plan),
+        kind=org.kind if org.kind in {"personal", "organization"} else kind_for_plan(org.plan),
         addons=public_addons(org.addons),
     )

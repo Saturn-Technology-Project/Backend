@@ -344,7 +344,7 @@ def test_connector_enroll_registers_agents_mcp_and_routes_commands():
             mcp_ok = connector_ws.receive_json()
             assert mcp_ok["type"] == "mcp.registered"
             servers = client.get("/mcp-servers").json()
-            assert any(item["id"] == "acme-enterprise-mcp" for item in servers)
+            assert all(item["id"] != "acme-enterprise-mcp" for item in servers)
             tools = client.get("/tools").json()
             assert any(item["name"] == "ops.sync_ledger" for item in tools)
 

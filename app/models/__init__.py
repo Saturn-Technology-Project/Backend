@@ -20,7 +20,9 @@ from app.models.policy import Policy, PolicyRule
 from app.models.run import Run
 from app.models.session import AuthSession
 from app.models.tool import Tool
+from app.models.tool_set import ToolSet, ToolSetItem
 from app.models.user import User
+from app.models.user_app_mcp import UserAppMcp
 from app.models.wallet import Wallet
 
 __all__ = [
@@ -41,7 +43,10 @@ __all__ = [
     "PolicyRule",
     "Run",
     "Tool",
+    "ToolSet",
+    "ToolSetItem",
     "User",
+    "UserAppMcp",
     "Wallet",
     "agent_mcp_servers",
     "agent_policies",

@@ -63,7 +63,7 @@ async def test_full_execution_loop_requires_approval(client):
     assert finished["status"] == "completed"
 
     activity = (await client.get("/activity", params={"run_id": run["id"]})).json()
-    names = _event_names(activity)
+    names = list(reversed(_event_names(activity)))
     expected = [
         AuditEvent.RUN_CREATED,
         AuditEvent.AGENT_STARTED,

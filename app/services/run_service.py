@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException, status
@@ -29,6 +30,14 @@ from app.services.simulator import agent_simulator
 settings = get_settings()
 
 
+def _aware(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 class RunService:
     async def list_runs(self, session: AsyncSession, user: User) -> list[Run]:
         agent_ids = await mapping_service.agent_ids_for(session, user)
@@ -40,7 +49,10 @@ class RunService:
             .where(Run.agent_id.in_(agent_ids))
             .order_by(Run.created_at.desc())
         )
-        return list(result.scalars().unique().all())
+        runs = list(result.scalars().unique().all())
+        for run in runs:
+            await self.reconcile_run(session, run)
+        return runs
 
     async def load_run(self, session: AsyncSession, run_id: str) -> Run:
         result = await session.execute(
@@ -56,6 +68,7 @@ class RunService:
     async def get_run(self, session: AsyncSession, user: User, run_id: str) -> Run:
         run = await self.load_run(session, run_id)
         await mapping_service.require_agent(session, user, run.agent_id)
+        await self.reconcile_run(session, run)
         return run
 
     async def create_run(
@@ -68,6 +81,11 @@ class RunService:
         actor_id: str,
     ) -> Run:
         agent = await mapping_service.require_agent(session, user, agent_id)
+        if not settings.in_process_runtime and not agent_hub.is_connected(agent.id):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Agent is not connected",
+            )
 
         run = Run(
             id=new_id("run"),
@@ -98,13 +116,15 @@ class RunService:
                 organization_id=run.organization_id,
                 run_id=run.id,
             )
-            await agent_hub.send_command(
+            delivered = await agent_hub.send_command(
                 agent.id,
                 "run",
                 await runtime_payload(
                     session, agent=agent, run=run, actor_id=actor_id
                 ),
             )
+            if not delivered:
+                await self.fail_run(session, run, "Command was not delivered to the runtime")
         elif settings.in_process_runtime:
             await self._advance_run(session, run, agent)
         return await self.load_run(session, run.id)
@@ -119,6 +139,55 @@ class RunService:
             await session.flush()
         await self._advance_run(session, run, agent)
         return await self.load_run(session, run.id)
+
+    async def fail_run(self, session: AsyncSession, run: Run, reason: str) -> Run:
+        if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
+            return run
+        run.status = RunStatus.FAILED
+        run.updated_at = utcnow()
+        await session.flush()
+        await audit_service.log(
+            session,
+            event=AuditEvent.RUN_FAILED,
+            actor_type=ActorType.SYSTEM,
+            actor_id="saturn",
+            organization_id=run.organization_id,
+            run_id=run.id,
+            result=reason,
+            payload={"error": reason},
+        )
+        await session.flush()
+        return run
+
+    async def reconcile_run(self, session: AsyncSession, run: Run) -> Run:
+        if run.status not in {RunStatus.QUEUED, RunStatus.RUNNING}:
+            return run
+        created = _aware(run.created_at) or utcnow()
+        age = utcnow() - created
+        connected = agent_hub.is_connected(run.agent_id)
+        agent = await session.get(Agent, run.agent_id)
+        raw = (agent.settings or {}).get("max_runtime_minutes") if agent else None
+        try:
+            minutes = max(1, int(raw or 30))
+        except (TypeError, ValueError):
+            minutes = 30
+        if run.status == RunStatus.QUEUED and not settings.in_process_runtime:
+            if not connected or age > timedelta(seconds=20):
+                return await self.fail_run(session, run, "Agent is not connected")
+        if run.status == RunStatus.RUNNING:
+            if age > timedelta(minutes=minutes):
+                return await self.fail_run(session, run, "Run timed out")
+            if not connected and age > timedelta(seconds=45):
+                return await self.fail_run(session, run, "Runtime disconnected")
+            if (
+                not settings.in_process_runtime
+                and age > timedelta(seconds=45)
+                and not list(run.actions or [])
+            ):
+                return await self.fail_run(
+                    session, run, "Runtime did not pick up this run"
+                )
+        return run
 
     async def evaluate_action_policy(
         self,

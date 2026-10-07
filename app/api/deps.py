@@ -7,9 +7,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_session
-from app.models import Employee, User
+from app.models import Employee, Organization, User
 from app.services.access import allows
 from app.services.mapping_service import mapping_service
+from app.services.plans import allows_saturn_cloud
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 _bearer = HTTPBearer(auto_error=False)
@@ -69,6 +70,16 @@ ApprovalsRead = Annotated[Employee, Depends(require_access("approvals", "read"))
 ApprovalsWrite = Annotated[Employee, Depends(require_access("approvals", "write"))]
 TeamRead = Annotated[Employee, Depends(require_access("team", "read"))]
 TeamWrite = Annotated[Employee, Depends(require_access("team", "write"))]
+
+
+async def require_saturn_cloud(session: SessionDep, user: CurrentUser) -> Organization:
+    org = await session.get(Organization, user.organization_id)
+    if org is None or not allows_saturn_cloud(org.plan):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Saturn MCP requires Pro")
+    return org
+
+
+SaturnCloud = Annotated[Organization, Depends(require_saturn_cloud)]
 
 
 async def require_platform_admin(user: CurrentUser) -> User:

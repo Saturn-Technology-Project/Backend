@@ -116,6 +116,10 @@ class AgentService:
                         "prompt": next_prompt,
                     },
                 )
+        if "tool_set_id" in body.model_fields_set:
+            from app.services.tool_set_service import tool_set_service
+
+            await tool_set_service.assign(session, user, agent, body.tool_set_id)
         if body.model is not None:
             agent.model = body.model
             settings = dict(agent.settings or {})

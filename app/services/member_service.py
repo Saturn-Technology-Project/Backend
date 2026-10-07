@@ -113,6 +113,9 @@ class MemberService:
         mcp_server_ids: list[str] | None,
     ) -> tuple[Invitation, str]:
         organization_id = actor.organization_id
+        org = await session.get(Organization, organization_id)
+        if org is not None and org.kind != "organization":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Personal accounts cannot add members")
         normalized = email.strip().lower()
         if not normalized:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email is required")

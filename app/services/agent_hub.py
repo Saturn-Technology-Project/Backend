@@ -326,6 +326,12 @@ class AgentHub:
                     return await _send(link.websocket, link.lock, message)
         return await _send(websocket, asyncio.Lock(), message)
 
+    async def notify_connector(self, organization_id: str, message: dict[str, Any]) -> bool:
+        link = self._connectors.get(organization_id)
+        if link is None:
+            return False
+        return await _send(link.websocket, link.lock, message)
+
     async def broadcast_org(self, organization_id: str, message: dict[str, Any]) -> None:
         for link in list(self._panels.get(organization_id) or []):
             await _send(link.websocket, link.lock, message)

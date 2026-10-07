@@ -205,9 +205,10 @@ async def apply_runtime_result(
             payload=event.get("payload") if isinstance(event.get("payload"), dict) else None,
         )
 
+    events = payload.get("audit") or []
     if status == RunStatus.COMPLETED and not any(
         event.get("event") == AuditEvent.RUN_COMPLETED.value
-        for event in (payload.get("audit") or [])
+        for event in events
         if isinstance(event, dict)
     ):
         await audit_service.log(
@@ -218,6 +219,22 @@ async def apply_runtime_result(
             organization_id=run.organization_id,
             run_id=run.id,
             result="success",
+        )
+    if status == RunStatus.FAILED and not any(
+        event.get("event") == AuditEvent.RUN_FAILED.value
+        for event in events
+        if isinstance(event, dict)
+    ):
+        reason = str(payload.get("error") or payload.get("reason") or "failed")
+        await audit_service.log(
+            session,
+            event=AuditEvent.RUN_FAILED,
+            actor_type=ActorType.SYSTEM,
+            actor_id="saturn",
+            organization_id=run.organization_id,
+            run_id=run.id,
+            result=reason,
+            payload={"error": reason},
         )
 
     await session.flush()

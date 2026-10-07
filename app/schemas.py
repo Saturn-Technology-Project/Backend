@@ -31,6 +31,7 @@ class AgentRead(ORMModel):
     runtime_id: str | None = None
     last_seen_at: datetime | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
+    tool_set_id: str | None = None
     pushed: bool | None = None
 
 
@@ -40,6 +41,7 @@ class AgentUpdate(BaseModel):
     model: str | None = None
     runtime_id: str | None = None
     settings: dict[str, Any] | None = None
+    tool_set_id: str | None = None
     daily_spend_limit: Decimal | None = None
     per_tx_limit: Decimal | None = None
 
@@ -87,15 +89,85 @@ class ToolRead(ORMModel):
     status: str
 
 
+class McpToolRead(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+
+
 class McpServerRead(ORMModel):
     id: str
     name: str
     endpoint: str
     status: str
     connected: bool = False
+    has_authorization: bool = False
     gateway: str = "mcp-gateway"
     organization_id: str | None = None
     tools: list[str] = Field(default_factory=list)
+    catalog: list[McpToolRead] = Field(default_factory=list)
+
+
+class McpConnect(BaseModel):
+    name: str
+    endpoint: str
+    authorization: str | None = None
+
+
+class AppMcpToolRead(BaseModel):
+    tool_id: str
+    description: str = ""
+
+
+class AppMcpServerRead(BaseModel):
+    id: str
+    name: str
+    url: str
+    tools: list[AppMcpToolRead] = Field(default_factory=list)
+
+
+class AppMcpRead(BaseModel):
+    servers: list[AppMcpServerRead] = Field(default_factory=list)
+    attachments: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class AppMcpWrite(BaseModel):
+    servers: list[AppMcpServerRead] = Field(default_factory=list)
+    attachments: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class ToolSetItemWrite(BaseModel):
+    tool_id: str
+    approval: bool = False
+
+
+class ToolSetWrite(BaseModel):
+    name: str
+    description: str = ""
+    items: list[ToolSetItemWrite] = Field(default_factory=list)
+
+
+class ToolSetUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    items: list[ToolSetItemWrite] | None = None
+
+
+class ToolSetItemRead(BaseModel):
+    tool_id: str
+    name: str
+    description: str = ""
+    server_id: str | None = None
+    server_name: str = ""
+    approval: bool = False
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolSetRead(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    items: list[ToolSetItemRead] = Field(default_factory=list)
 
 
 class OrgUserRead(ORMModel):
@@ -263,7 +335,8 @@ class OrgAddonRead(BaseModel):
 class OrganizationRead(ORMModel):
     id: str
     name: str
-    plan: str = "trial"
+    plan: str = "free"
+    kind: str = "personal"
     addons: list[OrgAddonRead] = Field(default_factory=list)
 
 
@@ -322,6 +395,8 @@ class UserRead(ORMModel):
     employee: EmployeeRead | None = None
     agents: list[AgentRead] = Field(default_factory=list)
     mcp_servers: list[McpServerRead] = Field(default_factory=list)
+    app_mcp: AppMcpRead = Field(default_factory=AppMcpRead)
+    tool_sets: list[ToolSetRead] = Field(default_factory=list)
     users: list[OrgUserRead] = Field(default_factory=list)
     assigned_agent_ids: list[str] = Field(default_factory=list)
     assigned_mcp_server_ids: list[str] = Field(default_factory=list)
@@ -453,7 +528,8 @@ class AdminOrgSummary(ORMModel):
     id: str
     name: str
     status: str = "active"
-    plan: str = "trial"
+    plan: str = "free"
+    kind: str = "personal"
     deployment_mode: str = "cloud"
     runtime_region: str = "asia-east1"
     runtime_version: str = "0.1.0"
@@ -473,7 +549,7 @@ class AdminOrgOnboardRequest(BaseModel):
     admin_name: str
     admin_password: str
     admin_title: str = "Admin"
-    plan: str = "trial"
+    plan: str = "free"
 
 
 class AdminOrgUpdateRequest(BaseModel):

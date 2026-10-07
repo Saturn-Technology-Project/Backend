@@ -142,7 +142,8 @@ class MappingService:
         await session.flush()
 
     async def list_mcp_servers(self, session: AsyncSession, user: User) -> list[McpServer]:
-        return await self.list_org_mcp_servers(session, user.organization_id)
+        servers = await self.list_org_mcp_servers(session, user.organization_id)
+        return [server for server in servers if server.connector_id is None]
 
     async def _org_employees(self, session: AsyncSession, organization_id: str) -> list[Employee]:
         result = await session.execute(
