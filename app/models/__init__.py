@@ -14,6 +14,7 @@ from app.models.credential import OrgCredential
 from app.models.employee import Employee
 from app.models.invitation import Invitation
 from app.models.mcp_server import McpServer
+from app.models.oauth import OAuthAccess, OAuthClient, OAuthGrant
 from app.models.organization import Organization
 from app.models.payment import Payment
 from app.models.policy import Policy, PolicyRule
@@ -37,6 +38,9 @@ __all__ = [
     "Employee",
     "Invitation",
     "McpServer",
+    "OAuthAccess",
+    "OAuthClient",
+    "OAuthGrant",
     "Organization",
     "Payment",
     "Policy",

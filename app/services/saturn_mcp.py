@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.ids import new_id
+from app.core.ids import new_id, utcnow
 from app.models import Action, Agent, Approval, Run, Tool, ToolSet, ToolSetItem, User
-from app.models.enums import ActionStatus, ActorType, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
+from app.models.enums import ActionStatus, ActorType, AgentStatus, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
 from app.services.audit_service import audit_service
 from app.services.credential_service import open_secret
 from app.services.mcp_remote import call_remote_tool
@@ -36,10 +37,18 @@ class SaturnMcp:
         run_id: str,
         action_id: str,
         message: dict[str, Any],
+        profile_id: str = "",
+        client_name: str = "",
     ) -> dict[str, Any]:
         request_id = message.get("id", 1)
         method = str(message.get("method") or "")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        await self._bind_profile(session, agent_id, user, profile_id)
+        if method == "initialize" and profile_id:
+            info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
+            if client_name and not str(info.get("name") or "").strip():
+                params = {**params, "clientInfo": {"name": client_name}}
+            await self._connect_client(session, user, agent_id, profile_id, params)
         if method == "initialize":
             return rpc_result(
                 request_id,
@@ -52,8 +61,13 @@ class SaturnMcp:
         if method in {"notifications/initialized", "ping"}:
             return rpc_result(request_id, {})
         agent = await session.get(Agent, agent_id) if agent_id else None
+        if agent is None and not agent_id and profile_id:
+            agent = await self._profile_agent(session, user, profile_id)
         if agent is None or agent.organization_id != user.organization_id:
             return rpc_error(request_id, -32000, "Unknown agent")
+        if str((agent.settings or {}).get("origin") or "") == "saturn_mcp":
+            agent.last_seen_at = utcnow()
+            await session.flush()
         if method == "tools/list":
             exposed = await self._exposed(session, agent)
             return rpc_result(
@@ -81,6 +95,83 @@ class SaturnMcp:
                 action_id=action_id,
             )
         return rpc_error(request_id, -32601, "Method not found")
+
+    def _client_id(self, profile_id: str, name: str) -> str:
+        digest = hashlib.sha256(f"{profile_id}\n{name}".encode()).hexdigest()[:24]
+        return f"mcp_{digest}"
+
+    async def _connect_client(
+        self,
+        session: AsyncSession,
+        user: User,
+        agent_id: str,
+        profile_id: str,
+        params: dict[str, Any],
+    ) -> None:
+        info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
+        name = str(info.get("name") or "Agent").strip()[:255] or "Agent"
+        existing = await session.get(Agent, agent_id) if agent_id else None
+        if existing is not None and existing.organization_id != user.organization_id:
+            return
+        if existing is not None and str((existing.settings or {}).get("origin") or "") != "saturn_mcp":
+            return
+        agent = existing
+        if agent is None:
+            ident = agent_id or self._client_id(profile_id, name)
+            agent = await session.get(Agent, ident)
+            if agent is not None and agent.organization_id != user.organization_id:
+                return
+            if agent is not None and str((agent.settings or {}).get("origin") or "") != "saturn_mcp":
+                return
+        if agent is None:
+            agent = Agent(
+                id=agent_id or self._client_id(profile_id, name),
+                organization_id=user.organization_id,
+                name=name,
+                description="",
+                model="",
+                status=AgentStatus.ACTIVE,
+                settings={},
+            )
+            session.add(agent)
+        settings = dict(agent.settings or {})
+        settings["origin"] = "saturn_mcp"
+        settings["profile_id"] = profile_id
+        agent.settings = settings
+        agent.name = name
+        agent.last_seen_at = utcnow()
+        await session.flush()
+
+    async def _profile_agent(self, session: AsyncSession, user: User, profile_id: str) -> Agent | None:
+        result = await session.execute(
+            select(Agent)
+            .where(Agent.organization_id == user.organization_id)
+            .order_by(Agent.last_seen_at.desc())
+        )
+        for agent in result.scalars().all():
+            settings = agent.settings or {}
+            if settings.get("origin") == "saturn_mcp" and settings.get("profile_id") == profile_id:
+                return agent
+        return None
+
+    async def _bind_profile(
+        self,
+        session: AsyncSession,
+        agent_id: str,
+        user: User,
+        profile_id: str,
+    ) -> None:
+        if not profile_id or not agent_id:
+            return
+        agent = await session.get(Agent, agent_id)
+        if agent is None or agent.organization_id != user.organization_id:
+            return
+        settings = dict(agent.settings or {})
+        if settings.get("profile_id") == profile_id:
+            return
+        settings["profile_id"] = profile_id
+        agent.settings = settings
+        await session.flush()
 
     async def _exposed(self, session: AsyncSession, agent: Agent) -> list[tuple[Tool, ToolSetItem]]:
         if not agent.tool_set_id:

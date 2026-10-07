@@ -24,6 +24,7 @@ from app.services.mapping_service import mapping_service
 from app.services.mcp_gateway import mcp_gateway
 from app.services.member_service import member_service
 from app.services.app_mcp_service import app_mcp_service
+from app.services.plans import profile_identity
 from app.services.tool_set_service import tool_set_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -73,6 +74,7 @@ async def serialize_user(session, user: User) -> UserRead:
     agents = [
         serialize_agent(agent)
         for agent in await mapping_service.list_org_agents(session, user.organization_id)
+        if str((agent.settings or {}).get("origin") or "") != "saturn_mcp"
     ]
     servers = [
         serialize_mcp_server(server)
@@ -104,6 +106,12 @@ async def serialize_user(session, user: User) -> UserRead:
         mcp_gateway=McpGatewayRead.model_validate(snapshot),
         role=role,
         permissions=permissions,
+        profile_id=profile_identity(
+            user.id,
+            user.organization_id,
+            user.organization.kind,
+            user.organization.plan,
+        ),
     )
 
 

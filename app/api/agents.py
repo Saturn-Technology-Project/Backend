@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter
 
 from app.api.deps import (
@@ -28,6 +30,17 @@ from app.services.wallet_service import wallet_service
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
+def _recent_mcp_client(agent) -> bool:
+    if str((agent.settings or {}).get("origin") or "") != "saturn_mcp":
+        return False
+    seen = agent.last_seen_at
+    if seen is None:
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - seen).total_seconds() < 120
+
+
 def serialize_agent(agent, pushed: bool | None = None) -> AgentRead:
     return AgentRead(
         id=agent.id,
@@ -36,7 +49,7 @@ def serialize_agent(agent, pushed: bool | None = None) -> AgentRead:
         model=agent.model,
         status=agent.status,
         organization_id=agent.organization_id,
-        connected=agent_hub.is_connected(agent.id),
+        connected=agent_hub.is_connected(agent.id) or _recent_mcp_client(agent),
         enrolled=bool(agent.enrollment_token or agent.token_hash or agent.connector_id),
         connector_id=agent.connector_id,
         runtime_id=agent.runtime_id or agent_hub.runtime_id(agent.id) or None,
@@ -45,6 +58,8 @@ def serialize_agent(agent, pushed: bool | None = None) -> AgentRead:
         or agent.last_seen_at,
         settings=public_settings(agent),
         tool_set_id=agent.tool_set_id,
+        profile_id=str((agent.settings or {}).get("profile_id") or "") or None,
+        origin=str((agent.settings or {}).get("origin") or "") or None,
         pushed=pushed,
     )
 

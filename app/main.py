@@ -16,6 +16,7 @@ from app.api import (
     connectors,
     credentials,
     mcp_servers,
+    oauth,
     org,
     saturn_mcp,
     payments,
@@ -98,6 +99,7 @@ app.include_router(connectors.router)
 app.include_router(credentials.router)
 app.include_router(session.router)
 app.include_router(mcp_servers.router)
+app.include_router(oauth.router)
 app.include_router(tool_sets.router)
 app.include_router(saturn_mcp.router)
 app.include_router(wallets.router)

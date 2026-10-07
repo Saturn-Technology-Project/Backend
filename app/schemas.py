@@ -32,6 +32,8 @@ class AgentRead(ORMModel):
     last_seen_at: datetime | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
     tool_set_id: str | None = None
+    profile_id: str | None = None
+    origin: str | None = None
     pushed: bool | None = None
 
 
@@ -404,6 +406,7 @@ class UserRead(ORMModel):
     mcp_gateway: McpGatewayRead | None = None
     permissions: dict[str, str] = Field(default_factory=dict)
     role: str | None = None
+    profile_id: str = ""
 
 
 class AccessPermissions(BaseModel):

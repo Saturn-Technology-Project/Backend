@@ -1,6 +1,7 @@
 async def test_me_includes_enterprise_employee_agents_and_mcp(client):
     me = (await client.get("/auth/me")).json()
     assert me["id"] == "user_operator"
+    assert me["profile_id"] == "org_saturn:user_operator"
     assert me["organization"]["id"] == "org_saturn"
     assert me["enterprise"]["id"] == "org_saturn"
     assert me["enterprise"]["name"] == me["organization"]["name"]
