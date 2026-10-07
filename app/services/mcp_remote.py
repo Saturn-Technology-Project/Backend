@@ -66,6 +66,17 @@ def _tools(body: dict[str, Any]) -> list[dict[str, Any]]:
     return tools
 
 
+class McpUnauthorized(Exception):
+    def __init__(self, www_authenticate: str, endpoint: str) -> None:
+        self.www_authenticate = www_authenticate
+        self.endpoint = endpoint
+
+
+def _unauthorized(response: httpx.Response, endpoint: str) -> None:
+    if response.status_code == 401:
+        raise McpUnauthorized(response.headers.get("www-authenticate", ""), endpoint)
+
+
 async def _rpc(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -149,6 +160,7 @@ async def call_remote_tool(
     if called.status_code >= 400:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"MCP server returned HTTP {called.status_code}")
     body = _payload(called)
+    _unauthorized(called, url)
     if body.get("error"):
         message = body["error"].get("message") if isinstance(body["error"], dict) else "MCP tools/call failed"
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(message or "MCP tools/call failed"))

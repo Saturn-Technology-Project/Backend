@@ -1,10 +1,12 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse
 
 from app.api.deps import AgentsRead, CurrentUser, SaturnCloud, SessionDep, TeamWrite
 from app.models import McpServer
-from app.schemas import McpConnect, McpServerRead, McpToolRead
+from app.schemas import McpConnect, McpOAuthBegin, McpOAuthStart, McpServerRead, McpToolRead
 from app.services.mapping_service import mapping_service
 from app.services.mcp_connect import mcp_connect_service
+from app.services.mcp_oauth import mcp_oauth
 from app.services.removal_service import removal_service
 from app.services.mcp_gateway import mcp_gateway
 
@@ -37,6 +39,38 @@ async def list_mcp_servers(session: SessionDep, user: CurrentUser, _access: Agen
     await mapping_service.bind_workspace(session, user)
     servers = await mapping_service.list_mcp_servers(session, user)
     return [serialize_mcp_server(server) for server in servers]
+
+
+@router.post("/oauth/start", response_model=McpOAuthStart)
+async def start_mcp_oauth(
+    body: McpOAuthBegin,
+    request: Request,
+    session: SessionDep,
+    user: CurrentUser,
+    _access: TeamWrite,
+    _cloud: SaturnCloud,
+):
+    result = await mcp_oauth.begin(
+        session,
+        user,
+        name=body.name,
+        endpoint=body.endpoint,
+        origin=str(request.base_url).rstrip("/"),
+        nonce=body.nonce,
+    )
+    if result.get("authorization_url"):
+        return McpOAuthStart(authorization_url=result["authorization_url"])
+    return McpOAuthStart(server=serialize_mcp_server(result["server"]))
+
+
+@router.get("/oauth/callback", response_class=HTMLResponse)
+async def finish_mcp_oauth(request: Request, session: SessionDep) -> HTMLResponse:
+    return await mcp_oauth.finish(
+        session,
+        code=request.query_params.get("code", ""),
+        state=request.query_params.get("state", ""),
+        error=request.query_params.get("error", ""),
+    )
 
 
 @router.post("", response_model=McpServerRead, status_code=201)

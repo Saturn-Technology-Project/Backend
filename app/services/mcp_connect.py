@@ -11,7 +11,7 @@ from app.core.ids import new_id
 from app.models import McpServer, Tool, User
 from app.models.enums import ToolStatus, ToolType
 from app.services.credential_service import open_secret, seal
-from app.services.mcp_remote import list_remote_tools
+from app.services.mcp_remote import McpUnauthorized, list_remote_tools
 
 
 def _slug(value: str) -> str:
@@ -54,7 +54,12 @@ class McpConnectService:
         secret = existing.auth_ciphertext if existing is not None else ""
         if authorization is not None:
             secret = seal(authorization.strip()) if authorization.strip() else ""
-        discovered = await list_remote_tools(url, open_secret(secret))
+        try:
+            discovered = await list_remote_tools(url, open_secret(secret))
+        except McpUnauthorized as exc:
+            if authorization and authorization.strip():
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Access token was rejected") from exc
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server requires sign-in") from exc
         if existing is None:
             server = McpServer(
                 id=new_id("mcp"),
@@ -83,7 +88,19 @@ class McpConnectService:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "MCP server not found")
         if not server.endpoint:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP server has no endpoint")
-        discovered = await list_remote_tools(server.endpoint, open_secret(server.auth_ciphertext))
+        from app.services.mcp_oauth import mcp_oauth
+
+        secret = await mcp_oauth.authorization_for(session, server)
+        try:
+            discovered = await list_remote_tools(server.endpoint, secret)
+        except McpUnauthorized:
+            secret = await mcp_oauth.refresh_after_reject(session, server)
+            if not secret:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Access token was rejected")
+            try:
+                discovered = await list_remote_tools(server.endpoint, secret)
+            except McpUnauthorized as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Access token was rejected") from exc
         await self._store_tools(session, server, discovered)
         result = await session.execute(
             select(McpServer).options(selectinload(McpServer.tools)).where(McpServer.id == server.id)

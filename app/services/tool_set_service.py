@@ -6,7 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.ids import new_id, utcnow
-from app.models import Agent, Tool, ToolSet, ToolSetItem, User
+from app.models import Agent, Employee, Tool, ToolSet, ToolSetItem, User
+from app.services.access import allows, may_edit_agent
+from app.services.plans import profile_identity
 
 
 class ToolSetService:
@@ -91,7 +93,30 @@ class ToolSetService:
         await session.delete(tool_set)
         await session.flush()
 
-    async def assign(self, session: AsyncSession, user: User, agent: Agent, tool_set_id: str | None) -> None:
+    def owns_profile(self, user: User, agent: Agent) -> bool:
+        if str((agent.settings or {}).get("origin") or "") != "saturn_mcp":
+            return False
+        org = user.organization
+        expected = profile_identity(
+            user.id,
+            user.organization_id,
+            getattr(org, "kind", None),
+            getattr(org, "plan", None),
+        )
+        return str((agent.settings or {}).get("profile_id") or "") == expected
+
+    async def assign(
+        self,
+        session: AsyncSession,
+        user: User,
+        employee: Employee,
+        agent: Agent,
+        tool_set_id: str | None,
+    ) -> None:
+        if not allows(employee.permissions, "team", "write") and not (
+            self.owns_profile(user, agent) or may_edit_agent(employee, agent.id)
+        ):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot assign a tool set to this agent")
         if tool_set_id:
             await self._owned(session, user, tool_set_id)
             agent.tool_set_id = tool_set_id

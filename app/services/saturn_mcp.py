@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,7 +12,6 @@ from app.core.ids import new_id, utcnow
 from app.models import Action, Agent, Approval, Run, Tool, ToolSet, ToolSetItem, User
 from app.models.enums import ActionStatus, ActorType, AgentStatus, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
 from app.services.audit_service import audit_service
-from app.services.credential_service import open_secret
 from app.services.mcp_remote import call_remote_tool
 from app.services.policy_engine import policy_engine
 
@@ -62,7 +62,12 @@ class SaturnMcp:
             return rpc_result(request_id, {})
         agent = await session.get(Agent, agent_id) if agent_id else None
         if agent is None and not agent_id and profile_id:
-            agent = await self._profile_agent(session, user, profile_id)
+            if client_name:
+                agent = await self._client_agent(session, user, profile_id, client_name)
+            if agent is None:
+                matches = await self._profile_agents(session, user, profile_id)
+                if not client_name or len(matches) == 1:
+                    agent = matches[0] if matches else None
         if agent is None or agent.organization_id != user.organization_id:
             return rpc_error(request_id, -32000, "Unknown agent")
         if str((agent.settings or {}).get("origin") or "") == "saturn_mcp":
@@ -142,17 +147,40 @@ class SaturnMcp:
         agent.last_seen_at = utcnow()
         await session.flush()
 
-    async def _profile_agent(self, session: AsyncSession, user: User, profile_id: str) -> Agent | None:
+    async def _profile_agents(self, session: AsyncSession, user: User, profile_id: str) -> list[Agent]:
         result = await session.execute(
             select(Agent)
             .where(Agent.organization_id == user.organization_id)
             .order_by(Agent.last_seen_at.desc())
         )
+        matched: list[Agent] = []
         for agent in result.scalars().all():
             settings = agent.settings or {}
             if settings.get("origin") == "saturn_mcp" and settings.get("profile_id") == profile_id:
+                matched.append(agent)
+        return matched
+
+    async def _client_agent(
+        self,
+        session: AsyncSession,
+        user: User,
+        profile_id: str,
+        client_name: str,
+    ) -> Agent | None:
+        name = client_name.strip()[:255] or "Agent"
+        direct = await session.get(Agent, self._client_id(profile_id, name))
+        if self._same_client(direct, user, profile_id):
+            return direct
+        for agent in await self._profile_agents(session, user, profile_id):
+            if agent.name == name:
                 return agent
         return None
+
+    def _same_client(self, agent: Agent | None, user: User, profile_id: str) -> bool:
+        if agent is None or agent.organization_id != user.organization_id:
+            return False
+        settings = agent.settings or {}
+        return settings.get("origin") == "saturn_mcp" and settings.get("profile_id") == profile_id
 
     async def _bind_profile(
         self,
@@ -259,7 +287,7 @@ class SaturnMcp:
                 run_id=run_id,
                 action_id=action_id,
             )
-        result = await self._proxy(tool, arguments)
+        result = await self._proxy(session, tool, arguments)
         await audit_service.log(
             session,
             event=AuditEvent.TOOL_EXECUTED,
@@ -288,7 +316,7 @@ class SaturnMcp:
         if action is not None:
             approval = await session.scalar(select(Approval).where(Approval.action_id == action.id))
             if approval is not None and approval.status == ApprovalStatus.APPROVED.value:
-                result = await self._proxy(tool, arguments)
+                result = await self._proxy(session, tool, arguments)
                 action.status = ActionStatus.COMPLETED.value
                 action.result = result
                 run = await session.get(Run, action.run_id)
@@ -377,12 +405,24 @@ class SaturnMcp:
             {"approval_id": approval.id, "run_id": run.id, "action_id": action.id},
         )
 
-    async def _proxy(self, tool: Tool, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _proxy(self, session: AsyncSession, tool: Tool, arguments: dict[str, Any]) -> dict[str, Any]:
+        from app.services.mcp_oauth import mcp_oauth
+        from app.services.mcp_remote import McpUnauthorized
+
         server = tool.mcp_server
         endpoint = (server.endpoint if server is not None else "") or tool.mcp_endpoint
-        secret = open_secret(server.auth_ciphertext) if server is not None else ""
+        secret = await mcp_oauth.authorization_for(session, server)
         upstream = tool.upstream_name or tool.name
-        return await call_remote_tool(endpoint, upstream, arguments, secret)
+        try:
+            return await call_remote_tool(endpoint, upstream, arguments, secret)
+        except McpUnauthorized:
+            secret = await mcp_oauth.refresh_after_reject(session, server)
+            if not secret:
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server returned HTTP 401")
+            try:
+                return await call_remote_tool(endpoint, upstream, arguments, secret)
+            except McpUnauthorized as exc:
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server returned HTTP 401") from exc
 
 
 saturn_mcp = SaturnMcp()

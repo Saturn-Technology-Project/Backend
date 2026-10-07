@@ -78,7 +78,10 @@ class AgentService:
         body: AgentUpdate,
     ) -> Agent:
         agent = await mapping_service.require_org_agent(session, user, agent_id)
-        if not may_edit_agent(employee, agent.id):
+        from app.services.tool_set_service import tool_set_service
+
+        set_only = body.model_fields_set == {"tool_set_id"}
+        if not may_edit_agent(employee, agent.id) and not (set_only and tool_set_service.owns_profile(user, agent)):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot modify this agent")
         admin = allows(employee.permissions, "team", "write")
         if (
@@ -117,9 +120,7 @@ class AgentService:
                     },
                 )
         if "tool_set_id" in body.model_fields_set:
-            from app.services.tool_set_service import tool_set_service
-
-            await tool_set_service.assign(session, user, agent, body.tool_set_id)
+            await tool_set_service.assign(session, user, employee, agent, body.tool_set_id)
         if body.model is not None:
             agent.model = body.model
             settings = dict(agent.settings or {})

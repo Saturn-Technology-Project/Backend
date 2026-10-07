@@ -116,6 +116,17 @@ class McpConnect(BaseModel):
     authorization: str | None = None
 
 
+class McpOAuthBegin(BaseModel):
+    name: str
+    endpoint: str
+    nonce: str
+
+
+class McpOAuthStart(BaseModel):
+    authorization_url: str | None = None
+    server: McpServerRead | None = None
+
+
 class AppMcpToolRead(BaseModel):
     tool_id: str
     description: str = ""

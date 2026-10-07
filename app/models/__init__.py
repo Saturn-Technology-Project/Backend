@@ -13,6 +13,7 @@ from app.models.conversation import ConversationMessage
 from app.models.credential import OrgCredential
 from app.models.employee import Employee
 from app.models.invitation import Invitation
+from app.models.mcp_oauth import McpOAuthPending
 from app.models.mcp_server import McpServer
 from app.models.oauth import OAuthAccess, OAuthClient, OAuthGrant
 from app.models.organization import Organization
@@ -37,6 +38,7 @@ __all__ = [
     "OrgCredential",
     "Employee",
     "Invitation",
+    "McpOAuthPending",
     "McpServer",
     "OAuthAccess",
     "OAuthClient",
