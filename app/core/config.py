@@ -28,15 +28,6 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def public_http_origin(fallback: str = "") -> str:
-    raw = (get_settings().public_ws_url or "").strip().rstrip("/")
-    if raw.endswith("/saturn-api"):
-        raw = raw[: -len("/saturn-api")]
-    if raw.startswith("https://") or raw.startswith("http://"):
-        return raw
-    return fallback.rstrip("/")
-
-
 def public_ws_origin() -> str:
     raw = (get_settings().public_ws_url or "").strip().rstrip("/")
     if raw.endswith("/saturn-api"):

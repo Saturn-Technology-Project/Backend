@@ -8,7 +8,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from app.api.deps import SessionDep
-from app.core.config import public_http_origin
 from app.services.auth_service import auth_service
 from app.services.oauth_service import SCOPE, oauth_service, redirect_allowed
 from app.services.plans import profile_identity
@@ -18,7 +17,7 @@ COOKIE = "saturn_oauth"
 
 
 def origin_of(request: Request) -> str:
-    return public_http_origin(str(request.base_url).rstrip("/"))
+    return str(request.base_url).rstrip("/")
 
 
 def metadata(origin: str) -> dict:

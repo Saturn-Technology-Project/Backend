@@ -3,7 +3,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 
 from app.api.deps import SessionDep
-from app.core.config import public_http_origin
 from app.models import Organization
 from app.services.auth_service import auth_service
 from app.services.oauth_service import oauth_service
@@ -23,7 +22,7 @@ def _unauthorized(origin: str) -> HTTPException:
 
 @router.post("/mcp")
 async def saturn_mcp_endpoint(request: Request, session: SessionDep) -> dict[str, Any]:
-    origin = public_http_origin(str(request.base_url).rstrip("/"))
+    origin = str(request.base_url).rstrip("/")
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
     if not token:
