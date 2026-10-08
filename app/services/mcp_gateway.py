@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.ids import utcnow
 from app.models import McpServer
 
 
@@ -44,16 +45,14 @@ class McpGateway:
         return links
 
     def _connect_server(self, server: McpServer) -> GatewayLink:
-        existing = self._links.get(server.id)
-        if existing is not None and existing.endpoint == server.endpoint and not existing.connected:
-            return existing
+        live = server.status == "active" and bool(server.endpoint)
         link = GatewayLink(
             server_id=server.id,
             organization_id=server.organization_id,
             name=server.name,
             endpoint=server.endpoint,
-            connected=False,
-            connected_at=None,
+            connected=live,
+            connected_at=utcnow() if live else None,
             error=None,
         )
         self._links[server.id] = link

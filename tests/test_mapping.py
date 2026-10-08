@@ -14,9 +14,9 @@ async def test_me_includes_enterprise_employee_agents_and_mcp(client):
     assert names == {"Billing", "CRM", "Email"}
     billing = next(server for server in me["mcp_servers"] if server["id"] == "mcp_billing")
     assert "billing.refund" in billing["tools"]
-    assert billing["connected"] is False
-    assert me["mcp_gateway"]["status"] in {"disconnected", "none"}
-    assert me["mcp_gateway"]["connected"] == 0
+    assert billing["connected"] is True
+    assert me["mcp_gateway"]["status"] == "connected"
+    assert me["mcp_gateway"]["connected"] == 3
     assert me["mcp_gateway"]["total"] == 3
     assert any(user["email"] == "rick@saturn.ai" for user in me["users"])
 
@@ -38,7 +38,7 @@ async def test_catalog_is_scoped_to_org(client):
 
     servers = (await client.get("/mcp-servers")).json()
     assert {server["id"] for server in servers} == {"mcp_billing", "mcp_crm", "mcp_email"}
-    assert all(server["connected"] is False for server in servers)
+    assert all(server["connected"] is True for server in servers)
 
     org = (await client.get("/org")).json()
     assert {agent["id"] for agent in org["agents"]} >= {"agent_customer_ops"}
