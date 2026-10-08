@@ -67,6 +67,9 @@ class McpGateway:
         self._links[server.id] = link
         return link
 
+    def reset(self) -> None:
+        self._links.clear()
+
     def link_for(self, server_id: str) -> GatewayLink | None:
         return self._links.get(server_id)
 

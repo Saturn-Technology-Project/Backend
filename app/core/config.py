@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     x402_asset_address: str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
     x402_pay_to: str = ""
     in_process_runtime: bool = False
+    saturn_secret_project: str = ""
 
 
 @lru_cache

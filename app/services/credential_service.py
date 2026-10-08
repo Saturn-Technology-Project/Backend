@@ -25,17 +25,7 @@ def _key() -> bytes:
     return hashlib.sha256(f"saturn-org-credential:{raw}".encode()).digest()
 
 
-def _stream(nonce: bytes, length: int) -> bytes:
-    out = bytearray()
-    counter = 0
-    key = _key()
-    while len(out) < length:
-        out.extend(hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest())
-        counter += 1
-    return bytes(out[:length])
-
-
-def seal(plain: str) -> str:
+def _legacy_seal(plain: str) -> str:
     if not plain:
         return ""
     nonce = os.urandom(16)
@@ -45,8 +35,8 @@ def seal(plain: str) -> str:
     return base64.b64encode(nonce + mac + cipher).decode()
 
 
-def open_secret(token: str) -> str:
-    if not token:
+def _legacy_open(token: str) -> str:
+    if not token or token.startswith("pq1."):
         return ""
     try:
         raw = base64.b64decode(token)
@@ -63,6 +53,32 @@ def open_secret(token: str) -> str:
         return plain.decode()
     except UnicodeDecodeError:
         return ""
+
+
+def _stream(nonce: bytes, length: int) -> bytes:
+    out = bytearray()
+    counter = 0
+    key = _key()
+    while len(out) < length:
+        out.extend(hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest())
+        counter += 1
+    return bytes(out[:length])
+
+
+def seal(plain: str) -> str:
+    from app.services.pq_crypto import seal as pq_seal
+
+    return pq_seal(plain)
+
+
+def open_secret(token: str) -> str:
+    from app.services.pq_crypto import open_secret as pq_open
+
+    if not token:
+        return ""
+    if token.startswith("pq1."):
+        return pq_open(token)
+    return _legacy_open(token)
 
 
 def _clip(value: str, limit: int) -> str:
@@ -113,7 +129,16 @@ class CredentialService:
         current.broker_id = _clip(body.broker_id, 64) or current.id
         current.allowed_paths = [str(item).strip() for item in body.allowed_paths if str(item).strip()]
         if body.secret is not None:
-            current.secret_ciphertext = seal(body.secret)
+            from app.services.secret_vault import delete_secret, put_secret
+
+            vault_id = f"org-{current.id}"
+            if body.secret:
+                await put_secret(session, vault_id, body.secret)
+                current.vault_id = vault_id
+            else:
+                await delete_secret(session, current.vault_id or vault_id)
+                current.vault_id = ""
+            current.secret_ciphertext = ""
         current.updated_at = utcnow()
         await session.flush()
         return current
@@ -122,6 +147,9 @@ class CredentialService:
         current = await session.get(OrgCredential, credential_id)
         if current is None or current.organization_id != user.organization_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Credential not found")
+        from app.services.secret_vault import delete_secret
+
+        await delete_secret(session, current.vault_id)
         await session.delete(current)
 
 

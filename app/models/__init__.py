@@ -16,6 +16,7 @@ from app.models.invitation import Invitation
 from app.models.mcp_oauth import McpOAuthPending
 from app.models.mcp_server import McpServer
 from app.models.oauth import OAuthAccess, OAuthClient, OAuthGrant
+from app.models.secret_vault import SecretVault
 from app.models.organization import Organization
 from app.models.payment import Payment
 from app.models.policy import Policy, PolicyRule
@@ -48,6 +49,7 @@ __all__ = [
     "Policy",
     "PolicyRule",
     "Run",
+    "SecretVault",
     "Tool",
     "ToolSet",
     "ToolSetItem",

@@ -98,6 +98,9 @@ class RemovalService:
                 session.expire(obj, ["mcp_servers"])
             if isinstance(obj, Agent) and "mcp_servers" in obj.__dict__:
                 session.expire(obj, ["mcp_servers"])
+        from app.services.secret_vault import delete_secret
+
+        await delete_secret(session, server.credential_id)
         await session.delete(server)
         await session.flush()
 

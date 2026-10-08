@@ -77,6 +77,12 @@ def _unauthorized(response: httpx.Response, endpoint: str) -> None:
         raise McpUnauthorized(response.headers.get("www-authenticate", ""), endpoint)
 
 
+def _raise_for_status(response: httpx.Response, endpoint: str) -> None:
+    _unauthorized(response, endpoint)
+    if response.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"MCP server returned HTTP {response.status_code}")
+
+
 async def _rpc(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -113,12 +119,12 @@ async def list_remote_tools(endpoint: str, authorization: str = "") -> list[dict
             },
             1,
         )
+        _raise_for_status(init, url)
         session_id = init.headers.get("mcp-session-id", "")
         if session_id:
             headers = _headers(authorization, session_id)
         listed = await _rpc(client, url, headers, "tools/list", {}, 2)
-    if listed.status_code >= 400:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"MCP server returned HTTP {listed.status_code}")
+    _raise_for_status(listed, url)
     tools = _tools(_payload(listed))
     if not tools:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server did not list any tools")
@@ -146,6 +152,7 @@ async def call_remote_tool(
             },
             1,
         )
+        _raise_for_status(init, url)
         session_id = init.headers.get("mcp-session-id", "")
         if session_id:
             headers = _headers(authorization, session_id)
@@ -157,10 +164,8 @@ async def call_remote_tool(
             {"name": name, "arguments": arguments},
             2,
         )
-    if called.status_code >= 400:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"MCP server returned HTTP {called.status_code}")
+    _raise_for_status(called, url)
     body = _payload(called)
-    _unauthorized(called, url)
     if body.get("error"):
         message = body["error"].get("message") if isinstance(body["error"], dict) else "MCP tools/call failed"
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(message or "MCP tools/call failed"))

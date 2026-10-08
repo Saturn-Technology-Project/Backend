@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 from app.core.ids import new_id
 from app.models import McpServer, Tool, User
 from app.models.enums import ToolStatus, ToolType
-from app.services.credential_service import open_secret, seal
+from app.services.mcp_grant import read_grant, write_grant
 from app.services.mcp_remote import McpUnauthorized, list_remote_tools
 
 
@@ -51,11 +51,13 @@ class McpConnectService:
                 McpServer.name == label,
             )
         )
-        secret = existing.auth_ciphertext if existing is not None else ""
+        token = ""
+        if existing is not None:
+            token = (await read_grant(session, existing))["access_token"]
         if authorization is not None:
-            secret = seal(authorization.strip()) if authorization.strip() else ""
+            token = authorization.strip()
         try:
-            discovered = await list_remote_tools(url, open_secret(secret))
+            discovered = await list_remote_tools(url, token)
         except McpUnauthorized as exc:
             if authorization and authorization.strip():
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Access token was rejected") from exc
@@ -66,7 +68,6 @@ class McpConnectService:
                 organization_id=user.organization_id,
                 name=label,
                 endpoint=url,
-                auth_ciphertext=secret,
                 status="active",
             )
             session.add(server)
@@ -74,8 +75,16 @@ class McpConnectService:
         else:
             server = existing
             server.endpoint = url
-            server.auth_ciphertext = secret
             server.status = "active"
+        if authorization is not None:
+            if token:
+                await write_grant(
+                    session,
+                    server,
+                    {"access_token": token, "refresh_token": "", "client_secret": ""},
+                )
+            else:
+                await write_grant(session, server, {})
         await self._store_tools(session, server, discovered)
         result = await session.execute(
             select(McpServer).options(selectinload(McpServer.tools)).where(McpServer.id == server.id)

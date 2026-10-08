@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from app.services.mcp_remote import McpUnauthorized
+from app.services.mcp_remote import McpUnauthorized, list_remote_tools
 
 
 def _response(status_code: int, body: dict) -> httpx.Response:
@@ -138,3 +138,116 @@ async def test_provider_denial_does_not_store_a_token(client, monkeypatch):
     assert "nonce-87654321" in page.text
     names = [item["name"] for item in (await client.get("/mcp-servers")).json()]
     assert "Notion" not in names
+
+
+@pytest.mark.asyncio
+async def test_github_401_asks_for_sign_in_instead_of_failing(monkeypatch):
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return httpx.Response(
+                401,
+                headers={
+                    "www-authenticate": 'Bearer resource_metadata="https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/"'
+                },
+                text="bad request: missing required Authorization header",
+            )
+
+    monkeypatch.setattr("app.services.mcp_remote.httpx.AsyncClient", Client)
+    with pytest.raises(McpUnauthorized) as caught:
+        await list_remote_tools("https://api.githubcopilot.com/mcp/", "")
+    assert "oauth-protected-resource/mcp/" in caught.value.www_authenticate
+
+
+@pytest.mark.asyncio
+async def test_github_sign_in_uses_the_configured_oauth_app(client, monkeypatch):
+    monkeypatch.setenv("SATURN_GITHUB_OAUTH_CLIENT_ID", "Iv1.saturn")
+    monkeypatch.setenv("SATURN_GITHUB_OAUTH_CLIENT_SECRET", "secret-value")
+
+    async def listed(endpoint, authorization=""):
+        raise McpUnauthorized(
+            'Bearer resource_metadata="https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/"',
+            endpoint,
+        )
+
+    async def requested(method, url, **kwargs):
+        if url == "https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/":
+            return _response(
+                200,
+                {
+                    "resource": "https://api.githubcopilot.com/mcp/",
+                    "authorization_servers": ["https://github.com/login/oauth"],
+                    "scopes_supported": ["repo", "read:user"],
+                },
+            )
+        if url == "https://github.com/.well-known/oauth-authorization-server/login/oauth":
+            return _response(
+                200,
+                {
+                    "authorization_endpoint": "https://github.com/login/oauth/authorize",
+                    "token_endpoint": "https://github.com/login/oauth/access_token",
+                },
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.services.mcp_oauth._request", requested)
+    started = await client.post(
+        "/mcp-servers/oauth/start",
+        json={"name": "GitHub", "endpoint": "https://api.githubcopilot.com/mcp/", "nonce": "nonce-github1"},
+    )
+    assert started.status_code == 200, started.text
+    authorize = urlparse(started.json()["authorization_url"])
+    assert authorize.netloc == "github.com"
+    query = parse_qs(authorize.query)
+    assert query["client_id"] == ["Iv1.saturn"]
+    assert "client_secret" not in query
+    assert query["scope"] == ["repo read:user"]
+
+
+@pytest.mark.asyncio
+async def test_github_without_an_oauth_app_asks_for_a_pasted_token(client, monkeypatch):
+    monkeypatch.delenv("SATURN_GITHUB_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("SATURN_GITHUB_OAUTH_CLIENT_SECRET", raising=False)
+
+    async def listed(endpoint, authorization=""):
+        raise McpUnauthorized(
+            'Bearer resource_metadata="https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/"',
+            endpoint,
+        )
+
+    async def requested(method, url, **kwargs):
+        if "oauth-protected-resource" in url:
+            return _response(
+                200,
+                {
+                    "resource": "https://api.githubcopilot.com/mcp/",
+                    "authorization_servers": ["https://github.com/login/oauth"],
+                },
+            )
+        if "oauth-authorization-server" in url:
+            return _response(
+                200,
+                {
+                    "authorization_endpoint": "https://github.com/login/oauth/authorize",
+                    "token_endpoint": "https://github.com/login/oauth/access_token",
+                },
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.services.mcp_oauth._request", requested)
+    started = await client.post(
+        "/mcp-servers/oauth/start",
+        json={"name": "GitHub", "endpoint": "https://api.githubcopilot.com/mcp/", "nonce": "nonce-github2"},
+    )
+    assert started.status_code == 400
+    assert started.json()["detail"] == "This MCP server does not let Saturn start sign-in"

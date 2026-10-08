@@ -23,6 +23,7 @@ class OrgCredential(Base):
     broker_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     allowed_paths: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     secret_ciphertext: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    vault_id: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )

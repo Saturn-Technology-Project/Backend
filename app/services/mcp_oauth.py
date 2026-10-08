@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import secrets
 from dataclasses import dataclass
@@ -19,7 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.ids import new_id, utcnow
 from app.models import McpOAuthPending, McpServer, User
 from app.services.auth_service import hash_token
+from app.services.audit_service import audit_service
 from app.services.credential_service import open_secret, seal
+from app.services.mcp_grant import read_grant, write_grant
 from app.services.mcp_remote import McpUnauthorized, list_remote_tools
 from app.services.oauth_service import pkce_s256
 
@@ -35,6 +38,7 @@ class Discovery:
     registration_endpoint: str
     resource: str
     scope: str
+    issuer: str
 
 
 def _aware(value):
@@ -144,12 +148,12 @@ async def discover(endpoint: str, www_authenticate: str) -> Discovery:
     if auth_doc is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server did not offer a sign-in page")
     registration = str(auth_doc.get("registration_endpoint") or "")
-    if not registration:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server does not let Saturn start sign-in")
     scopes = resource_doc.get("scopes_supported")
     scope = " ".join(str(item) for item in scopes if str(item).strip()) if isinstance(scopes, list) else ""
     resource = str(resource_doc.get("resource") or endpoint).strip()
-    if not url_allowed(str(auth_doc["authorization_endpoint"])) or not url_allowed(str(auth_doc["token_endpoint"])) or not url_allowed(registration):
+    if not url_allowed(str(auth_doc["authorization_endpoint"])) or not url_allowed(str(auth_doc["token_endpoint"])):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server did not offer a sign-in page")
+    if registration and not url_allowed(registration):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server did not offer a sign-in page")
     return Discovery(
         authorization_endpoint=str(auth_doc["authorization_endpoint"]),
@@ -157,7 +161,17 @@ async def discover(endpoint: str, www_authenticate: str) -> Discovery:
         registration_endpoint=registration,
         resource=resource,
         scope=scope,
+        issuer=issuer.rstrip("/"),
     )
+
+
+def preset_client(issuer: str) -> dict[str, str] | None:
+    if issuer.rstrip("/") != "https://github.com/login/oauth":
+        return None
+    client_id = os.environ.get("SATURN_GITHUB_OAUTH_CLIENT_ID", "").strip()
+    if not client_id:
+        return None
+    return {"client_id": client_id, "client_secret": os.environ.get("SATURN_GITHUB_OAUTH_CLIENT_SECRET", "").strip()}
 
 
 class McpOAuth:
@@ -239,6 +253,11 @@ class McpOAuth:
         return f"{found.authorization_endpoint}?{urlencode(query)}"
 
     async def _register(self, found: Discovery, redirect_uri: str) -> dict[str, str]:
+        preset = preset_client(found.issuer)
+        if preset is not None:
+            return preset
+        if not found.registration_endpoint:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server does not let Saturn start sign-in")
         body: dict[str, Any] = {
             "client_name": "Saturn",
             "redirect_uris": [redirect_uri],
@@ -290,7 +309,7 @@ class McpOAuth:
                 endpoint=pending.endpoint,
                 authorization=token["access_token"],
             )
-            self._remember(server, pending, token, secret)
+            await self._remember(session, server, pending, token, secret)
             await session.delete(pending)
             await session.flush()
         except HTTPException as exc:
@@ -314,24 +333,41 @@ class McpOAuth:
             form["client_secret"] = client_secret
         return await _token(pending.token_endpoint, form)
 
-    def _remember(self, server: McpServer, pending: McpOAuthPending, token: dict[str, Any], client_secret: str) -> None:
-        refresh = str(token.get("refresh_token") or "")
-        server.refresh_ciphertext = seal(refresh) if refresh else ""
+    async def _remember(
+        self,
+        session: AsyncSession,
+        server: McpServer,
+        pending: McpOAuthPending,
+        token: dict[str, Any],
+        client_secret: str,
+    ) -> None:
         server.oauth_client_id = pending.client_id
-        server.oauth_client_secret = seal(client_secret) if client_secret else ""
         server.oauth_token_endpoint = pending.token_endpoint
         server.oauth_resource = pending.resource
+        server.oauth_scope = str(token.get("scope") or pending.scope or "")
         server.token_expires_at = _expires_at(token)
+        await write_grant(
+            session,
+            server,
+            {
+                "access_token": str(token.get("access_token") or ""),
+                "refresh_token": str(token.get("refresh_token") or ""),
+                "client_secret": client_secret,
+            },
+        )
 
     async def authorization_for(self, session: AsyncSession, server: McpServer | None) -> str:
         if server is None:
             return ""
-        secret = open_secret(server.auth_ciphertext)
+        grant = await read_grant(session, server)
+        secret = grant["access_token"]
         expires = server.token_expires_at
         if expires is not None and _aware(expires) <= utcnow() + timedelta(seconds=60):
             refreshed = await self._refresh(session, server)
             if refreshed:
                 return refreshed
+        if secret:
+            await self._audit_open(session, server, "upstream_mcp")
         return secret
 
     async def refresh_after_reject(self, session: AsyncSession, server: McpServer | None) -> str:
@@ -340,9 +376,11 @@ class McpOAuth:
         return await self._refresh(session, server)
 
     async def _refresh(self, session: AsyncSession, server: McpServer) -> str:
-        refresh = open_secret(server.refresh_ciphertext)
+        grant = await read_grant(session, server)
+        refresh = grant["refresh_token"]
         if not refresh or not server.oauth_token_endpoint or not server.oauth_client_id:
             return ""
+        await self._audit_open(session, server, "refresh")
         form = {
             "grant_type": "refresh_token",
             "refresh_token": refresh,
@@ -350,9 +388,8 @@ class McpOAuth:
         }
         if server.oauth_resource:
             form["resource"] = server.oauth_resource
-        secret = open_secret(server.oauth_client_secret)
-        if secret:
-            form["client_secret"] = secret
+        if grant["client_secret"]:
+            form["client_secret"] = grant["client_secret"]
         try:
             token = await _token(server.oauth_token_endpoint, form)
         except HTTPException:
@@ -360,13 +397,26 @@ class McpOAuth:
         access = str(token.get("access_token") or "")
         if not access:
             return ""
-        server.auth_ciphertext = seal(access)
         rotated = str(token.get("refresh_token") or "")
         if rotated:
-            server.refresh_ciphertext = seal(rotated)
+            grant["refresh_token"] = rotated
+        grant["access_token"] = access
         server.token_expires_at = _expires_at(token)
-        await session.flush()
+        await write_grant(session, server, grant)
         return access
+
+    async def _audit_open(self, session: AsyncSession, server: McpServer, purpose: str) -> None:
+        from app.models.enums import ActorType, AuditEvent
+
+        await audit_service.log(
+            session,
+            event=AuditEvent.CREDENTIAL_ACCESSED,
+            actor_type=ActorType.SYSTEM,
+            actor_id="saturn",
+            organization_id=server.organization_id,
+            result=server.name,
+            payload={"credential_id": server.credential_id, "purpose": purpose},
+        )
 
 
 def _expires_at(token: dict[str, Any]):

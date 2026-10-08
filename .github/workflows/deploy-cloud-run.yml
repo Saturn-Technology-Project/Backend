@@ -63,6 +63,8 @@ jobs:
           SESSION_TTL_DAYS: ${{ vars.SESSION_TTL_DAYS }}
           CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
           PUBLIC_WS_URL: ${{ vars.BACKEND_PUBLIC_URL }}
+          SATURN_GITHUB_OAUTH_CLIENT_ID: ${{ secrets.SATURN_GITHUB_OAUTH_CLIENT_ID }}
+          SATURN_GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.SATURN_GITHUB_OAUTH_CLIENT_SECRET }}
         run: |
           python3 - <<'PY'
           import os
@@ -84,6 +86,11 @@ jobs:
           public_ws = (os.environ.get("PUBLIC_WS_URL") or "").strip()
           if public_ws:
               values["PUBLIC_WS_URL"] = public_ws
+          github_client_id = (os.environ.get("SATURN_GITHUB_OAUTH_CLIENT_ID") or "").strip()
+          github_client_secret = (os.environ.get("SATURN_GITHUB_OAUTH_CLIENT_SECRET") or "").strip()
+          if github_client_id and github_client_secret:
+              values["SATURN_GITHUB_OAUTH_CLIENT_ID"] = github_client_id
+              values["SATURN_GITHUB_OAUTH_CLIENT_SECRET"] = github_client_secret
           Path("cloud-run.env.yaml").write_text(
               "".join(f'{key}: "{value}"\n' for key, value in values.items()),
               encoding="utf-8",

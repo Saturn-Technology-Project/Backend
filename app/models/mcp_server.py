@@ -24,6 +24,8 @@ class McpServer(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     endpoint: Mapped[str] = mapped_column(String(512), default="", nullable=False)
     auth_ciphertext: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    credential_id: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    oauth_scope: Mapped[str] = mapped_column(Text, default="", nullable=False)
     refresh_ciphertext: Mapped[str] = mapped_column(Text, default="", nullable=False)
     token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     oauth_client_id: Mapped[str] = mapped_column(Text, default="", nullable=False)

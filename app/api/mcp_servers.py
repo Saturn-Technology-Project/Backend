@@ -23,7 +23,7 @@ def serialize_mcp_server(server: McpServer) -> McpServerRead:
         endpoint=server.endpoint,
         status=server.status,
         connected=bool(link and link.connected),
-        has_authorization=bool(server.auth_ciphertext),
+        has_authorization=bool(server.credential_id or server.auth_ciphertext),
         gateway="mcp-gateway",
         organization_id=server.organization_id,
         tools=tools,

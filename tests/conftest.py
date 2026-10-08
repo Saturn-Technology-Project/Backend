@@ -1,6 +1,8 @@
+import base64
 import os
 
 os.environ["SKIP_DB_BOOTSTRAP"] = "true"
+os.environ["SATURN_KEM_SEED"] = base64.b64encode(b"\x42" * 64).decode()
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite://"
 os.environ["IN_PROCESS_RUNTIME"] = "true"
 os.environ["SEED_USER_EMAIL"] = "rick@saturn.ai"
@@ -17,6 +19,7 @@ from app.db.database import Base, get_session
 from app.main import app
 from app.models import *  # noqa: F401,F403
 from app.services.agent_hub import agent_hub
+from app.services.mcp_gateway import mcp_gateway
 from tests.catalog import seed_test_catalog
 
 
@@ -58,6 +61,7 @@ async def client():
 
     app.dependency_overrides[get_session] = override_session
     agent_hub.reset()
+    mcp_gateway.reset()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
         login = await async_client.post(
@@ -70,4 +74,5 @@ async def client():
 
     app.dependency_overrides.clear()
     agent_hub.reset()
+    mcp_gateway.reset()
     await engine.dispose()
