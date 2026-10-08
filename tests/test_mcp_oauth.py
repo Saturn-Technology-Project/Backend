@@ -12,6 +12,7 @@ def _response(status_code: int, body: dict) -> httpx.Response:
 
 @pytest.mark.asyncio
 async def test_marketplace_connect_opens_provider_consent_and_stores_the_token(client, monkeypatch):
+    monkeypatch.delenv("PUBLIC_WS_URL", raising=False)
     async def listed(endpoint, authorization=""):
         assert endpoint == "https://mcp.example/mcp"
         if authorization != "access-1":
@@ -171,6 +172,7 @@ async def test_github_401_asks_for_sign_in_instead_of_failing(monkeypatch):
 async def test_github_sign_in_uses_the_configured_oauth_app(client, monkeypatch):
     monkeypatch.setenv("SATURN_GITHUB_OAUTH_CLIENT_ID", "Iv1.saturn")
     monkeypatch.setenv("SATURN_GITHUB_OAUTH_CLIENT_SECRET", "secret-value")
+    monkeypatch.setenv("PUBLIC_WS_URL", "https://saturn-backend-clcae2l2mq-de.a.run.app")
 
     async def listed(endpoint, authorization=""):
         raise McpUnauthorized(
@@ -211,6 +213,7 @@ async def test_github_sign_in_uses_the_configured_oauth_app(client, monkeypatch)
     assert query["client_id"] == ["Iv1.saturn"]
     assert "client_secret" not in query
     assert query["scope"] == ["repo read:user"]
+    assert query["redirect_uri"] == ["https://saturn-backend-clcae2l2mq-de.a.run.app/mcp-servers/oauth/callback"]
 
 
 @pytest.mark.asyncio

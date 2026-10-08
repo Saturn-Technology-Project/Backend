@@ -165,6 +165,19 @@ async def discover(endpoint: str, www_authenticate: str) -> Discovery:
     )
 
 
+def callback_origin(request_origin: str) -> str:
+    """Use the configured public origin so both Cloud Run hostnames share one callback."""
+    configured = os.environ.get("PUBLIC_WS_URL", "").strip()
+    if configured.startswith("wss://"):
+        configured = "https://" + configured.removeprefix("wss://")
+    elif configured.startswith("ws://"):
+        configured = "http://" + configured.removeprefix("ws://")
+    parsed = urlparse(configured)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return request_origin.rstrip("/")
+
+
 def preset_client(issuer: str) -> dict[str, str] | None:
     if issuer.rstrip("/") != "https://github.com/login/oauth":
         return None

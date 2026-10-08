@@ -6,7 +6,7 @@ from app.models import McpServer
 from app.schemas import McpConnect, McpOAuthBegin, McpOAuthStart, McpServerRead, McpToolRead
 from app.services.mapping_service import mapping_service
 from app.services.mcp_connect import mcp_connect_service
-from app.services.mcp_oauth import mcp_oauth
+from app.services.mcp_oauth import callback_origin, mcp_oauth
 from app.services.removal_service import removal_service
 from app.services.mcp_gateway import mcp_gateway
 
@@ -55,7 +55,7 @@ async def start_mcp_oauth(
         user,
         name=body.name,
         endpoint=body.endpoint,
-        origin=str(request.base_url).rstrip("/"),
+        origin=callback_origin(str(request.base_url).rstrip("/")),
         nonce=body.nonce,
     )
     if result.get("authorization_url"):
