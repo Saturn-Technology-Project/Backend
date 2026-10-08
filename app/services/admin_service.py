@@ -53,11 +53,19 @@ class AdminService:
         connections = await session.scalar(
             select(func.count()).select_from(McpServer).where(McpServer.status == "active")
         )
+        personal = await session.scalar(
+            select(func.count()).select_from(Organization).where(Organization.kind == "personal")
+        )
+        teams = await session.scalar(
+            select(func.count()).select_from(Organization).where(Organization.kind == "organization")
+        )
         return {
             "organizations": int(organizations or 0),
             "users": int(users or 0),
             "agents": int(agents or 0),
             "connections": int(connections or 0),
+            "personal": int(personal or 0),
+            "teams": int(teams or 0),
         }
 
     async def overview(self, session: AsyncSession) -> dict:
@@ -114,7 +122,8 @@ class AdminService:
         )
         snap = mcp_gateway.snapshot(org.id)
         mcp_status = snap["status"] if int(snap["total"] or 0) else "none"
-        runtime_status = "disconnected"
+        kind = org.kind if org.kind in {"personal", "organization"} else kind_for_plan(org.plan)
+        runtime_status = "app" if kind == "personal" else "disconnected"
         return {
             "id": org.id,
             "name": org.name,
@@ -159,6 +168,7 @@ class AdminService:
             select(func.count()).select_from(Policy).where(Policy.organization_id == org.id)
         )
         mcp = snap["status"] if int(snap["total"] or 0) else "none"
+        kind = summary["kind"]
         checks = {
             "runtime": summary["runtime_status"],
             "mcp": mcp,
@@ -168,14 +178,14 @@ class AdminService:
         }
         if org.status == "suspended":
             issues.append("Organization is suspended")
-        if checks["runtime"] != "connected":
+        if kind != "personal" and checks["runtime"] != "connected":
             issues.append("Connector not connected")
         if int(snap["total"] or 0) > 0 and snap["status"] != "connected":
             missing = int(snap["total"]) - int(snap["connected"])
             if missing:
                 issues.append(f"{missing} MCP server{'s' if missing != 1 else ''} unreachable")
         score = 100
-        if checks["runtime"] != "connected":
+        if kind != "personal" and checks["runtime"] != "connected":
             score -= 40
         if checks["mcp"] == "degraded":
             score -= 15
@@ -211,6 +221,7 @@ class AdminService:
         admin_password: str,
         admin_title: str,
         plan: str = "free",
+        kind: str | None = None,
     ) -> tuple[Organization, Employee]:
         cleaned_name = name.strip()
         if not cleaned_name:
@@ -230,6 +241,7 @@ class AdminService:
             status="active",
             agent_ids=[],
             mcp_server_ids=[],
+            kind=kind,
         )
         org = await session.get(Organization, employee.organization_id)
         if org is None:
@@ -478,7 +490,8 @@ class AdminService:
                 {
                     "organization_id": org.id,
                     "organization_name": org.name,
-                    "plan": org.plan,
+                    "plan": canonical_plan(org.plan),
+                    "kind": org.kind if org.kind in {"personal", "organization"} else kind_for_plan(org.plan),
                     "runs": run_rows.get(org.id, 0),
                     "tool_calls": call_rows.get(org.id, 0),
                     "payments": count,
@@ -531,6 +544,7 @@ class AdminService:
         agent_ids: list[str],
         mcp_server_ids: list[str],
         actor: User | None = None,
+        kind: str | None = None,
     ) -> Employee:
         if len(password) < 8:
             raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters")
@@ -555,12 +569,19 @@ class AdminService:
         if organization is not None and organization.kind == "personal":
             raise HTTPException(http_status.HTTP_403_FORBIDDEN, "Personal accounts cannot add members")
         if organization is None:
+            resolved_kind = (kind or "").strip().lower() or kind_for_plan(cleaned_plan)
+            if resolved_kind not in {"personal", "organization"}:
+                raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Account type must be personal or team")
+            if resolved_kind == "personal" and cleaned_plan == "enterprise":
+                raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "A personal account uses Free or Pro")
+            if resolved_kind == "organization" and cleaned_plan != "enterprise":
+                raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "A team account uses Enterprise")
             organization = Organization(
                 id=new_id("org"),
-                name=(org_name or "").strip() or "Organization",
+                name=(org_name or "").strip() or cleaned_name,
                 status="active",
                 plan=cleaned_plan,
-                kind=kind_for_plan(cleaned_plan),
+                kind=resolved_kind,
             )
             session.add(organization)
             await session.flush()
@@ -611,6 +632,47 @@ class AdminService:
                 payload={"email": created.user.email if created.user else normalized, "role": created.role},
             )
         return created
+
+    async def register_personal(
+        self,
+        session: AsyncSession,
+        *,
+        name: str,
+        email: str,
+        password: str,
+    ) -> User:
+        employee = await self.create_member(
+            session,
+            organization=None,
+            org_name=name.strip() or "Personal",
+            plan="free",
+            email=email,
+            name=name,
+            password=password,
+            title="Owner",
+            role="admin",
+            permissions=None,
+            status="active",
+            agent_ids=[],
+            mcp_server_ids=[],
+            kind="personal",
+        )
+        user = employee.user
+        if user is None:
+            raise HTTPException(http_status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to create account")
+        loaded = await session.execute(
+            select(User).options(selectinload(User.organization)).where(User.id == user.id)
+        )
+        account = loaded.scalar_one()
+        await audit_service.log(
+            session,
+            event="org_registered",
+            actor_type=ActorType.USER,
+            actor_id=account.id,
+            organization_id=account.organization_id,
+            payload={"kind": "personal", "plan": "free"},
+        )
+        return account
 
 
 admin_service = AdminService()

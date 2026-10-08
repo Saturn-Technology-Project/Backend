@@ -497,6 +497,8 @@ class AdminStatsRead(BaseModel):
     users: int
     agents: int
     connections: int
+    personal: int = 0
+    teams: int = 0
 
 
 class AdminServiceStatus(BaseModel):
@@ -549,6 +551,7 @@ class AdminOrgOnboardRequest(BaseModel):
     admin_password: str
     admin_title: str = "Admin"
     plan: str = "free"
+    kind: str | None = None
 
 
 class AdminOrgUpdateRequest(BaseModel):
@@ -629,6 +632,7 @@ class AdminUsageRow(BaseModel):
     organization_id: str
     organization_name: str
     plan: str
+    kind: str = "personal"
     runs: int
     tool_calls: int
     payments: int
@@ -657,6 +661,12 @@ class AdminUserRead(ORMModel):
 
 
 class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class RegisterRequest(BaseModel):
+    name: str
     email: str
     password: str
 

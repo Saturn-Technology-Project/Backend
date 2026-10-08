@@ -106,6 +106,7 @@ async def onboard_org(body: AdminOrgOnboardRequest, session: SessionDep, admin: 
         admin_password=body.admin_password,
         admin_title=body.admin_title,
         plan=body.plan,
+        kind=body.kind,
     )
     snap = await admin_service.org_snapshot(session, org)
     return AdminOrgDetail(

@@ -104,3 +104,72 @@ async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
         json={"email": "bea@personal.test", "name": "Bea"},
     )
     assert still_personal.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_public_register_creates_a_personal_org(client):
+    created = await client.post(
+        "/auth/register",
+        json={"name": "Mina", "email": "mina@personal.test", "password": "password1"},
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["token"]
+    assert body["user"]["organization"]["kind"] == "personal"
+    assert body["user"]["organization"]["plan"] == "free"
+    assert body["user"]["organization"]["name"] == "Mina"
+    assert body["user"]["profile_id"] == body["user"]["id"]
+
+    signed = await client.post(
+        "/auth/login",
+        json={"email": "mina@personal.test", "password": "password1"},
+    )
+    assert signed.status_code == 200, signed.text
+    headers = {"Authorization": f"Bearer {signed.json()['token']}"}
+    invited = await client.post(
+        "/org/invites",
+        headers=headers,
+        json={"email": "other@personal.test", "name": "Other"},
+    )
+    assert invited.status_code == 403
+
+    duplicate = await client.post(
+        "/auth/register",
+        json={"name": "Mina", "email": "mina@personal.test", "password": "password1"},
+    )
+    assert duplicate.status_code == 409
+
+    listed = (await client.get("/admin/orgs")).json()
+    org = next(item for item in listed if item["name"] == "Mina")
+    assert org["kind"] == "personal"
+    assert org["plan"] == "free"
+    assert org["runtime_status"] == "app"
+    detail = await client.get(f"/admin/orgs/{org['id']}")
+    assert "Connector not connected" not in detail.json()["health"]["issues"]
+
+    team = await client.post(
+        "/admin/orgs",
+        json={
+            "name": "Team Co",
+            "admin_email": "lead@team.test",
+            "admin_name": "Lead",
+            "admin_password": "password1",
+            "plan": "enterprise",
+            "kind": "organization",
+        },
+    )
+    assert team.status_code == 201, team.text
+    assert team.json()["kind"] == "organization"
+
+    mismatch = await client.post(
+        "/admin/orgs",
+        json={
+            "name": "Nope",
+            "admin_email": "nope@team.test",
+            "admin_name": "Nope",
+            "admin_password": "password1",
+            "plan": "enterprise",
+            "kind": "personal",
+        },
+    )
+    assert mismatch.status_code == 400

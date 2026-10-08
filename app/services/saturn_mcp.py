@@ -58,21 +58,23 @@ class SaturnMcp:
                     "serverInfo": {"name": "Saturn MCP", "version": "0.1.0"},
                 },
             )
-        if method in {"notifications/initialized", "ping"}:
-            return rpc_result(request_id, {})
-        agent = await session.get(Agent, agent_id) if agent_id else None
-        if agent is None and not agent_id and profile_id:
-            if client_name:
-                agent = await self._client_agent(session, user, profile_id, client_name)
-            if agent is None:
-                matches = await self._profile_agents(session, user, profile_id)
-                if not client_name or len(matches) == 1:
-                    agent = matches[0] if matches else None
-        if agent is None or agent.organization_id != user.organization_id:
-            return rpc_error(request_id, -32000, "Unknown agent")
-        if str((agent.settings or {}).get("origin") or "") == "saturn_mcp":
+        agent = await self._client_for_call(session, user, agent_id, profile_id, client_name)
+        if agent is None and profile_id and client_name:
+            await self._connect_client(
+                session,
+                user,
+                "",
+                profile_id,
+                {"clientInfo": {"name": client_name}},
+            )
+            agent = await self._client_for_call(session, user, "", profile_id, client_name)
+        if agent is not None and str((agent.settings or {}).get("origin") or "") == "saturn_mcp":
             agent.last_seen_at = utcnow()
             await session.flush()
+        if method in {"notifications/initialized", "ping"}:
+            return rpc_result(request_id, {})
+        if agent is None or agent.organization_id != user.organization_id:
+            return rpc_error(request_id, -32000, "Unknown agent")
         if method == "tools/list":
             exposed = await self._exposed(session, agent)
             return rpc_result(
@@ -100,6 +102,26 @@ class SaturnMcp:
                 action_id=action_id,
             )
         return rpc_error(request_id, -32601, "Method not found")
+
+    async def _client_for_call(
+        self,
+        session: AsyncSession,
+        user: User,
+        agent_id: str,
+        profile_id: str,
+        client_name: str,
+    ) -> Agent | None:
+        agent = await session.get(Agent, agent_id) if agent_id else None
+        if agent is None and not agent_id and profile_id:
+            if client_name:
+                agent = await self._client_agent(session, user, profile_id, client_name)
+            if agent is None:
+                matches = await self._profile_agents(session, user, profile_id)
+                if not client_name or len(matches) == 1:
+                    agent = matches[0] if matches else None
+        if agent is None or agent.organization_id != user.organization_id:
+            return None
+        return agent
 
     def _client_id(self, profile_id: str, name: str) -> str:
         digest = hashlib.sha256(f"{profile_id}\n{name}".encode()).hexdigest()[:24]

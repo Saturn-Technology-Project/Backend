@@ -41,8 +41,9 @@ def clean_agents(raw_agents: object, scope: str) -> list[dict]:
                 "max_output": int(_number(raw.get("max_output"), 4000, 1, 128000)),
                 "scope": scope,
                 "model_connection_id": _text(raw.get("model_connection_id"), 64),
-                "mcp_connection_ids": [_text(item, 64) for item in mcp_ids if _text(item, 64)][:40],
+                "mcp_connection_ids": [_text(item, 64) for item in mcp_ids if _text(item, 64) and _text(item, 64) != "general-skills"][:40],
                 "rag_connection_ids": [_text(item, 64) for item in rag_ids if _text(item, 64)][:40],
+                "has_saturn_mcp": raw.get("has_saturn_mcp") is True,
             }
         )
     return agents

@@ -15,10 +15,12 @@ from app.schemas import (
     LoginResponse,
     McpGatewayRead,
     OrgUserRead,
+    RegisterRequest,
     UserRead,
 )
 from app.services.access import allows, empty_permissions, normalize_permissions
 from app.services.organization_service import serialize_organization
+from app.services.admin_service import admin_service
 from app.services.auth_service import auth_service
 from app.services.mapping_service import mapping_service
 from app.services.mcp_gateway import mcp_gateway
@@ -113,6 +115,19 @@ async def serialize_user(session, user: User) -> UserRead:
             user.organization.plan,
         ),
     )
+
+
+@router.post("/register", response_model=LoginResponse, status_code=201)
+async def register(body: RegisterRequest, session: SessionDep):
+    user = await admin_service.register_personal(
+        session,
+        name=body.name,
+        email=body.email,
+        password=body.password,
+    )
+    await mapping_service.bind_workspace(session, user)
+    token, user = await auth_service.issue_session(session, user)
+    return LoginResponse(token=token, user=await serialize_user(session, user))
 
 
 @router.post("/login", response_model=LoginResponse)
