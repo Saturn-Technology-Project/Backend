@@ -16,6 +16,7 @@ from app.models.mcp_oauth import McpOAuthPending
 from app.models.mcp_server import McpServer
 from app.models.oauth import OAuthAccess, OAuthClient, OAuthGrant
 from app.models.secret_vault import SecretVault
+from app.models.org_app_mcp import OrgAppMcp
 from app.models.org_app_state import OrgAppState
 from app.models.organization import Organization
 from app.models.payment import Payment
@@ -44,6 +45,7 @@ __all__ = [
     "OAuthAccess",
     "OAuthClient",
     "OAuthGrant",
+    "OrgAppMcp",
     "OrgAppState",
     "Organization",
     "Payment",

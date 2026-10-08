@@ -10,6 +10,7 @@ from app.api import (
     activity,
     app_mcp,
     app_state,
+    org_app_mcp,
     org_app_state,
     admin,
     agents,
@@ -109,6 +110,7 @@ app.include_router(x402.router)
 app.include_router(activity.router)
 app.include_router(app_mcp.router)
 app.include_router(app_state.router)
+app.include_router(org_app_mcp.router)
 app.include_router(org_app_state.router)
 
 
