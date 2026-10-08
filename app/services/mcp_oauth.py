@@ -149,7 +149,8 @@ async def discover(endpoint: str, www_authenticate: str) -> Discovery:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server did not offer a sign-in page")
     registration = str(auth_doc.get("registration_endpoint") or "")
     scopes = resource_doc.get("scopes_supported")
-    scope = " ".join(str(item) for item in scopes if str(item).strip()) if isinstance(scopes, list) else ""
+    issuer_value = issuer.rstrip("/")
+    scope = granted_scope(issuer_value, scopes if isinstance(scopes, list) else [])
     resource = str(resource_doc.get("resource") or endpoint).strip()
     if not url_allowed(str(auth_doc["authorization_endpoint"])) or not url_allowed(str(auth_doc["token_endpoint"])):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server did not offer a sign-in page")
@@ -161,7 +162,7 @@ async def discover(endpoint: str, www_authenticate: str) -> Discovery:
         registration_endpoint=registration,
         resource=resource,
         scope=scope,
-        issuer=issuer.rstrip("/"),
+        issuer=issuer_value,
     )
 
 
@@ -178,13 +179,39 @@ def callback_origin(request_origin: str) -> str:
     return request_origin.rstrip("/")
 
 
+GOOGLE_ISSUER = "https://accounts.google.com"
+_PRESET_CLIENTS = (
+    ("https://github.com/login/oauth", "SATURN_GITHUB_OAUTH_CLIENT_ID", "SATURN_GITHUB_OAUTH_CLIENT_SECRET"),
+    (GOOGLE_ISSUER, "SATURN_GOOGLE_OAUTH_CLIENT_ID", "SATURN_GOOGLE_OAUTH_CLIENT_SECRET"),
+)
+_GOOGLE_SCOPES = frozenset(
+    {
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+    }
+)
+
+
 def preset_client(issuer: str) -> dict[str, str] | None:
-    if issuer.rstrip("/") != "https://github.com/login/oauth":
-        return None
-    client_id = os.environ.get("SATURN_GITHUB_OAUTH_CLIENT_ID", "").strip()
-    if not client_id:
-        return None
-    return {"client_id": client_id, "client_secret": os.environ.get("SATURN_GITHUB_OAUTH_CLIENT_SECRET", "").strip()}
+    normalized = issuer.rstrip("/")
+    for known, client_id_env, client_secret_env in _PRESET_CLIENTS:
+        if normalized != known:
+            continue
+        client_id = os.environ.get(client_id_env, "").strip()
+        if not client_id:
+            return None
+        return {"client_id": client_id, "client_secret": os.environ.get(client_secret_env, "").strip()}
+    return None
+
+
+def granted_scope(issuer: str, scopes: list[Any]) -> str:
+    chosen = [str(item).strip() for item in scopes if str(item).strip()]
+    if issuer.rstrip("/") == GOOGLE_ISSUER:
+        chosen = [item for item in chosen if item in _GOOGLE_SCOPES]
+    return " ".join(chosen)
 
 
 class McpOAuth:
@@ -210,6 +237,8 @@ class McpOAuth:
             await list_remote_tools(url, "")
         except McpUnauthorized as denied:
             return {"authorization_url": await self._authorize(session, user, label, url, origin, nonce, denied)}
+        if await self._requires_preset_sign_in(url):
+            return {"authorization_url": await self._authorize(session, user, label, url, origin, nonce, McpUnauthorized("", url))}
         from app.services.mcp_connect import mcp_connect_service
 
         server = await mcp_connect_service.connect(session, user, name=label, endpoint=url, authorization="")
@@ -263,7 +292,21 @@ class McpOAuth:
             query["resource"] = found.resource
         if found.scope:
             query["scope"] = found.scope
+        if found.issuer == GOOGLE_ISSUER:
+            query["access_type"] = "offline"
         return f"{found.authorization_endpoint}?{urlencode(query)}"
+
+    async def _requires_preset_sign_in(self, endpoint: str) -> bool:
+        """Google publishes its tool list before sign-in. A preset client still has to authorize."""
+        try:
+            found = await discover(endpoint, "")
+        except HTTPException:
+            return False
+        if preset_client(found.issuer) is not None:
+            return True
+        if found.issuer == GOOGLE_ISSUER:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server does not let Saturn start sign-in")
+        return False
 
     async def _register(self, found: Discovery, redirect_uri: str) -> dict[str, str]:
         preset = preset_client(found.issuer)

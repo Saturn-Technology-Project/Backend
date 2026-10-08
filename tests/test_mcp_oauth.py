@@ -254,3 +254,79 @@ async def test_github_without_an_oauth_app_asks_for_a_pasted_token(client, monke
     )
     assert started.status_code == 400
     assert started.json()["detail"] == "This MCP server does not let Saturn start sign-in"
+
+
+async def _google_metadata(method, url, **kwargs):
+    if url == "https://gmailmcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1":
+        return _response(
+            200,
+            {
+                "resource": "https://gmailmcp.googleapis.com/mcp/v1",
+                "authorization_servers": ["https://accounts.google.com/"],
+                "scopes_supported": [
+                    "https://mail.google.com/",
+                    "https://www.googleapis.com/auth/gmail.compose",
+                    "https://www.googleapis.com/auth/gmail.readonly",
+                ],
+            },
+        )
+    if url == "https://accounts.google.com/.well-known/oauth-authorization-server":
+        return _response(404, {})
+    if url == "https://accounts.google.com/.well-known/openid-configuration":
+        return _response(
+            200,
+            {
+                "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+                "token_endpoint": "https://oauth2.googleapis.com/token",
+            },
+        )
+    raise AssertionError(url)
+
+
+@pytest.mark.asyncio
+async def test_google_sign_in_uses_the_configured_oauth_client(client, monkeypatch):
+    monkeypatch.setenv("SATURN_GOOGLE_OAUTH_CLIENT_ID", "saturn.apps.googleusercontent.com")
+    monkeypatch.setenv("SATURN_GOOGLE_OAUTH_CLIENT_SECRET", "google-secret")
+    monkeypatch.setenv("PUBLIC_WS_URL", "https://saturn-backend-629072855899.asia-east1.run.app")
+
+    async def listed(endpoint, authorization=""):
+        assert authorization == ""
+        return [{"name": "search_threads", "description": "Search", "inputSchema": {"type": "object", "properties": {}}}]
+
+    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.services.mcp_oauth._request", _google_metadata)
+    started = await client.post(
+        "/mcp-servers/oauth/start",
+        json={"name": "Gmail", "endpoint": "https://gmailmcp.googleapis.com/mcp/v1", "nonce": "nonce-google1"},
+    )
+    assert started.status_code == 200, started.text
+    authorize = urlparse(started.json()["authorization_url"])
+    assert authorize.netloc == "accounts.google.com"
+    query = parse_qs(authorize.query)
+    assert query["client_id"] == ["saturn.apps.googleusercontent.com"]
+    assert "client_secret" not in query
+    assert query["scope"] == [
+        "https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.readonly"
+    ]
+    assert query["access_type"] == ["offline"]
+    assert query["redirect_uri"] == [
+        "https://saturn-backend-629072855899.asia-east1.run.app/mcp-servers/oauth/callback"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_google_without_an_oauth_client_asks_for_a_pasted_token(client, monkeypatch):
+    monkeypatch.delenv("SATURN_GOOGLE_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("SATURN_GOOGLE_OAUTH_CLIENT_SECRET", raising=False)
+
+    async def listed(endpoint, authorization=""):
+        return [{"name": "search_threads", "description": "Search", "inputSchema": {"type": "object", "properties": {}}}]
+
+    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.services.mcp_oauth._request", _google_metadata)
+    started = await client.post(
+        "/mcp-servers/oauth/start",
+        json={"name": "Gmail", "endpoint": "https://gmailmcp.googleapis.com/mcp/v1", "nonce": "nonce-google2"},
+    )
+    assert started.status_code == 400
+    assert started.json()["detail"] == "This MCP server does not let Saturn start sign-in"
