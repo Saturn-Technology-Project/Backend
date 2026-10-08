@@ -8,7 +8,6 @@ from app.models.associations import (
     employee_mcp_servers,
 )
 from app.models.audit import AuditLog
-from app.models.connector import Connector
 from app.models.conversation import ConversationMessage
 from app.models.credential import OrgCredential
 from app.models.employee import Employee
@@ -17,6 +16,7 @@ from app.models.mcp_oauth import McpOAuthPending
 from app.models.mcp_server import McpServer
 from app.models.oauth import OAuthAccess, OAuthClient, OAuthGrant
 from app.models.secret_vault import SecretVault
+from app.models.org_app_state import OrgAppState
 from app.models.organization import Organization
 from app.models.payment import Payment
 from app.models.policy import Policy, PolicyRule
@@ -26,6 +26,7 @@ from app.models.tool import Tool
 from app.models.tool_set import ToolSet, ToolSetItem
 from app.models.user import User
 from app.models.user_app_mcp import UserAppMcp
+from app.models.user_app_state import UserAppState
 from app.models.wallet import Wallet
 
 __all__ = [
@@ -34,7 +35,6 @@ __all__ = [
     "Approval",
     "AuditLog",
     "AuthSession",
-    "Connector",
     "ConversationMessage",
     "OrgCredential",
     "Employee",
@@ -44,6 +44,7 @@ __all__ = [
     "OAuthAccess",
     "OAuthClient",
     "OAuthGrant",
+    "OrgAppState",
     "Organization",
     "Payment",
     "Policy",
@@ -55,6 +56,7 @@ __all__ = [
     "ToolSetItem",
     "User",
     "UserAppMcp",
+    "UserAppState",
     "Wallet",
     "agent_mcp_servers",
     "agent_policies",

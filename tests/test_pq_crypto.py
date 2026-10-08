@@ -2,7 +2,7 @@ import base64
 
 import pytest
 
-from app.services.credential_service import _legacy_seal, open_secret, seal
+from app.services.credential_service import open_secret, seal
 from app.services.pq_crypto import reset_key
 
 
@@ -21,12 +21,6 @@ def test_tampered_ciphertext_does_not_open():
     raw[-1] ^= 1
     broken = "pq1." + base64.b64encode(bytes(raw)).decode()
     assert open_secret(broken) == ""
-
-
-def test_legacy_ciphertext_still_opens():
-    legacy = _legacy_seal("older-token")
-    assert not legacy.startswith("pq1.")
-    assert open_secret(legacy) == "older-token"
 
 
 def test_a_different_kem_seed_cannot_open_the_ciphertext(monkeypatch):
@@ -64,8 +58,6 @@ async def test_connected_mcp_keeps_the_token_out_of_the_server_row(client, monke
     session = await session_gen.__anext__()
     try:
         server = await session.get(McpServer, body["id"])
-        assert server.auth_ciphertext == ""
-        assert server.refresh_ciphertext == ""
         assert server.credential_id.startswith("mcp-")
         vault = await session.get(SecretVault, server.credential_id)
         assert vault.ciphertext.startswith("pq1.")

@@ -13,7 +13,6 @@ from app.models import (
     Action,
     Agent,
     AuditLog,
-    Connector,
     Employee,
     McpServer,
     Organization,
@@ -25,7 +24,6 @@ from app.models import (
 )
 from app.models.enums import ActorType
 from app.services.access import permissions_for_role, resolve_permissions
-from app.services.agent_hub import agent_hub
 from app.services.audit_service import audit_service
 from app.services.auth_service import hash_password
 from app.services.mcp_gateway import mcp_gateway
@@ -43,24 +41,6 @@ def _aware(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
-
-
-def _parse_heartbeat(value: object) -> datetime | None:
-    if isinstance(value, datetime):
-        return _aware(value)
-    text = str(value or "").strip()
-    if not text:
-        return None
-    return _aware(datetime.fromisoformat(text.replace("Z", "+00:00")))
-
-
-def _live_connector(organization_id: str) -> dict | None:
-    return agent_hub.connector_snapshot(organization_id)
-
-
-def _runtime_connected(organization_id: str) -> bool:
-    live = _live_connector(organization_id)
-    return bool(live and live.get("connected"))
 
 
 class AdminService:
@@ -89,23 +69,15 @@ class AdminService:
         except Exception:
             db_status = "down"
         mcp_errors = 0
-        runtime_connected = False
         for org in (await session.execute(select(Organization))).scalars():
             snap = mcp_gateway.snapshot(org.id)
             mcp_errors += max(0, int(snap["total"]) - int(snap["connected"]))
-            if _runtime_connected(org.id):
-                runtime_connected = True
         mcp_status = "degraded" if mcp_errors else "operational"
         events = await self.list_events(session, limit=12)
         return {
             "stats": stats,
             "services": [
                 {"id": "api", "name": "API", "status": "operational"},
-                {
-                    "id": "runtime",
-                    "name": "Agent Runtime",
-                    "status": "operational" if runtime_connected else "down",
-                },
                 {"id": "gateway", "name": "Saturn MCP", "status": mcp_status},
                 {"id": "database", "name": "Database", "status": db_status},
             ],
@@ -140,20 +112,9 @@ class AdminService:
             )
             or 0
         )
-        connector = (
-            await session.execute(select(Connector).where(Connector.organization_id == org.id))
-        ).scalar_one_or_none()
-        heartbeat = _parse_heartbeat(
-            (_live_connector(org.id) or {}).get("last_heartbeat_at")
-        ) or _aware(connector.last_seen_at if connector is not None else None)
         snap = mcp_gateway.snapshot(org.id)
         mcp_status = snap["status"] if int(snap["total"] or 0) else "none"
-        if org.status == "suspended":
-            runtime_status = "disconnected"
-        elif _runtime_connected(org.id):
-            runtime_status = "connected"
-        else:
-            runtime_status = "disconnected"
+        runtime_status = "disconnected"
         return {
             "id": org.id,
             "name": org.name,
@@ -170,7 +131,7 @@ class AdminService:
             "connection_count": mcp_count,
             "runtime_status": runtime_status,
             "mcp_status": mcp_status,
-            "last_heartbeat_at": heartbeat,
+            "last_heartbeat_at": None,
         }
 
     async def get_org(self, session: AsyncSession, organization_id: str) -> Organization:
@@ -359,12 +320,6 @@ class AdminService:
         rows = []
         for snap in await self.list_orgs(session):
             org = await self.get_org(session, snap["id"])
-            live = _live_connector(org.id)
-            heartbeat = _parse_heartbeat((live or {}).get("last_heartbeat_at")) or snap[
-                "last_heartbeat_at"
-            ]
-            runtime_ok = snap["runtime_status"] == "connected"
-            connector_ok = bool(live and live.get("connected"))
             gateway = mcp_gateway.snapshot(org.id)
             rows.append(
                 {
@@ -372,25 +327,11 @@ class AdminService:
                     "organization_name": org.name,
                     "channels": [
                         {
-                            "id": "runtime",
-                            "name": "Agent Runtime",
-                            "status": "connected" if runtime_ok else "disconnected",
-                            "last_heartbeat_at": heartbeat if runtime_ok else None,
-                            "version": org.runtime_version if runtime_ok else None,
-                        },
-                        {
                             "id": "gateway",
                             "name": "Saturn MCP",
                             "status": gateway["status"] if int(gateway["total"] or 0) else "none",
-                            "last_heartbeat_at": heartbeat if connector_ok else None,
+                            "last_heartbeat_at": None,
                             "detail": f"{gateway['connected']}/{gateway['total']} servers",
-                        },
-                        {
-                            "id": "connector",
-                            "name": "Connector",
-                            "status": "connected" if connector_ok else "disconnected",
-                            "version": org.runtime_version if connector_ok else None,
-                            "last_heartbeat_at": heartbeat if connector_ok else None,
                         },
                     ],
                 }
@@ -426,10 +367,6 @@ class AdminService:
             org = orgs.get(organization_id)
             if org is None:
                 continue
-            live = _live_connector(organization_id)
-            member_ids = {agent.id for agent in members}
-            live_ids = set((live or {}).get("agent_ids") or [])
-            connected = bool(live and live.get("connected") and (member_ids & live_ids))
             last_failed = (
                 await session.execute(
                     select(AuditLog)
@@ -441,17 +378,15 @@ class AdminService:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            heartbeat = _parse_heartbeat((live or {}).get("last_heartbeat_at"))
-            if heartbeat is None:
-                seen = [_aware(agent.last_seen_at) for agent in members]
-                seen = [item for item in seen if item is not None]
-                heartbeat = max(seen) if seen else None
+            seen = [_aware(agent.last_seen_at) for agent in members]
+            seen = [item for item in seen if item is not None]
+            heartbeat = max(seen) if seen else None
             rows.append(
                 {
                     "id": runtime_id,
                     "organization_id": org.id,
                     "organization_name": org.name,
-                    "status": "healthy" if connected else "disconnected",
+                    "status": "disconnected",
                     "region": org.runtime_region,
                     "version": org.runtime_version,
                     "deployment_mode": org.deployment_mode,

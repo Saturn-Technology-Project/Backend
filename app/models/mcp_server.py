@@ -23,25 +23,18 @@ class McpServer(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     endpoint: Mapped[str] = mapped_column(String(512), default="", nullable=False)
-    auth_ciphertext: Mapped[str] = mapped_column(Text, default="", nullable=False)
     credential_id: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     oauth_scope: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    refresh_ciphertext: Mapped[str] = mapped_column(Text, default="", nullable=False)
     token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     oauth_client_id: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    oauth_client_secret: Mapped[str] = mapped_column(Text, default="", nullable=False)
     oauth_token_endpoint: Mapped[str] = mapped_column(Text, default="", nullable=False)
     oauth_resource: Mapped[str] = mapped_column(Text, default="", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
-    connector_id: Mapped[Optional[str]] = mapped_column(
-        ForeignKey("connectors.id"), nullable=True, index=True
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
 
     organization = relationship("Organization", back_populates="mcp_servers")
-    connector = relationship("Connector", back_populates="mcp_servers")
     tools = relationship("Tool", back_populates="mcp_server")
     employees = relationship(
         "Employee", secondary=employee_mcp_servers, back_populates="mcp_servers"

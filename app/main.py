@@ -9,11 +9,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api import (
     activity,
     app_mcp,
+    app_state,
+    org_app_state,
     admin,
     agents,
     approvals,
     auth,
-    connectors,
     credentials,
     mcp_servers,
     oauth,
@@ -22,11 +23,9 @@ from app.api import (
     payments,
     policies,
     runs,
-    session,
     tools,
     tool_sets,
     wallets,
-    ws,
     x402,
 )
 from app.core.config import get_settings
@@ -95,9 +94,7 @@ app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(org.router)
 app.include_router(agents.router)
-app.include_router(connectors.router)
 app.include_router(credentials.router)
-app.include_router(session.router)
 app.include_router(mcp_servers.router)
 app.include_router(oauth.router)
 app.include_router(tool_sets.router)
@@ -111,7 +108,8 @@ app.include_router(payments.router)
 app.include_router(x402.router)
 app.include_router(activity.router)
 app.include_router(app_mcp.router)
-app.include_router(ws.router)
+app.include_router(app_state.router)
+app.include_router(org_app_state.router)
 
 
 @app.get("/")

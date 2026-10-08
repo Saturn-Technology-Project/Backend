@@ -13,14 +13,12 @@ from app.api.deps import (
 )
 from app.schemas import (
     AgentCreate,
-    AgentEnrollResponse,
     AgentRead,
     AgentUpdate,
     ConversationMessageRead,
     ConversationMessageWrite,
 )
-from app.services.agent_config import command_payload, public_settings
-from app.services.agent_hub import agent_hub
+from app.services.agent_config import public_settings
 from app.services.agent_service import agent_service
 from app.services.conversation_service import conversation_service
 from app.services.mapping_service import mapping_service
@@ -47,15 +45,11 @@ def serialize_agent(agent, pushed: bool | None = None) -> AgentRead:
         name=agent.name,
         description=agent.description,
         model=agent.model,
-        status=agent.status,
         organization_id=agent.organization_id,
-        connected=agent_hub.is_connected(agent.id) or _recent_mcp_client(agent),
-        enrolled=bool(agent.enrollment_token or agent.token_hash or agent.connector_id),
-        connector_id=agent.connector_id,
-        runtime_id=agent.runtime_id or agent_hub.runtime_id(agent.id) or None,
-        last_seen_at=agent_hub.last_heartbeat(agent.id)
-        or agent_hub.last_seen(agent.id)
-        or agent.last_seen_at,
+        connected=_recent_mcp_client(agent),
+        enrolled=str((agent.settings or {}).get("origin") or "") == "saturn_mcp",
+        runtime_id=agent.runtime_id,
+        last_seen_at=agent.last_seen_at,
         settings=public_settings(agent),
         tool_set_id=agent.tool_set_id,
         profile_id=str((agent.settings or {}).get("profile_id") or "") or None,
@@ -154,27 +148,10 @@ async def update_agent(
     employee: AgentsWrite,
 ):
     agent = await agent_service.update_agent(session, user, employee, agent_id, body)
-    wallet = await wallet_service.ensure_wallet(session, agent)
-    pushed = await agent_hub.send_command(
-        agent.id, "config.update", command_payload(agent, wallet)
-    )
-    return serialize_agent(agent, pushed=pushed)
+    await wallet_service.ensure_wallet(session, agent)
+    return serialize_agent(agent, pushed=False)
 
 
 @router.delete("/{agent_id}", status_code=204)
 async def delete_agent(agent_id: str, session: SessionDep, user: CurrentUser, _access: TeamWrite):
     await removal_service.delete_agent(session, user, agent_id)
-
-
-@router.get("/{agent_id}/enrollment", response_model=AgentEnrollResponse)
-async def get_enrollment(
-    agent_id: str, session: SessionDep, user: CurrentUser, _access: AgentsWrite
-):
-    return await agent_service.get_enrollment(session, user, agent_id)
-
-
-@router.post("/{agent_id}/enroll", response_model=AgentEnrollResponse)
-async def enroll_agent(
-    agent_id: str, session: SessionDep, user: CurrentUser, _access: AgentsWrite
-):
-    return await agent_service.issue_token(session, user, agent_id)

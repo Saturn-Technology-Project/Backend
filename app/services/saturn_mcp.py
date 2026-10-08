@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.ids import new_id, utcnow
 from app.models import Action, Agent, Approval, Run, Tool, ToolSet, ToolSetItem, User
-from app.models.enums import ActionStatus, ActorType, AgentStatus, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
+from app.models.enums import ActionStatus, ActorType, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
 from app.services.audit_service import audit_service
 from app.services.mcp_remote import call_remote_tool
 from app.services.policy_engine import policy_engine
@@ -135,7 +135,6 @@ class SaturnMcp:
                 name=name,
                 description="",
                 model="",
-                status=AgentStatus.ACTIVE,
                 settings={},
             )
             session.add(agent)
@@ -222,6 +221,11 @@ class SaturnMcp:
         rows.sort(key=lambda pair: pair[0].name)
         return rows
 
+    async def _audit(self, session: AsyncSession, **kwargs: Any) -> None:
+        payload = kwargs.get("payload") if isinstance(kwargs.get("payload"), dict) else {}
+        kwargs["payload"] = {**payload, "source": "saturn_mcp"}
+        await audit_service.log(session, **kwargs)
+
     async def _call(
         self,
         session: AsyncSession,
@@ -238,7 +242,7 @@ class SaturnMcp:
         if match is None:
             return rpc_error(request_id, -32003, "Agent is not allowed to call this tool")
         tool, item = match
-        await audit_service.log(
+        await self._audit(
             session,
             event=AuditEvent.TOOL_REQUESTED,
             actor_type=ActorType.AGENT,
@@ -255,7 +259,7 @@ class SaturnMcp:
             tool_name=tool.name,
             arguments=arguments,
         )
-        await audit_service.log(
+        await self._audit(
             session,
             event=AuditEvent.POLICY_EVALUATED,
             actor_type=ActorType.SYSTEM,
@@ -288,7 +292,7 @@ class SaturnMcp:
                 action_id=action_id,
             )
         result = await self._proxy(session, tool, arguments)
-        await audit_service.log(
+        await self._audit(
             session,
             event=AuditEvent.TOOL_EXECUTED,
             actor_type=ActorType.AGENT,
@@ -322,7 +326,7 @@ class SaturnMcp:
                 run = await session.get(Run, action.run_id)
                 if run is not None:
                     run.status = RunStatus.COMPLETED.value
-                await audit_service.log(
+                await self._audit(
                     session,
                     event=AuditEvent.TOOL_EXECUTED,
                     actor_type=ActorType.AGENT,
@@ -386,7 +390,7 @@ class SaturnMcp:
         )
         session.add(approval)
         await session.flush()
-        await audit_service.log(
+        await self._audit(
             session,
             event=AuditEvent.APPROVAL_REQUESTED,
             actor_type=ActorType.AGENT,

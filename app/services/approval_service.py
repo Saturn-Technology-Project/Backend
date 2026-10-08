@@ -16,7 +16,6 @@ from app.models.enums import (
     PolicyDecision,
     RunStatus,
 )
-from app.services.agent_hub import agent_hub
 from app.services.audit_service import audit_service
 from app.services.run_service import run_service
 
@@ -77,6 +76,7 @@ class ApprovalService:
                 action_id=action.id,
                 tool=action.tool,
                 result="policy_deny_on_approve",
+                payload={"source": "saturn_mcp"} if mapped else None,
             )
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
@@ -102,39 +102,10 @@ class ApprovalService:
             action_id=action.id,
             tool=action.tool,
             result="approved",
-            payload={"approval_id": approval.id},
+            payload={"approval_id": approval.id, **({"source": "saturn_mcp"} if mapped else {})},
         )
 
-        if mapped:
-            run.status = RunStatus.RUNNING
-            run.updated_at = utcnow()
-            await session.flush()
-            await agent_hub.notify_connector(
-                run.organization_id,
-                {
-                    "type": "approval.granted",
-                    "run_id": run.id,
-                    "action_id": action.id,
-                },
-            )
-            return await run_service.load_run(session, run.id), action
-
-        if agent_hub.is_connected(agent.id):
-            run.status = RunStatus.RUNNING
-            run.updated_at = utcnow()
-            await session.flush()
-            await agent_hub.send_command(
-                agent.id,
-                "approve",
-                {
-                    "run_id": run.id,
-                    "approval_id": approval.id,
-                    "actor_id": actor_id,
-                },
-            )
-            return await run_service.load_run(session, run.id), action
-
-        if not settings.in_process_runtime:
+        if mapped or not settings.in_process_runtime:
             run.status = RunStatus.RUNNING
             run.updated_at = utcnow()
             await session.flush()
@@ -167,6 +138,7 @@ class ApprovalService:
         approval, action, run, _agent = await self._load_pending(
             session, approval_id, actor_id, organization_id=organization_id
         )
+        mapped = action.policy_reason in {"tool_set_approval", "saturn_mcp"}
         approval.status = ApprovalStatus.REJECTED
         approval.resolved_at = utcnow()
         approval.resolved_by = actor_id
@@ -184,26 +156,8 @@ class ApprovalService:
             action_id=action.id,
             tool=action.tool,
             result="rejected",
-            payload={"approval_id": approval.id},
+            payload={"approval_id": approval.id, **({"source": "saturn_mcp"} if mapped else {})},
         )
-        await agent_hub.notify_connector(
-            run.organization_id,
-            {
-                "type": "approval.rejected",
-                "run_id": run.id,
-                "action_id": action.id,
-            },
-        )
-        if agent_hub.is_connected(run.agent_id):
-            await agent_hub.send_command(
-                run.agent_id,
-                "reject",
-                {
-                    "run_id": run.id,
-                    "approval_id": approval.id,
-                    "actor_id": actor_id,
-                },
-            )
         return await run_service.load_run(session, run.id), action
 
     async def _load_pending(

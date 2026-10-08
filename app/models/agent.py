@@ -21,12 +21,6 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     model: Mapped[str] = mapped_column(String(128), default="claude-sonnet", nullable=False)
-    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
-    token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
-    enrollment_token: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    connector_id: Mapped[Optional[str]] = mapped_column(
-        ForeignKey("connectors.id"), nullable=True, index=True
-    )
     runtime_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     settings: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     tool_set_id: Mapped[Optional[str]] = mapped_column(
@@ -40,7 +34,6 @@ class Agent(Base):
     )
 
     organization = relationship("Organization", back_populates="agents")
-    connector = relationship("Connector", back_populates="agents")
     runs = relationship("Run", back_populates="agent")
     wallet = relationship("Wallet", back_populates="agent", uselist=False)
     employees = relationship("Employee", secondary=employee_agents, back_populates="agents")

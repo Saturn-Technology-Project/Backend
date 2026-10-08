@@ -3,9 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.deps import ActorDep, ApprovalsRead, ApprovalsWrite, CurrentUser, SessionDep
-from app.api.runs import serialize_run
 from app.schemas import ApprovalDecisionRead, ApprovalRead
-from app.services.agent_hub import agent_hub
 from app.services.approval_service import approval_service
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
@@ -49,12 +47,8 @@ async def get_approval(
 async def approve(
     approval_id: str, session: SessionDep, actor_id: ActorDep, user: CurrentUser, _access: ApprovalsWrite
 ):
-    run, action = await approval_service.approve(
+    _run, action = await approval_service.approve(
         session, approval_id, actor_id, organization_id=user.organization_id
-    )
-    await agent_hub.broadcast_org(
-        user.organization_id,
-        {"type": "run.updated", "run": serialize_run(run).model_dump(mode="json")},
     )
     return ApprovalDecisionRead(
         status="completed",
@@ -67,12 +61,8 @@ async def approve(
 async def reject(
     approval_id: str, session: SessionDep, actor_id: ActorDep, user: CurrentUser, _access: ApprovalsWrite
 ):
-    run, action = await approval_service.reject(
+    _run, action = await approval_service.reject(
         session, approval_id, actor_id, organization_id=user.organization_id
-    )
-    await agent_hub.broadcast_org(
-        user.organization_id,
-        {"type": "run.updated", "run": serialize_run(run).model_dump(mode="json")},
     )
     return ApprovalDecisionRead(
         status="rejected",

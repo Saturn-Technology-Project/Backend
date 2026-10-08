@@ -19,12 +19,10 @@ from app.models.enums import (
     PolicyDecision,
     RunStatus,
 )
-from app.services.agent_hub import agent_hub
 from app.services.audit_service import audit_service
 from app.services.mapping_service import mapping_service
 from app.services.mcp_executor import MCPExecutionError, mcp_executor
 from app.services.policy_engine import policy_engine
-from app.services.runtime_bridge import runtime_payload
 from app.services.simulator import agent_simulator
 
 settings = get_settings()
@@ -81,12 +79,6 @@ class RunService:
         actor_id: str,
     ) -> Run:
         agent = await mapping_service.require_agent(session, user, agent_id)
-        if not settings.in_process_runtime and not agent_hub.is_connected(agent.id):
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "Agent is not connected",
-            )
-
         run = Run(
             id=new_id("run"),
             organization_id=agent.organization_id,
@@ -105,27 +97,7 @@ class RunService:
             run_id=run.id,
             payload={"input": prompt, "agent_id": agent.id},
         )
-        if agent_hub.is_connected(agent.id):
-            run.status = RunStatus.RUNNING
-            await session.flush()
-            await audit_service.log(
-                session,
-                event=AuditEvent.AGENT_STARTED,
-                actor_type=ActorType.AGENT,
-                actor_id=agent.id,
-                organization_id=run.organization_id,
-                run_id=run.id,
-            )
-            delivered = await agent_hub.send_command(
-                agent.id,
-                "run",
-                await runtime_payload(
-                    session, agent=agent, run=run, actor_id=actor_id
-                ),
-            )
-            if not delivered:
-                await self.fail_run(session, run, "Command was not delivered to the runtime")
-        elif settings.in_process_runtime:
+        if settings.in_process_runtime:
             await self._advance_run(session, run, agent)
         return await self.load_run(session, run.id)
 
@@ -164,29 +136,14 @@ class RunService:
             return run
         created = _aware(run.created_at) or utcnow()
         age = utcnow() - created
-        connected = agent_hub.is_connected(run.agent_id)
         agent = await session.get(Agent, run.agent_id)
         raw = (agent.settings or {}).get("max_runtime_minutes") if agent else None
         try:
             minutes = max(1, int(raw or 30))
         except (TypeError, ValueError):
             minutes = 30
-        if run.status == RunStatus.QUEUED and not settings.in_process_runtime:
-            if not connected or age > timedelta(seconds=20):
-                return await self.fail_run(session, run, "Agent is not connected")
-        if run.status == RunStatus.RUNNING:
-            if age > timedelta(minutes=minutes):
-                return await self.fail_run(session, run, "Run timed out")
-            if not connected and age > timedelta(seconds=45):
-                return await self.fail_run(session, run, "Runtime disconnected")
-            if (
-                not settings.in_process_runtime
-                and age > timedelta(seconds=45)
-                and not list(run.actions or [])
-            ):
-                return await self.fail_run(
-                    session, run, "Runtime did not pick up this run"
-                )
+        if run.status == RunStatus.RUNNING and age > timedelta(minutes=minutes):
+            return await self.fail_run(session, run, "Run timed out")
         return run
 
     async def evaluate_action_policy(

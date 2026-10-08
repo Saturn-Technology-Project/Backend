@@ -1,11 +1,6 @@
 from enum import Enum
 
 
-class AgentStatus(str, Enum):
-    ACTIVE = "active"
-    PAUSED = "paused"
-
-
 class ToolStatus(str, Enum):
     ACTIVE = "active"
     DISABLED = "disabled"

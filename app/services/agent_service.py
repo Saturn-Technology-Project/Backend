@@ -1,29 +1,17 @@
 from __future__ import annotations
 
-import secrets
-
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import public_ws_url
 from app.core.ids import new_id, utcnow
 from app.models import Agent, Employee, User
-from app.models.enums import ActorType, AgentStatus, AuditEvent
-from app.schemas import AgentEnrollResponse, AgentUpdate
+from app.models.enums import ActorType, AuditEvent
+from app.schemas import AgentUpdate
 from app.services.access import allows, may_edit_agent
 from app.services.agent_config import default_instructions, merge_settings
 from app.services.audit_service import audit_service
-from app.services.auth_service import hash_token
 from app.services.mapping_service import mapping_service
 from app.services.wallet_service import wallet_service
-
-
-def enrollment_payload(agent_id: str, token: str) -> AgentEnrollResponse:
-    return AgentEnrollResponse(
-        agent_id=agent_id,
-        token=token,
-        ws_url=public_ws_url(f"/ws/agents?agent_id={agent_id}&token={token}"),
-    )
 
 
 def _slug_id(prefix: str, name: str) -> str:
@@ -60,7 +48,6 @@ class AgentService:
             name=name,
             description=description,
             model=model,
-            status=AgentStatus.ACTIVE,
             settings={"instructions": default_instructions(name, description)},
         )
         session.add(agent)
@@ -135,23 +122,6 @@ class AgentService:
             )
         await session.flush()
         return agent
-
-    async def issue_token(self, session: AsyncSession, user: User, agent_id: str) -> AgentEnrollResponse:
-        agent = await mapping_service.require_org_agent(session, user, agent_id)
-        raw = "agt_" + secrets.token_urlsafe(32)
-        agent.token_hash = hash_token(raw)
-        agent.enrollment_token = raw
-        agent.last_seen_at = utcnow()
-        await session.flush()
-        return enrollment_payload(agent.id, raw)
-
-    async def get_enrollment(
-        self, session: AsyncSession, user: User, agent_id: str
-    ) -> AgentEnrollResponse:
-        agent = await mapping_service.require_org_agent(session, user, agent_id)
-        if not agent.enrollment_token:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Not enrolled")
-        return enrollment_payload(agent.id, agent.enrollment_token)
 
 
 agent_service = AgentService()

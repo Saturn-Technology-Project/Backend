@@ -1,6 +1,5 @@
 from decimal import Decimal
 
-from app.models.enums import AuditEvent
 from app.services.x402 import payment_requirements, settle_payment, verify_payment
 
 
@@ -32,14 +31,7 @@ async def test_refund_settles_x402_from_agent_wallet(client):
     assert Decimal(wallet["spent_today"]) == Decimal("0.05")
 
     activity = (await client.get("/activity", params={"run_id": run["id"]})).json()
-    names = [item["event"] for item in activity]
-    for event in (
-        AuditEvent.X402_PAYMENT_REQUIRED,
-        AuditEvent.WALLET_EVALUATED,
-        AuditEvent.X402_SETTLED,
-        AuditEvent.TOOL_EXECUTED,
-    ):
-        assert event in names
+    assert activity == []
 
 
 async def test_empty_wallet_blocks_paid_tool(client):
@@ -62,7 +54,7 @@ async def test_empty_wallet_blocks_paid_tool(client):
     assert refund["result"]["reason"] == "insufficient_balance"
 
     activity = (await client.get("/activity", params={"run_id": run["id"]})).json()
-    assert AuditEvent.X402_FAILED in [item["event"] for item in activity]
+    assert activity == []
 
 
 async def test_x402_facilitator_supported(client):

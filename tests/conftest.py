@@ -18,7 +18,6 @@ from sqlalchemy.pool import StaticPool
 from app.db.database import Base, get_session
 from app.main import app
 from app.models import *  # noqa: F401,F403
-from app.services.agent_hub import agent_hub
 from app.services.mcp_gateway import mcp_gateway
 from tests.catalog import seed_test_catalog
 
@@ -60,7 +59,6 @@ async def client():
                 raise
 
     app.dependency_overrides[get_session] = override_session
-    agent_hub.reset()
     mcp_gateway.reset()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
@@ -73,6 +71,5 @@ async def client():
         yield async_client
 
     app.dependency_overrides.clear()
-    agent_hub.reset()
     mcp_gateway.reset()
     await engine.dispose()

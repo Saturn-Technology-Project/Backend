@@ -33,5 +33,4 @@ class Organization(Base):
     employees = relationship("Employee", back_populates="organization")
     invitations = relationship("Invitation", back_populates="organization")
     mcp_servers = relationship("McpServer", back_populates="organization")
-    connectors = relationship("Connector", back_populates="organization")
     audit_logs = relationship("AuditLog", back_populates="organization")

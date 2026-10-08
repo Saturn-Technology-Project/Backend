@@ -102,7 +102,7 @@ async def test_platform_overview_and_org_lifecycle(client):
     assert overview.status_code == 200, overview.text
     body = overview.json()
     assert "organizations" in body["stats"]
-    assert {item["id"] for item in body["services"]} >= {"api", "runtime", "gateway", "database"}
+    assert {item["id"] for item in body["services"]} >= {"api", "gateway", "database"}
 
     created = await client.post(
         "/admin/orgs",

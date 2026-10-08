@@ -4,7 +4,6 @@ from fastapi import APIRouter
 
 from app.api.deps import ActorDep, AgentsRead, AgentsWrite, CurrentUser, SessionDep
 from app.schemas import ActionRead, RunCreate, RunRead
-from app.services.agent_hub import agent_hub
 from app.services.run_service import pending_approval_id, run_service
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -43,10 +42,5 @@ async def create_run(body: RunCreate, session: SessionDep, actor_id: ActorDep, u
         agent_id=body.agent_id,
         prompt=body.input,
         actor_id=actor_id,
-    )
-    payload = serialize_run(run).model_dump(mode="json")
-    await agent_hub.broadcast_org(
-        user.organization_id,
-        {"type": "run.updated", "run": payload},
     )
     return serialize_run(run)

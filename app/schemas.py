@@ -23,11 +23,9 @@ class AgentRead(ORMModel):
     name: str
     description: str
     model: str
-    status: str
     organization_id: str | None = None
     connected: bool = False
     enrolled: bool = False
-    connector_id: str | None = None
     runtime_id: str | None = None
     last_seen_at: datetime | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
@@ -46,37 +44,6 @@ class AgentUpdate(BaseModel):
     tool_set_id: str | None = None
     daily_spend_limit: Decimal | None = None
     per_tx_limit: Decimal | None = None
-
-
-class AgentEnrollResponse(BaseModel):
-    agent_id: str
-    token: str
-    ws_url: str
-
-
-class ConnectorRead(ORMModel):
-    id: str | None = None
-    name: str = "Saturn Connector"
-    enrolled: bool = False
-    connected: bool = False
-    environment_id: str = ""
-    version: str = ""
-    capabilities: list[str] = Field(default_factory=list)
-    last_seen_at: datetime | None = None
-    organization_id: str | None = None
-
-
-class ConnectorEnrollResponse(BaseModel):
-    connector_id: str
-    token: str
-    ws_url: str
-
-
-class SessionPairResponse(BaseModel):
-    session_id: str
-    token: str
-    ws_url: str
-    organization_id: str
 
 
 class ToolRead(ORMModel):
@@ -147,6 +114,24 @@ class AppMcpRead(BaseModel):
 class AppMcpWrite(BaseModel):
     servers: list[AppMcpServerRead] = Field(default_factory=list)
     attachments: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class AppStateRead(BaseModel):
+    agents: list[dict] = Field(default_factory=list)
+    messages: list[dict] = Field(default_factory=list)
+
+
+class AppStateWrite(BaseModel):
+    agents: list[dict] = Field(default_factory=list)
+    messages: list[dict] = Field(default_factory=list)
+
+
+class OrgAppStateRead(BaseModel):
+    agents: list[dict] = Field(default_factory=list)
+
+
+class OrgAppStateWrite(BaseModel):
+    agents: list[dict] = Field(default_factory=list)
 
 
 class ToolSetItemWrite(BaseModel):

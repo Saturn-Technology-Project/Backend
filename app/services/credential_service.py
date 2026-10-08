@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import os
 import re
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.core.ids import new_id, utcnow
 from app.models.credential import OrgCredential
 from app.models.user import User
@@ -18,51 +13,6 @@ from app.schemas import CredentialWrite
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _KINDS = {"model", "key"}
-
-
-def _key() -> bytes:
-    raw = os.environ.get("SATURN_CREDENTIAL_KEY") or get_settings().database_url
-    return hashlib.sha256(f"saturn-org-credential:{raw}".encode()).digest()
-
-
-def _legacy_seal(plain: str) -> str:
-    if not plain:
-        return ""
-    nonce = os.urandom(16)
-    data = plain.encode()
-    cipher = bytes(left ^ right for left, right in zip(data, _stream(nonce, len(data))))
-    mac = hmac.new(_key(), nonce + cipher, hashlib.sha256).digest()
-    return base64.b64encode(nonce + mac + cipher).decode()
-
-
-def _legacy_open(token: str) -> str:
-    if not token or token.startswith("pq1."):
-        return ""
-    try:
-        raw = base64.b64decode(token)
-    except Exception:
-        return ""
-    if len(raw) < 48:
-        return ""
-    nonce, mac, cipher = raw[:16], raw[16:48], raw[48:]
-    expected = hmac.new(_key(), nonce + cipher, hashlib.sha256).digest()
-    if not hmac.compare_digest(mac, expected):
-        return ""
-    plain = bytes(left ^ right for left, right in zip(cipher, _stream(nonce, len(cipher))))
-    try:
-        return plain.decode()
-    except UnicodeDecodeError:
-        return ""
-
-
-def _stream(nonce: bytes, length: int) -> bytes:
-    out = bytearray()
-    counter = 0
-    key = _key()
-    while len(out) < length:
-        out.extend(hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest())
-        counter += 1
-    return bytes(out[:length])
 
 
 def seal(plain: str) -> str:
@@ -74,11 +24,9 @@ def seal(plain: str) -> str:
 def open_secret(token: str) -> str:
     from app.services.pq_crypto import open_secret as pq_open
 
-    if not token:
+    if not token or not token.startswith("pq1."):
         return ""
-    if token.startswith("pq1."):
-        return pq_open(token)
-    return _legacy_open(token)
+    return pq_open(token)
 
 
 def _clip(value: str, limit: int) -> str:
