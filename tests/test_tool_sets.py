@@ -193,6 +193,14 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["result"]["echo"] == {"repo": "saturn"}
 
+    unlinked = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "repo.read", "arguments": {"repo": "docs"}}},
+        headers=headers,
+    )
+    assert unlinked.status_code == 200, unlinked.text
+    assert unlinked.json()["result"]["echo"] == {"repo": "docs"}
+
     held = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "repo.delete", "arguments": {"repo": "saturn"}}},

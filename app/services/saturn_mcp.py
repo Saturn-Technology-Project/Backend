@@ -351,14 +351,17 @@ class SaturnMcp:
         raw_response = await self._proxy(session, tool, arguments)
         raw_response, result = _split_remote(raw_response)
         reply = rpc_result(request_id, result)
+        # Agents send their own run and action ids. The audit columns are foreign keys, so only link rows Saturn owns.
+        run = await session.get(Run, run_id) if run_id else None
+        action = await session.get(Action, action_id) if action_id else None
         await self._audit(
             session,
             event=AuditEvent.TOOL_EXECUTED,
             actor_type=ActorType.AGENT,
             actor_id=agent.id,
             organization_id=agent.organization_id,
-            run_id=run_id,
-            action_id=action_id,
+            run_id=run.id if run is not None and run.organization_id == agent.organization_id else None,
+            action_id=action.id if action is not None and run is not None and action.run_id == run.id else None,
             tool=tool.name,
             result="completed",
             payload={
