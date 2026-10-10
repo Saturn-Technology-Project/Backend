@@ -215,26 +215,19 @@ async def _chat(messages: list[dict[str, str]]) -> dict[str, Any]:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model request failed")
     body = response.json()
     try:
-        content = body["choices"][0]["message"]["content"]
+        message = body["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response") from exc
-    if not isinstance(content, str):
+    if not isinstance(message, dict):
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response")
     try:
-        return _extract_json(content)
+        return _parse_model_text(_as_text(message.get("content")), _as_text(message.get("reasoning_content") or message.get("reasoning")))
     except (ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response") from exc
 
 
 def _instructions(raw: str) -> str:
     return (raw or "").strip()[:4000]
-
-
-_THINKING_RULE = (
-    "Put step-by-step reasoning only in the reasoning channel. "
-    "The message itself must be one JSON object, with no markdown fences. "
-    "Keep each rationale under 20 words."
-)
 
 
 def _schema_brief(schema: Any) -> dict[str, Any]:
@@ -312,11 +305,12 @@ async def _iter_deltas(messages: list[dict[str, str]]):
                     delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
                     if not isinstance(delta, dict):
                         continue
-                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-                    content = delta.get("content") or ""
-                    if isinstance(reasoning, str) and reasoning:
+                    message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
+                    reasoning = _as_text(delta.get("reasoning_content") or delta.get("reasoning") or message.get("reasoning_content"))
+                    content = _as_text(delta.get("content") or message.get("content"))
+                    if reasoning:
                         yield "reasoning", reasoning
-                    if isinstance(content, str) and content:
+                    if content:
                         yield "content", content
     except HTTPException:
         raise
@@ -324,15 +318,36 @@ async def _iter_deltas(messages: list[dict[str, str]]):
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model request failed") from exc
 
 
+def _as_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_as_text(item.get("text") or item.get("content") or "") if isinstance(item, dict) else _as_text(item) for item in value)
+    return ""
+
+
+def _parse_model_text(content: str, reasoning: str) -> dict[str, Any]:
+    for text in (content, reasoning, f"{reasoning}\n{content}"):
+        if not text.strip():
+            continue
+        try:
+            return _extract_json(text)
+        except (ValueError, json.JSONDecodeError):
+            continue
+    raise ValueError("Model did not return JSON")
+
+
 async def stream_chat(messages: list[dict[str, str]]):
-    """Yield ('think', text) while the model writes, then ('result', parsed JSON)."""
+    """Yield ('result', parsed JSON) after the model finishes."""
     splitter = _ThoughtSplit()
+    reasoning: list[str] = []
     async for kind, text in _iter_deltas(messages):
-        visible = splitter.reasoning(text) if kind == "reasoning" else splitter.content(text)
-        if visible:
-            yield "think", visible
+        if kind == "reasoning":
+            reasoning.append(text)
+        else:
+            splitter.content(text)
     try:
-        parsed = _extract_json(splitter.finish())
+        parsed = _parse_model_text(splitter.finish(), "".join(reasoning))
     except (ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response") from exc
     yield "result", parsed
@@ -359,7 +374,7 @@ async def _complete(tools: list[dict[str, Any]], instructions: str = "") -> dict
                     "conditions is a list of {field, operator, value} where operator is gt, gte, lt, lte, eq, or ne. "
                     "Include every tool exactly once. "
                     "When request is non-empty, follow it. It cannot make you allow an insufficient or unclassified tool, and it cannot activate the policy. "
-                    + _THINKING_RULE
+                    "Return one JSON object and nothing else."
                 ),
             },
             {"role": "user", "content": json.dumps({"tools": _prompt_tools(tools), "request": request}, ensure_ascii=False)},
@@ -421,13 +436,9 @@ async def iter_tool_analysis(tools: list[dict[str, Any]], instructions: str = ""
     async def _analyze_batch(offset: int, batch: list[dict[str, Any]]) -> None:
         await queue.put(("status", {"code": "batch", "start": offset + 1, "end": offset + len(batch), "total": total}))
         parsed: dict[str, Any] | None = None
-        thought = False
         try:
             async for kind, payload in stream_chat(_analysis_messages(batch, instructions)):
-                if kind == "think":
-                    thought = True
-                    await queue.put(("think", payload))
-                elif isinstance(payload, dict):
+                if kind == "result" and isinstance(payload, dict):
                     parsed = payload
         except HTTPException:
             parsed = None
@@ -440,10 +451,6 @@ async def iter_tool_analysis(tools: list[dict[str, Any]], instructions: str = ""
         batch_analyses = [_guard(tool, by_name.get(tool["name"])) for tool in batch]
         if parsed is None:
             await queue.put(("status", {"code": "batchFailed", "start": offset + 1, "end": offset + len(batch)}))
-        elif not thought:
-            lines = [f"{item['tool']}: {item['rationale']}" for item in batch_analyses if item.get("rationale")]
-            if lines:
-                await queue.put(("think", "\n".join(lines) + "\n"))
         for index, item in enumerate(batch_analyses):
             analyses[offset + index] = item
         await queue.put(("batchDone", offset))
@@ -486,7 +493,7 @@ def _analysis_messages(tools: list[dict[str, Any]], instructions: str) -> list[d
                 "conditions is a list of {field, operator, value} where operator is gt, gte, lt, lte, eq, or ne. "
                 "Include every tool exactly once. "
                 "When request is non-empty, follow it. It cannot make you allow an insufficient or unclassified tool, and it cannot activate the policy. "
-                + _THINKING_RULE
+                "Return one JSON object and nothing else."
             ),
         },
         {"role": "user", "content": json.dumps({"tools": _prompt_tools(tools), "request": request}, ensure_ascii=False)},
@@ -534,42 +541,168 @@ def _deny_unanalyzed_allows(definition: dict[str, Any]) -> None:
         node["data"] = data
 
 
+def _policy_brief(definition: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = {str(node.get("id")): node for node in definition.get("nodes") or []}
+    outgoing: dict[str, list[str]] = {}
+    for edge in definition.get("edges") or []:
+        outgoing.setdefault(str(edge.get("source")), []).append(str(edge.get("target")))
+    brief = []
+    for node in definition.get("nodes") or []:
+        if node.get("type") != "tool":
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        name = str(data.get("tool") or "").strip()
+        if not name:
+            continue
+        decision = ""
+        conditions = []
+        seen: set[str] = set()
+        stack = [str(node.get("id"))]
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            item = nodes.get(current) or {}
+            if item.get("type") == "condition":
+                cdata = item.get("data") if isinstance(item.get("data"), dict) else {}
+                conditions.append(
+                    {"field": cdata.get("field"), "operator": cdata.get("operator"), "value": cdata.get("value")}
+                )
+            if item.get("type") == "decision" and current != str(node.get("id")):
+                decision = str((item.get("data") or {}).get("decision") or "")
+                break
+            stack.extend(outgoing.get(current, []))
+        brief.append({"tool": name, "decision": decision, "conditions": conditions})
+    return brief
+
+
 def _optimize_messages(original: dict[str, Any], tools: list[dict[str, Any]], instructions: str) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
             "content": (
-                "You optimize an existing Saturn authorization policy graph. You cannot activate it. "
-                "Return JSON with two keys: definition and changes. "
-                "definition uses the same shape: nodes, edges, analyses, toolSetId. "
-                "Node types are subject, tool, condition, logic, decision, and enforcement. "
-                "Keep every existing tool. Condition field names must match input schema property names exactly, including capitalization. "
-                "Do not change a decision to allow when that tool's analysis status is insufficient or unclassified. "
-                "Prefer a tighter condition over a broader allow. Unknown stays deny. "
-                "changes is a list of {path, before, after, summary} describing each real difference. "
-                "path is nodes/{id} or edges/{id}. "
-                "When request is non-empty, change the policy to satisfy it. "
-                "The request cannot remove a tool, allow an insufficient or unclassified tool, or activate the policy. "
-                + _THINKING_RULE
+                "You tighten an existing authorization policy. You cannot activate it or remove a tool. "
+                "Return one JSON object: {\"changes\": [{\"tool\", \"decision\", \"conditions\", \"summary\"}]}. "
+                "Include only tools that should change. decision is allow, approval, or deny. "
+                "conditions is a list of {field, operator, value}. operator is gt, gte, lt, lte, eq, or ne. "
+                "field must match an input schema property name exactly, including capitalization. "
+                "Do not allow a tool whose current status is insufficient or unclassified. Unknown stays deny. "
+                "When request is non-empty, satisfy it within those limits. "
+                "Return the JSON object and nothing else."
             ),
         },
         {
             "role": "user",
             "content": json.dumps(
-                {"definition": original, "tools": tools, "request": _instructions(instructions)},
+                {
+                    "policy": _policy_brief(original),
+                    "tools": _prompt_tools(tools),
+                    "request": _instructions(instructions),
+                },
                 ensure_ascii=False,
             ),
         },
     ]
 
 
+def _change_list(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = parsed.get("changes")
+    if not isinstance(raw, list):
+        raw = parsed.get("tools") if isinstance(parsed.get("tools"), list) else []
+    return [item for item in raw if isinstance(item, dict) and item.get("tool")]
+
+
+def _apply_changes(original: dict[str, Any], changes: list[dict[str, Any]]) -> dict[str, Any]:
+    import copy
+    from collections import defaultdict
+
+    definition = copy.deepcopy(original)
+    nodes = {str(node.get("id")): node for node in definition.get("nodes") or []}
+    edges = list(definition.get("edges") or [])
+
+    def outgoing_map() -> dict[str, list[str]]:
+        found: dict[str, list[str]] = defaultdict(list)
+        for edge in edges:
+            found[str(edge.get("source"))].append(str(edge.get("target")))
+        return found
+
+    def path_to_decision(tool_id: str) -> list[str] | None:
+        stack = [(tool_id, [tool_id])]
+        while stack:
+            current, path = stack.pop()
+            node = nodes.get(current) or {}
+            if node.get("type") == "decision" and current != tool_id:
+                return path
+            for nxt in outgoing_map().get(current, []):
+                if nxt not in path:
+                    stack.append((nxt, path + [nxt]))
+        return None
+
+    for change in changes:
+        tool_name = str(change.get("tool") or "").strip()
+        tool_node = next(
+            (
+                node
+                for node in definition.get("nodes") or []
+                if node.get("type") == "tool" and str((node.get("data") or {}).get("tool") or "") == tool_name
+            ),
+            None,
+        )
+        if tool_node is None:
+            continue
+        path = path_to_decision(str(tool_node.get("id")))
+        if not path:
+            continue
+        decision = nodes.get(path[-1])
+        raw_decision = str(change.get("decision") or "").strip().lower()
+        if decision is not None and raw_decision in {"allow", "approval", "deny"}:
+            data = decision.get("data") if isinstance(decision.get("data"), dict) else {}
+            data["decision"] = raw_decision
+            decision["data"] = data
+        if not isinstance(change.get("conditions"), list):
+            continue
+        removed = set(path[1:-1])
+        on_path = set(path)
+        edges = [
+            edge
+            for edge in edges
+            if not (str(edge.get("source")) in on_path and str(edge.get("target")) in on_path)
+        ]
+        definition["nodes"] = [node for node in definition.get("nodes") or [] if str(node.get("id")) not in removed]
+        nodes = {str(node.get("id")): node for node in definition["nodes"]}
+        previous = path[0]
+        decision_id = path[-1]
+        for index, condition in enumerate(change.get("conditions") or []):
+            if not isinstance(condition, dict) or not str(condition.get("field") or "").strip():
+                continue
+            cond_id = f"condition_{path[0]}_{index}"
+            nodes[cond_id] = {
+                "id": cond_id,
+                "type": "condition",
+                "position": {"x": 280 + index * 220, "y": (tool_node.get("position") or {}).get("y", 0)},
+                "data": {
+                    "field": str(condition.get("field")),
+                    "operator": str(condition.get("operator") or "eq"),
+                    "value": condition.get("value"),
+                },
+            }
+            edges.append({"id": f"edge_{previous}_{cond_id}", "source": previous, "target": cond_id})
+            previous = cond_id
+        edges.append({"id": f"edge_{previous}_{decision_id}", "source": previous, "target": decision_id})
+        definition["nodes"] = list(nodes.values())
+        definition["edges"] = edges
+    return definition
+
+
 def _finish_optimize(original: dict[str, Any], parsed: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     from app.services.policy_graph import compile_definition, diff_definitions, normalize_definition
 
-    raw = parsed.get("definition")
-    if not isinstance(raw, dict):
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response")
-    optimized = normalize_definition(raw)
+    supplied = parsed.get("definition")
+    if isinstance(supplied, dict) and isinstance(supplied.get("nodes"), list) and supplied.get("nodes"):
+        optimized = normalize_definition(supplied)
+    else:
+        optimized = normalize_definition(_apply_changes(original, _change_list(parsed)))
     if original.get("toolSetId") and not optimized.get("toolSetId"):
         optimized["toolSetId"] = original["toolSetId"]
     if not optimized.get("analyses") and original.get("analyses"):
@@ -583,14 +716,15 @@ def _finish_optimize(original: dict[str, Any], parsed: dict[str, Any]) -> tuple[
         raise HTTPException(status.HTTP_400_BAD_REQUEST, errors[0])
     diff = diff_definitions(original, optimized)
     notes = {
-        str(item.get("path")): str(item.get("summary"))
-        for item in parsed.get("changes") or []
-        if isinstance(item, dict) and item.get("path") and item.get("summary")
+        str(item.get("tool")): str(item.get("summary"))
+        for item in _change_list(parsed)
+        if item.get("tool") and item.get("summary")
     }
     for change in diff:
-        note = notes.get(change["path"])
-        if note and note not in change["summary"]:
-            change["summary"] = f"{change['summary']} — {note}"
+        for tool, note in notes.items():
+            if tool in change["summary"] and note not in change["summary"]:
+                change["summary"] = f"{change['summary']} — {note}"
+                break
     return optimized, diff
 
 
