@@ -33,6 +33,27 @@ def test_compiles_tool_to_decision():
     assert rules[0]["expression"] == {"op": "true"}
 
 
+def test_chained_conditions_are_anded():
+    definition = {
+        "nodes": [
+            {"id": "tool_58", "type": "tool", "data": {"tool": "modify_order"}},
+            {"id": "condition_58_0", "type": "condition", "data": {"field": "cash_size", "operator": "lt", "value": 10000}},
+            {"id": "condition_58_1", "type": "condition", "data": {"field": "size", "operator": "lt", "value": 100}},
+            {"id": "decision_58", "type": "decision", "data": {"decision": "allow"}},
+        ],
+        "edges": [
+            {"id": "a", "source": "tool_58", "target": "condition_58_0"},
+            {"id": "b", "source": "condition_58_0", "target": "condition_58_1"},
+            {"id": "c", "source": "condition_58_1", "target": "decision_58"},
+        ],
+    }
+    rules, errors = compile_definition(definition)
+    assert errors == []
+    rule = SimpleNamespace(**rules[0], condition="true", conditions=None, position=0, policy_id="p")
+    assert evaluate_graph_rules([rule], {"size": 50, "cash_size": 50000}, None).decision == PolicyDecision.DENY
+    assert evaluate_graph_rules([rule], {"size": 50, "cash_size": 100}, None).decision == PolicyDecision.ALLOW
+
+
 def test_two_conditions_must_both_match():
     definition = _chain(
         "modify_order",

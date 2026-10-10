@@ -588,14 +588,17 @@ def _optimize_messages(original: dict[str, Any], tools: list[dict[str, Any]], in
         {
             "role": "system",
             "content": (
-                "You tighten an existing authorization policy. You cannot activate it or remove a tool. "
+                "You edit an existing authorization policy to satisfy the user request. You cannot activate it or remove a tool. "
+                "When request is empty, return {\"changes\": []}. "
                 "Return one JSON object: {\"changes\": [{\"tool\", \"decision\", \"conditions\", \"summary\"}]}. "
-                "Include only tools that should change. decision is allow, approval, or deny. "
+                "Include only tools the request asks to change. decision is allow, approval, or deny. "
                 "conditions is a list of {field, operator, value}. operator is gt, gte, lt, lte, eq, or ne. "
                 "Every condition in the list must be true at the same time. Put each required field in its own item. "
+                "The list replaces that tool's checks. Repeat every current condition you are keeping. "
+                "An empty conditions list removes every check. Do not send one unless the request says to remove the checks. "
+                "Do not change a conditional allow into an unconditional deny. "
                 "field must match an input schema property name exactly, including capitalization. "
                 "Do not allow a tool whose current status is insufficient or unclassified. Unknown stays deny. "
-                "When request is non-empty, satisfy it within those limits. "
                 "Return the JSON object and nothing else."
             ),
         },

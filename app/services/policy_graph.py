@@ -52,28 +52,39 @@ def _ancestors(node_id: str, incoming: dict[str, list[str]]) -> set[str]:
     return seen
 
 
-def _node_expr(node_id: str, nodes: dict[str, dict[str, Any]], incoming: dict[str, list[str]]) -> dict[str, Any]:
+def _node_expr(
+    node_id: str,
+    nodes: dict[str, dict[str, Any]],
+    incoming: dict[str, list[str]],
+    stack: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    if node_id in stack:
+        return {"op": "true"}
     node = nodes[node_id]
     kind = node.get("type")
     data = node.get("data") if isinstance(node.get("data"), dict) else {}
+    stack = stack | {node_id}
+    upstream = [
+        _node_expr(source, nodes, incoming, stack)
+        for source in incoming.get(node_id, [])
+        if (nodes.get(source) or {}).get("type") in {"condition", "logic"}
+    ]
     if kind == "condition":
         operator = str(data.get("operator") or "eq").lower()
-        return {
+        own = {
             "op": "cmp",
             "field": str(data.get("field") or "").strip(),
             "operator": operator if operator in _OPS else "eq",
             "value": data.get("value"),
         }
+        if not upstream:
+            return own
+        return {"op": "and", "args": [*upstream, own]}
     if kind == "logic":
         op = str(data.get("op") or "and").lower()
         if op not in _LOGIC:
             op = "and"
-        args = []
-        for source in incoming.get(node_id, []):
-            source_node = nodes.get(source)
-            if source_node and source_node.get("type") in {"condition", "logic"}:
-                args.append(_node_expr(source, nodes, incoming))
-        return {"op": op, "args": args}
+        return {"op": op, "args": upstream}
     return {"op": "true"}
 
 
