@@ -62,6 +62,8 @@ async def generate_policy_stream(
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else "Policy model request failed"
             yield _sse({"type": "error", "message": detail})
+        except Exception:
+            yield _sse({"type": "error", "message": "Could not save the policy draft"})
 
     return StreamingResponse(
         events(),
@@ -157,6 +159,8 @@ async def optimize_policy_stream(
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else "Policy model request failed"
             yield _sse({"type": "error", "message": detail})
+        except Exception:
+            yield _sse({"type": "error", "message": "Could not save the optimized policy"})
 
     return StreamingResponse(
         events(),

@@ -78,12 +78,62 @@ def _extract_json(text: str) -> dict[str, Any]:
         cleaned = re.sub(r"```$", "", cleaned).strip()
     start = cleaned.find("{")
     end = cleaned.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("Model did not return JSON")
-    parsed = json.loads(cleaned[start : end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("Model did not return a JSON object")
-    return parsed
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+    tools = []
+    for raw in _json_objects(cleaned):
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict) and item.get("tool"):
+            tools.append(item)
+    if tools:
+        return {"tools": tools}
+    raise ValueError("Model did not return JSON")
+
+
+def _json_objects(text: str) -> list[str]:
+    objects: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "{":
+            index += 1
+            continue
+        start = index
+        depth = 0
+        in_string = False
+        escaped = False
+        closed = False
+        for cursor in range(index, len(text)):
+            char = text[cursor]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    objects.append(text[start : cursor + 1])
+                    index = cursor + 1
+                    closed = True
+                    break
+        if not closed:
+            index = start + 1
+    return objects
 
 
 _JSON_MARKER = "\nJSON\n"
@@ -107,46 +157,51 @@ class _ThoughtSplit:
             self.json_parts.append(text)
             return ""
         self.buffer += text
-        if self.buffer.lstrip().startswith("{"):
-            self.in_json = True
-            self.json_parts.append(self.buffer)
-            self.buffer = ""
-            return ""
-        marker = self.buffer.find(_JSON_MARKER)
-        if marker >= 0:
-            emit = self.buffer[:marker]
-            self.json_parts.append(self.buffer[marker + len(_JSON_MARKER) :])
+        cut = _json_cut(self.buffer)
+        if cut is not None:
+            emit = self.buffer[:cut].strip()
+            self.json_parts.append(self.buffer[cut:])
             self.buffer = ""
             self.in_json = True
-            return emit
+            return f"{emit}\n" if emit else ""
         hold = _marker_prefix(self.buffer)
-        if hold:
-            emit = self.buffer[:-hold]
-            self.buffer = self.buffer[-hold:]
-            return emit
-        emit = self.buffer
-        self.buffer = ""
+        emit = self.buffer[:-hold] if hold else self.buffer
+        self.buffer = self.buffer[-hold:] if hold else ""
         return emit
 
     def finish(self) -> str:
-        if self.in_json or self.saw_reasoning:
-            if self.buffer and not self.in_json:
-                self.json_parts.append(self.buffer)
-            return "".join(self.json_parts)
-        return self.buffer
+        if self.buffer and not self.in_json:
+            cut = _json_cut(self.buffer)
+            if cut is None:
+                if self.json_parts or self.saw_reasoning:
+                    self.json_parts.append(self.buffer)
+                else:
+                    return self.buffer
+            else:
+                self.json_parts.append(self.buffer[cut:])
+        return "".join(self.json_parts) if self.json_parts else self.buffer
+
+
+def _json_cut(text: str) -> int | None:
+    fence = text.find("```")
+    brace = text.find("{")
+    marker = text.find(_JSON_MARKER)
+    cuts = [item for item in (fence, brace, marker) if item >= 0]
+    return min(cuts) if cuts else None
 
 
 def _marker_prefix(text: str) -> int:
-    for size in range(len(_JSON_MARKER) - 1, 0, -1):
-        if text.endswith(_JSON_MARKER[:size]):
-            return size
+    for needle in (_JSON_MARKER, "```"):
+        for size in range(len(needle) - 1, 0, -1):
+            if text.endswith(needle[:size]):
+                return size
     return 0
 
 
 async def _chat(messages: list[dict[str, str]]) -> dict[str, Any]:
     settings = get_settings()
     base = settings.policy_llm_base_url.rstrip("/")
-    payload = {"model": settings.policy_llm_model, "temperature": 0, "messages": messages}
+    payload = {"model": settings.policy_llm_model, "temperature": 0, "max_tokens": 4096, "messages": messages}
     try:
         async with httpx.AsyncClient(timeout=90) as client:
             response = await client.post(
@@ -176,11 +231,45 @@ def _instructions(raw: str) -> str:
 
 
 _THINKING_RULE = (
-    "Before the JSON, write a short thinking trace the user can read, with no braces. "
-    "End that trace with a line that contains only JSON. "
-    "After that line, return the JSON object and nothing else. "
-    "If you have a separate reasoning channel, put the trace there and return only the JSON object."
+    "Put step-by-step reasoning only in the reasoning channel. "
+    "The message itself must be one JSON object, with no markdown fences. "
+    "Keep each rationale under 20 words."
 )
+
+
+def _schema_brief(schema: Any) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    brief: dict[str, Any] = {}
+    for name, spec in list(properties.items())[:30]:
+        if not isinstance(spec, dict):
+            brief[str(name)] = {}
+            continue
+        item: dict[str, Any] = {}
+        if spec.get("type"):
+            item["type"] = spec.get("type")
+        if isinstance(spec.get("enum"), list):
+            item["enum"] = spec["enum"][:12]
+        description = str(spec.get("description") or "").strip()
+        if description:
+            item["description"] = description[:160]
+        brief[str(name)] = item
+    return {"properties": brief}
+
+
+def _prompt_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    brief = []
+    for tool in tools:
+        brief.append(
+            {
+                "name": tool.get("name"),
+                "description": str(tool.get("description") or "")[:500],
+                "inputSchema": _schema_brief(tool.get("inputSchema")),
+                "server": tool.get("server") or "",
+            }
+        )
+    return brief
 
 
 async def _iter_deltas(messages: list[dict[str, str]]):
@@ -190,11 +279,12 @@ async def _iter_deltas(messages: list[dict[str, str]]):
     payload = {
         "model": settings.policy_llm_model,
         "temperature": 0,
+        "max_tokens": 4096,
         "stream": True,
         "messages": messages,
     }
     try:
-        async with httpx.AsyncClient(timeout=90) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=20.0)) as client:
             async with client.stream(
                 "POST",
                 f"{settings.policy_llm_base_url.rstrip('/')}/chat/completions",
@@ -272,7 +362,7 @@ async def _complete(tools: list[dict[str, Any]], instructions: str = "") -> dict
                     + _THINKING_RULE
                 ),
             },
-            {"role": "user", "content": json.dumps({"tools": tools, "request": request}, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps({"tools": _prompt_tools(tools), "request": request}, ensure_ascii=False)},
         ]
     )
 
@@ -287,8 +377,8 @@ async def analyze_tools(tools: list[dict[str, Any]], instructions: str = "") -> 
             False,
         )
     analyses: list[dict[str, Any]] = []
-    for offset in range(0, len(tools), 20):
-        batch = tools[offset : offset + 20]
+    for offset in range(0, len(tools), 8):
+        batch = tools[offset : offset + 8]
         try:
             parsed = await _complete(batch, instructions)
         except HTTPException:
@@ -316,25 +406,31 @@ async def iter_tool_analysis(tools: list[dict[str, Any]], instructions: str = ""
             ([_insufficient(tool, "No policy model is configured. This tool was not analyzed.") for tool in tools], False),
         )
         return
-    analyses: list[dict[str, Any]] = []
+    import asyncio
+
+    analyses: list[dict[str, Any] | None] = [None] * len(tools)
     total = len(tools)
-    for offset in range(0, total, 20):
-        batch = tools[offset : offset + 20]
-        yield "status", {"code": "batch", "start": offset + 1, "end": offset + len(batch), "total": total}
+    queue: asyncio.Queue = asyncio.Queue()
+    batches = [(offset, tools[offset : offset + 8]) for offset in range(0, total, 8)]
+    gate = asyncio.Semaphore(3)
+
+    async def _batch(offset: int, batch: list[dict[str, Any]]) -> None:
+        async with gate:
+            await _analyze_batch(offset, batch)
+
+    async def _analyze_batch(offset: int, batch: list[dict[str, Any]]) -> None:
+        await queue.put(("status", {"code": "batch", "start": offset + 1, "end": offset + len(batch), "total": total}))
         parsed: dict[str, Any] | None = None
         thought = False
         try:
             async for kind, payload in stream_chat(_analysis_messages(batch, instructions)):
                 if kind == "think":
                     thought = True
-                    yield "think", payload
-                else:
+                    await queue.put(("think", payload))
+                elif isinstance(payload, dict):
                     parsed = payload
         except HTTPException:
-            failed = [_insufficient(tool, "The policy model did not analyze this tool.") for tool in batch]
-            analyses.extend(failed)
-            yield "think", "\nThe policy model did not analyze this batch.\n"
-            continue
+            parsed = None
         returned = parsed.get("tools") if isinstance(parsed, dict) and isinstance(parsed.get("tools"), list) else []
         by_name = {
             str(item.get("tool") or item.get("name") or ""): item
@@ -342,12 +438,32 @@ async def iter_tool_analysis(tools: list[dict[str, Any]], instructions: str = ""
             if isinstance(item, dict)
         }
         batch_analyses = [_guard(tool, by_name.get(tool["name"])) for tool in batch]
-        if not thought:
+        if parsed is None:
+            await queue.put(("status", {"code": "batchFailed", "start": offset + 1, "end": offset + len(batch)}))
+        elif not thought:
             lines = [f"{item['tool']}: {item['rationale']}" for item in batch_analyses if item.get("rationale")]
             if lines:
-                yield "think", "\n".join(lines) + "\n"
-        analyses.extend(batch_analyses)
-    yield "result", (analyses, True)
+                await queue.put(("think", "\n".join(lines) + "\n"))
+        for index, item in enumerate(batch_analyses):
+            analyses[offset + index] = item
+        await queue.put(("batchDone", offset))
+
+    async def _run() -> None:
+        try:
+            await asyncio.gather(*(_batch(offset, batch) for offset, batch in batches))
+        finally:
+            await queue.put(("finished", None))
+
+    task = asyncio.create_task(_run())
+    finished = False
+    while not finished:
+        kind, payload = await queue.get()
+        if kind == "finished":
+            finished = True
+        elif kind != "batchDone":
+            yield kind, payload
+    await task
+    yield "result", ([item for item in analyses if item is not None], True)
 
 
 def _analysis_messages(tools: list[dict[str, Any]], instructions: str) -> list[dict[str, str]]:
@@ -373,7 +489,7 @@ def _analysis_messages(tools: list[dict[str, Any]], instructions: str) -> list[d
                 + _THINKING_RULE
             ),
         },
-        {"role": "user", "content": json.dumps({"tools": tools, "request": request}, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps({"tools": _prompt_tools(tools), "request": request}, ensure_ascii=False)},
     ]
 
 

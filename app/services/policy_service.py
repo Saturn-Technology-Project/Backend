@@ -513,7 +513,7 @@ class PolicyService:
             condition = compile_condition(structured) if flat is not None else "true"
             session.add(
                 PolicyRule(
-                    id=rule.get("id") or new_id("rule"),
+                    id=new_id("rule"),
                     policy_id=policy_id,
                     tool=rule["tool"],
                     condition=condition,
