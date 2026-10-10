@@ -260,12 +260,8 @@ class PolicyService:
                 )
             )
 
-    async def generate_from_set(
-        self, session: AsyncSession, organization_id: str, tool_set_id: str, name: str, instructions: str = ""
-    ) -> Policy:
+    async def set_inventory(self, session: AsyncSession, organization_id: str, tool_set_id: str):
         from app.models import Tool, ToolSet, ToolSetItem
-        from app.services.policy_graph import definition_from_analyses
-        from app.services.policy_llm import analyze_tools
 
         result = await session.execute(
             select(ToolSet)
@@ -294,6 +290,15 @@ class PolicyService:
             )
         if not inventory:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "This capability set has no tools")
+        return tool_set, inventory
+
+    async def generate_from_set(
+        self, session: AsyncSession, organization_id: str, tool_set_id: str, name: str, instructions: str = ""
+    ) -> Policy:
+        from app.services.policy_graph import definition_from_analyses
+        from app.services.policy_llm import analyze_tools
+
+        tool_set, inventory = await self.set_inventory(session, organization_id, tool_set_id)
         analyses, used_model = await analyze_tools(inventory, instructions)
         definition = definition_from_analyses(tool_set.id, analyses)
         description = (
@@ -312,6 +317,45 @@ class PolicyService:
                 definition=definition,
             ),
         )
+
+    async def iter_generate(
+        self, session: AsyncSession, organization_id: str, tool_set_id: str, name: str, instructions: str = ""
+    ):
+        from app.services.policy_graph import definition_from_analyses
+        from app.services.policy_llm import iter_tool_analysis
+
+        tool_set, inventory = await self.set_inventory(session, organization_id, tool_set_id)
+        yield {"type": "status", "code": "reading", "name": tool_set.name, "count": len(inventory)}
+        analyses = None
+        used_model = False
+        async for kind, payload in iter_tool_analysis(inventory, instructions):
+            if kind == "think":
+                yield {"type": "think", "text": payload}
+            elif kind == "status":
+                yield {"type": "status", **payload}
+            elif kind == "result":
+                analyses, used_model = payload
+        if analyses is None:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response")
+        definition = definition_from_analyses(tool_set.id, analyses)
+        description = (
+            "Draft proposed from the capability set. Review every tool, then validate and activate it."
+            if used_model
+            else "No policy model is configured. Every tool is unclassified and denied until you review it."
+        )
+        policy = await self.create_policy(
+            session,
+            organization_id,
+            PolicyCreate(
+                name=(name or f"{tool_set.name} policy").strip(),
+                description=description,
+                status="draft",
+                tool_set_id=tool_set.id,
+                definition=definition,
+            ),
+        )
+        await session.commit()
+        yield {"type": "policy", "policy": policy}
 
     async def optimize_policy(
         self, session: AsyncSession, policy: Policy, definition: dict, instructions: str = ""
@@ -348,6 +392,31 @@ class PolicyService:
                     )
         optimized, diff = await optimize_definition(definition, inventory, instructions)
         return {"definition": optimized, "diff": diff}
+
+    async def iter_optimize(self, session: AsyncSession, policy: Policy, definition: dict, instructions: str = ""):
+        from app.services.policy_llm import iter_optimize_definition
+
+        set_id = ""
+        if isinstance(definition, dict):
+            set_id = str(definition.get("toolSetId") or definition.get("tool_set_id") or "")
+        set_id = set_id or (policy.tool_set_id or "")
+        inventory: list[dict] = []
+        if set_id:
+            try:
+                _tool_set, inventory = await self.set_inventory(session, policy.organization_id, set_id)
+            except HTTPException:
+                inventory = []
+        yield {"type": "status", "code": "optimizing"}
+        outcome = None
+        async for kind, payload in iter_optimize_definition(definition, inventory, instructions):
+            if kind == "think":
+                yield {"type": "think", "text": payload}
+            elif kind == "result":
+                outcome = payload
+        if outcome is None:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response")
+        optimized, diff = outcome
+        yield {"type": "result", "definition": optimized, "diff": diff}
 
     async def _set_tool_names(self, session: AsyncSession, organization_id: str, tool_set_id: str) -> list[str]:
         from app.models import Tool, ToolSet, ToolSetItem

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from app.api.deps import CurrentUser, PoliciesRead, PoliciesWrite, SaturnCloud, SessionDep
 from app.schemas import (
@@ -37,6 +40,34 @@ async def generate_policy(
         session, user.organization_id, body.tool_set_id, body.name, body.instructions
     )
     return serialize_policy(policy)
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+
+@router.post("/generate/stream")
+async def generate_policy_stream(
+    body: PolicyGenerate, session: SessionDep, user: CurrentUser, _access: PoliciesWrite, _cloud: SaturnCloud
+):
+    async def events():
+        try:
+            async for event in policy_service.iter_generate(
+                session, user.organization_id, body.tool_set_id, body.name, body.instructions
+            ):
+                if event.get("type") == "policy":
+                    yield _sse({"type": "policy", "policy": serialize_policy(event["policy"]).model_dump(mode="json")})
+                else:
+                    yield _sse(event)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else "Policy model request failed"
+            yield _sse({"type": "error", "message": detail})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("", response_model=PolicyRead, status_code=201)
@@ -106,6 +137,32 @@ async def optimize_policy(
 ):
     policy = await policy_service.get_policy(session, policy_id, user.organization_id)
     return await policy_service.optimize_policy(session, policy, body.definition, body.instructions)
+
+
+@router.post("/{policy_id}/optimize/stream")
+async def optimize_policy_stream(
+    policy_id: str,
+    body: PolicyOptimize,
+    session: SessionDep,
+    user: CurrentUser,
+    _access: PoliciesWrite,
+    _cloud: SaturnCloud,
+):
+    policy = await policy_service.get_policy(session, policy_id, user.organization_id)
+
+    async def events():
+        try:
+            async for event in policy_service.iter_optimize(session, policy, body.definition, body.instructions):
+                yield _sse(event)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else "Policy model request failed"
+            yield _sse({"type": "error", "message": detail})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/{policy_id}/simulate")
