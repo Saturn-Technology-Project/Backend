@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     x402_pay_to: str = ""
     in_process_runtime: bool = False
     saturn_secret_project: str = ""
+    resend_api_key: str = ""
+    resend_from: str = ""
+    policy_llm_base_url: str = ""
+    policy_llm_api_key: str = ""
+    policy_llm_model: str = ""
 
 
 @lru_cache

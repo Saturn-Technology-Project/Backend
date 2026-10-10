@@ -138,8 +138,11 @@ Frontend / Dashboard:
 
 ## Deploy
 
+Frontend and backend go to Cloud Run only through GitHub Actions. Do not deploy them with a local `docker push` or `gcloud run` unless that path is explicitly requested.
+
 1. Run **Provision Google Cloud Resources** once from the backend repo.
-2. Push `main` on backend, then copy the Cloud Run URL into `BACKEND_PUBLIC_URL`.
-3. Push `main` on frontend and dashboard.
+2. Push `main` on backend. Actions builds `linux/amd64` and deploys that image digest. Environment variables come from this repo's GitHub secrets and variables, and that file replaces the Cloud Run environment.
+3. Copy the Cloud Run URL into `BACKEND_PUBLIC_URL` when that URL changes.
+4. Push `main` on frontend, then dashboard. Deploy backend before frontend, because the frontend bakes `BACKEND_PUBLIC_URL` into the image.
 
 Each deploy workflow also has **Run workflow** for a manual release.

@@ -32,6 +32,10 @@ class AgentRead(ORMModel):
     tool_set_id: str | None = None
     profile_id: str | None = None
     origin: str | None = None
+    client_id: str | None = None
+    registered_user_id: str | None = None
+    registered_user_name: str | None = None
+    registered_user_email: str | None = None
     pushed: bool | None = None
 
 
@@ -119,11 +123,17 @@ class AppMcpWrite(BaseModel):
 class AppStateRead(BaseModel):
     agents: list[dict] = Field(default_factory=list)
     messages: list[dict] = Field(default_factory=list)
+    tasks: list[dict] = Field(default_factory=list)
+    wakes: list[dict] = Field(default_factory=list)
+    memories: list[dict] = Field(default_factory=list)
 
 
 class AppStateWrite(BaseModel):
     agents: list[dict] = Field(default_factory=list)
     messages: list[dict] = Field(default_factory=list)
+    tasks: list[dict] | None = None
+    wakes: list[dict] | None = None
+    memories: list[dict] | None = None
 
 
 class OrgAppStateRead(BaseModel):
@@ -217,6 +227,8 @@ class PolicyCreate(BaseModel):
     status: str = "active"
     environment: str = "production"
     tool: str | None = None
+    tool_set_id: str | None = None
+    definition: dict[str, Any] | None = None
     agent_ids: list[str] = Field(default_factory=list)
     rules: list[PolicyRuleIn] = Field(default_factory=list)
 
@@ -227,6 +239,8 @@ class PolicyUpdate(BaseModel):
     status: str | None = None
     environment: str | None = None
     tool: str | None = None
+    tool_set_id: str | None = None
+    definition: dict[str, Any] | None = None
     agent_ids: list[str] | None = None
     rules: list[PolicyRuleIn] | None = None
 
@@ -238,10 +252,33 @@ class PolicyRead(ORMModel):
     status: str = "active"
     version: int = 1
     environment: str = "production"
+    tool_set_id: str | None = None
+    definition: dict[str, Any] | None = None
     agent_ids: list[str] = Field(default_factory=list)
     rules: list[PolicyRuleRead] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class PolicyGenerate(BaseModel):
+    tool_set_id: str
+    name: str = ""
+    instructions: str = ""
+
+
+class PolicyActivate(BaseModel):
+    confirm: bool = False
+
+
+class PolicySimulate(BaseModel):
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    agent_id: str | None = None
+
+
+class PolicyOptimize(BaseModel):
+    definition: dict[str, Any]
+    instructions: str = ""
 
 
 class RunCreate(BaseModel):
@@ -658,6 +695,26 @@ class AdminUserRead(ORMModel):
     title: str | None = None
     role: str | None = None
     created_at: datetime
+
+
+class ProfileUpdate(BaseModel):
+    name: str
+    email: str
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    code: str
+    password: str
 
 
 class LoginRequest(BaseModel):

@@ -19,6 +19,7 @@ from app.models.secret_vault import SecretVault
 from app.models.org_app_mcp import OrgAppMcp
 from app.models.org_app_state import OrgAppState
 from app.models.organization import Organization
+from app.models.password_reset import PasswordReset
 from app.models.payment import Payment
 from app.models.policy import Policy, PolicyRule
 from app.models.run import Run
@@ -48,6 +49,7 @@ __all__ = [
     "OrgAppMcp",
     "OrgAppState",
     "Organization",
+    "PasswordReset",
     "Payment",
     "Policy",
     "PolicyRule",

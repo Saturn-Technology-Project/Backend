@@ -2,9 +2,27 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 from fastapi import HTTPException, status
+
+
+def sec_api_request(endpoint: str, authorization: str) -> tuple[str, str]:
+    """SEC-API.io reads the key from apiKey, not from Authorization."""
+    url = endpoint.strip()
+    token = authorization.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    parts = urlsplit(url)
+    if parts.hostname != "api.sec-api.io" or not token:
+        return url, authorization
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    if query.get("apiKey"):
+        return url, ""
+    query["apiKey"] = token
+    signed = urlunsplit((parts.scheme, parts.netloc, parts.path or "/mcp", urlencode(query), ""))
+    return signed, ""
 
 
 def _headers(authorization: str, session_id: str = "") -> dict[str, str]:
@@ -105,11 +123,12 @@ async def list_remote_tools(endpoint: str, authorization: str = "") -> list[dict
     url = endpoint.strip()
     if not url:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint is required")
-    headers = _headers(authorization)
+    request_url, header_auth = sec_api_request(url, authorization)
+    headers = _headers(header_auth)
     async with httpx.AsyncClient(timeout=20) as client:
         init = await _rpc(
             client,
-            url,
+            request_url,
             headers,
             "initialize",
             {
@@ -122,8 +141,8 @@ async def list_remote_tools(endpoint: str, authorization: str = "") -> list[dict
         _raise_for_status(init, url)
         session_id = init.headers.get("mcp-session-id", "")
         if session_id:
-            headers = _headers(authorization, session_id)
-        listed = await _rpc(client, url, headers, "tools/list", {}, 2)
+            headers = _headers(header_auth, session_id)
+        listed = await _rpc(client, request_url, headers, "tools/list", {}, 2)
     _raise_for_status(listed, url)
     tools = _tools(_payload(listed))
     if not tools:
@@ -138,11 +157,12 @@ async def call_remote_tool(
     authorization: str = "",
 ) -> dict[str, Any]:
     url = endpoint.strip()
-    headers = _headers(authorization)
+    request_url, header_auth = sec_api_request(url, authorization)
+    headers = _headers(header_auth)
     async with httpx.AsyncClient(timeout=60) as client:
         init = await _rpc(
             client,
-            url,
+            request_url,
             headers,
             "initialize",
             {
@@ -155,10 +175,10 @@ async def call_remote_tool(
         _raise_for_status(init, url)
         session_id = init.headers.get("mcp-session-id", "")
         if session_id:
-            headers = _headers(authorization, session_id)
+            headers = _headers(header_auth, session_id)
         called = await _rpc(
             client,
-            url,
+            request_url,
             headers,
             "tools/call",
             {"name": name, "arguments": arguments},
@@ -169,5 +189,4 @@ async def call_remote_tool(
     if body.get("error"):
         message = body["error"].get("message") if isinstance(body["error"], dict) else "MCP tools/call failed"
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(message or "MCP tools/call failed"))
-    result = body.get("result")
-    return result if isinstance(result, dict) else {"value": result}
+    return body

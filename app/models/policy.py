@@ -21,6 +21,10 @@ class Policy(Base):
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     environment: Mapped[str] = mapped_column(String(64), default="production", nullable=False)
+    tool_set_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("tool_sets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    definition: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
@@ -50,5 +54,7 @@ class PolicyRule(Base):
     conditions: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    expression: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    attributes: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     policy = relationship("Policy", back_populates="rules")

@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.ids import new_id, utcnow
-from app.models import Organization, User
+from app.models import Organization, PasswordReset, User
 from app.models.session import AuthSession
 
 settings = get_settings()
@@ -95,6 +95,24 @@ class AuthService:
         record.revoked_at = utcnow()
         await session.flush()
 
+    async def update_profile(self, session: AsyncSession, user: User, *, name: str, email: str) -> User:
+        cleaned = name.strip()
+        if not cleaned or len(cleaned) > 255:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name is required")
+        normalized = email.strip().lower()
+        domain = normalized.split("@")[-1] if "@" in normalized else ""
+        if not domain or "." not in domain or " " in normalized:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email is invalid")
+        if normalized != user.email:
+            existing = await session.execute(select(User).where(User.email == normalized))
+            other = existing.scalar_one_or_none()
+            if other is not None and other.id != user.id:
+                raise HTTPException(status.HTTP_409_CONFLICT, "Email is already used")
+            user.email = normalized
+        user.name = cleaned
+        await session.flush()
+        return user
+
     async def user_from_token(self, session: AsyncSession, token: str) -> User | None:
         result = await session.execute(
             select(AuthSession)
@@ -115,6 +133,147 @@ class AuthService:
         ):
             return None
         return record.user
+
+    async def revoke_user_sessions(
+        self,
+        session: AsyncSession,
+        user_id: str,
+        *,
+        keep_hash: str | None = None,
+    ) -> None:
+        result = await session.execute(
+            select(AuthSession).where(
+                AuthSession.user_id == user_id,
+                AuthSession.revoked_at.is_(None),
+            )
+        )
+        now = utcnow()
+        for record in result.scalars():
+            if keep_hash is not None and record.token_hash == keep_hash:
+                continue
+            record.revoked_at = now
+        await session.flush()
+
+    async def request_password_reset(self, session: AsyncSession, email: str) -> str | None:
+        normalized = email.strip().lower()
+        recent = await session.execute(
+            select(PasswordReset)
+            .where(PasswordReset.email == normalized)
+            .order_by(PasswordReset.created_at.desc())
+            .limit(1)
+        )
+        last = recent.scalar_one_or_none()
+        if last is not None:
+            created = last.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if utcnow() - created < timedelta(seconds=60):
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "Wait a minute before requesting another code",
+                )
+        user = await self._active_user(session, normalized)
+        if user is None:
+            return None
+        open_codes = await session.execute(
+            select(PasswordReset).where(
+                PasswordReset.email == normalized,
+                PasswordReset.used_at.is_(None),
+            )
+        )
+        now = utcnow()
+        for record in open_codes.scalars():
+            record.used_at = now
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        session.add(
+            PasswordReset(
+                id=new_id("rst"),
+                email=normalized,
+                code_hash=hash_password(code),
+                expires_at=now + timedelta(minutes=10),
+                attempts=0,
+            )
+        )
+        await session.flush()
+        return code
+
+    async def discard_password_reset(self, session: AsyncSession, email: str) -> None:
+        normalized = email.strip().lower()
+        result = await session.execute(
+            select(PasswordReset)
+            .where(PasswordReset.email == normalized, PasswordReset.used_at.is_(None))
+            .order_by(PasswordReset.created_at.desc())
+            .limit(1)
+        )
+        record = result.scalar_one_or_none()
+        if record is not None:
+            await session.delete(record)
+            await session.flush()
+
+    async def reset_password(
+        self,
+        session: AsyncSession,
+        email: str,
+        code: str,
+        password: str,
+    ) -> None:
+        self._require_password(password)
+        normalized = email.strip().lower()
+        result = await session.execute(
+            select(PasswordReset)
+            .where(PasswordReset.email == normalized, PasswordReset.used_at.is_(None))
+            .order_by(PasswordReset.created_at.desc())
+            .limit(1)
+        )
+        record = result.scalar_one_or_none()
+        now = utcnow()
+        expires = record.expires_at if record is not None else None
+        if expires is not None and expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if record is None or expires is None or expires <= now or record.attempts >= 5:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        if not verify_password(code.strip(), record.code_hash):
+            record.attempts += 1
+            if record.attempts >= 5:
+                record.used_at = now
+            await session.flush()
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        user = await self._active_user(session, normalized)
+        if user is None:
+            record.used_at = now
+            await session.flush()
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        user.password_hash = hash_password(password)
+        record.used_at = now
+        await self.revoke_user_sessions(session, user.id)
+
+    async def change_password(
+        self,
+        session: AsyncSession,
+        user: User,
+        current_password: str,
+        new_password: str,
+        *,
+        keep_token: str | None,
+    ) -> None:
+        if not verify_password(current_password, user.password_hash):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
+        self._require_password(new_password)
+        user.password_hash = hash_password(new_password)
+        keep_hash = hash_token(keep_token) if keep_token else None
+        await self.revoke_user_sessions(session, user.id, keep_hash=keep_hash)
+
+    async def _active_user(self, session: AsyncSession, email: str) -> User | None:
+        result = await session.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        if user is None or user.status != "active":
+            return None
+        return user
+
+    @staticmethod
+    def _require_password(password: str) -> None:
+        if len(password) < 8:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters")
 
     async def ensure_seed_user(self, session: AsyncSession) -> None:
         existing = await session.get(User, settings.default_actor_id)

@@ -29,10 +29,11 @@ async def saturn_mcp_endpoint(request: Request, session: SessionDep) -> dict[str
         raise _unauthorized(origin)
     user = await auth_service.user_from_token(session, token)
     client_name = ""
+    client_id = ""
     if user is None:
         oauth_user = await oauth_service.user_from_access_token(session, token)
         if oauth_user is not None:
-            user, client_name = oauth_user
+            user, client_name, client_id = oauth_user
     if user is None:
         raise _unauthorized(origin)
     org = user.organization or await session.get(Organization, user.organization_id)
@@ -56,5 +57,6 @@ async def saturn_mcp_endpoint(request: Request, session: SessionDep) -> dict[str
         action_id=request.headers.get("x-saturn-action-id", ""),
         profile_id=presented or (expected if client_name else ""),
         client_name=client_name,
+        client_id=client_id,
         message=message,
     )

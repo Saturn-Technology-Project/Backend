@@ -179,6 +179,7 @@ class RunService:
             result=decision.decision.value,
             payload={
                 "policy_id": decision.policy_id,
+                "policy_name": decision.policy_name,
                 "policy_version": decision.policy_version,
                 "matched_rule_id": decision.matched_rule_id,
                 "reason": decision.reason,

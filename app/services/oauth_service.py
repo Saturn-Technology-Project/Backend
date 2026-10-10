@@ -142,7 +142,7 @@ class OAuthService:
         self,
         session: AsyncSession,
         token: str,
-    ) -> tuple[User, str] | None:
+    ) -> tuple[User, str, str] | None:
         if not token.startswith("sat_oa_"):
             return None
         result = await session.execute(
@@ -158,7 +158,7 @@ class OAuthService:
         if user is None or user.status != "active":
             return None
         client = await session.get(OAuthClient, record.client_id)
-        return user, (client.name if client is not None else "Agent")
+        return user, (client.name if client is not None else "Agent"), record.client_id
 
     async def _issue_tokens(
         self,

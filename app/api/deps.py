@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from app.api.session_cookie import COOKIE_NAME
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_session
@@ -17,18 +19,24 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request: Request,
     session: SessionDep,
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None,
 ) -> User:
     from app.services.auth_service import auth_service
 
-    if creds is None or creds.scheme.lower() != "bearer":
+    token = ""
+    if creds is not None and creds.scheme.lower() == "bearer":
+        token = creds.credentials
+    if not token:
+        token = request.cookies.get(COOKIE_NAME, "")
+    if not token:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    user = await auth_service.user_from_token(session, creds.credentials)
+    user = await auth_service.user_from_token(session, token)
     if user is None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
