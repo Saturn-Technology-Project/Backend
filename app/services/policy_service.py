@@ -406,7 +406,12 @@ class PolicyService:
                 _tool_set, inventory = await self.set_inventory(session, policy.organization_id, set_id)
             except HTTPException:
                 inventory = []
-        yield {"type": "status", "code": "optimizing"}
+        tool_count = len(inventory)
+        if tool_count == 0 and isinstance(definition, dict):
+            tool_count = sum(
+                1 for node in definition.get("nodes") or [] if isinstance(node, dict) and node.get("type") == "tool"
+            )
+        yield {"type": "status", "code": "optimizing", "total": tool_count}
         outcome = None
         async for kind, payload in iter_optimize_definition(definition, inventory, instructions):
             if kind == "think":

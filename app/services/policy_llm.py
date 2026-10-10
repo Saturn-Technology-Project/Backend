@@ -425,6 +425,8 @@ async def iter_tool_analysis(tools: list[dict[str, Any]], instructions: str = ""
 
     analyses: list[dict[str, Any] | None] = [None] * len(tools)
     total = len(tools)
+    completed = 0
+    failed = 0
     queue: asyncio.Queue = asyncio.Queue()
     batches = [(offset, tools[offset : offset + 8]) for offset in range(0, total, 8)]
     gate = asyncio.Semaphore(3)
@@ -434,7 +436,7 @@ async def iter_tool_analysis(tools: list[dict[str, Any]], instructions: str = ""
             await _analyze_batch(offset, batch)
 
     async def _analyze_batch(offset: int, batch: list[dict[str, Any]]) -> None:
-        await queue.put(("status", {"code": "batch", "start": offset + 1, "end": offset + len(batch), "total": total}))
+        nonlocal completed, failed
         parsed: dict[str, Any] | None = None
         try:
             async for kind, payload in stream_chat(_analysis_messages(batch, instructions)):
@@ -450,9 +452,11 @@ async def iter_tool_analysis(tools: list[dict[str, Any]], instructions: str = ""
         }
         batch_analyses = [_guard(tool, by_name.get(tool["name"])) for tool in batch]
         if parsed is None:
-            await queue.put(("status", {"code": "batchFailed", "start": offset + 1, "end": offset + len(batch)}))
+            failed += len(batch)
+        completed += len(batch)
         for index, item in enumerate(batch_analyses):
             analyses[offset + index] = item
+        await queue.put(("status", {"code": "progress", "done": completed, "total": total, "failed": failed}))
         await queue.put(("batchDone", offset))
 
     async def _run() -> None:
