@@ -296,6 +296,57 @@ def _probe_rule(rule: dict[str, Any]) -> Any:
     )
 
 
+def wire_conditions(
+    *,
+    tool_id: str,
+    decision_id: str,
+    conditions: list[Any],
+    y: float,
+    prefix: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float]:
+    """Connect a tool to its decision. Two or more conditions meet at an AND node."""
+    valid = [item for item in conditions if isinstance(item, dict) and str(item.get("field") or "").strip()]
+    extra_nodes: list[dict[str, Any]] = []
+    extra_edges: list[dict[str, Any]] = []
+    if not valid:
+        extra_edges.append({"id": f"edge_{tool_id}_{decision_id}", "source": tool_id, "target": decision_id})
+        return extra_nodes, extra_edges, 280
+    span = (len(valid) - 1) * 72
+    cond_ids: list[str] = []
+    for index, condition in enumerate(valid):
+        cond_id = f"condition_{prefix}_{index}"
+        cond_ids.append(cond_id)
+        extra_nodes.append(
+            {
+                "id": cond_id,
+                "type": "condition",
+                "position": {"x": 280, "y": y - span / 2 + index * 72},
+                "data": {
+                    "field": str(condition.get("field")),
+                    "operator": str(condition.get("operator") or "eq"),
+                    "value": condition.get("value"),
+                },
+            }
+        )
+        extra_edges.append({"id": f"edge_{tool_id}_{cond_id}", "source": tool_id, "target": cond_id})
+    if len(cond_ids) == 1:
+        extra_edges.append({"id": f"edge_{cond_ids[0]}_{decision_id}", "source": cond_ids[0], "target": decision_id})
+        return extra_nodes, extra_edges, 500
+    logic_id = f"logic_{prefix}"
+    extra_nodes.append(
+        {
+            "id": logic_id,
+            "type": "logic",
+            "position": {"x": 500, "y": y},
+            "data": {"op": "and"},
+        }
+    )
+    for cond_id in cond_ids:
+        extra_edges.append({"id": f"edge_{cond_id}_{logic_id}", "source": cond_id, "target": logic_id})
+    extra_edges.append({"id": f"edge_{logic_id}_{decision_id}", "source": logic_id, "target": decision_id})
+    return extra_nodes, extra_edges, 720
+
+
 def definition_from_analyses(tool_set_id: str, analyses: list[dict[str, Any]]) -> dict[str, Any]:
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
@@ -325,37 +376,24 @@ def definition_from_analyses(tool_set_id: str, analyses: list[dict[str, Any]]) -
                 },
             }
         )
-        previous = tool_id
-        x = 280
-        for cond_index, condition in enumerate(analysis.get("conditions") or []):
-            if not isinstance(condition, dict) or not str(condition.get("field") or "").strip():
-                continue
-            cond_id = f"condition_{index}_{cond_index}"
-            nodes.append(
-                {
-                    "id": cond_id,
-                    "type": "condition",
-                    "position": {"x": x, "y": y},
-                    "data": {
-                        "field": str(condition.get("field")),
-                        "operator": str(condition.get("operator") or "eq"),
-                        "value": condition.get("value"),
-                    },
-                }
-            )
-            edges.append({"id": f"edge_{previous}_{cond_id}", "source": previous, "target": cond_id})
-            previous = cond_id
-            x += 220
         decision = str(analysis.get("decision") or "deny")
+        gate_nodes, gate_edges, decision_x = wire_conditions(
+            tool_id=tool_id,
+            decision_id=decision_id,
+            conditions=analysis.get("conditions") or [],
+            y=y,
+            prefix=str(index),
+        )
+        nodes.extend(gate_nodes)
         nodes.append(
             {
                 "id": decision_id,
                 "type": "decision",
-                "position": {"x": x, "y": y},
+                "position": {"x": decision_x, "y": y},
                 "data": {"decision": decision if decision in {"allow", "approval", "deny"} else "deny"},
             }
         )
-        edges.append({"id": f"edge_{previous}_{decision_id}", "source": previous, "target": decision_id})
+        edges.extend(gate_edges)
     return {"toolSetId": tool_set_id, "nodes": nodes, "edges": edges, "analyses": analyses}
 
 

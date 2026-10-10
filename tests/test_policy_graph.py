@@ -33,6 +33,23 @@ def test_compiles_tool_to_decision():
     assert rules[0]["expression"] == {"op": "true"}
 
 
+def test_two_conditions_must_both_match():
+    definition = _chain(
+        "modify_order",
+        "allow",
+        [
+            {"field": "cash_size", "operator": "lt", "value": 10000},
+            {"field": "size", "operator": "lt", "value": 100},
+        ],
+    )
+    rules, errors = compile_definition(definition)
+    assert errors == []
+    assert rules[0]["expression"]["op"] == "and"
+    rule = SimpleNamespace(**rules[0], condition="true", conditions=None, position=0, policy_id="p")
+    assert evaluate_graph_rules([rule], {"size": 50, "cash_size": 50000}, None).decision == PolicyDecision.DENY
+    assert evaluate_graph_rules([rule], {"size": 50, "cash_size": 100}, None).decision == PolicyDecision.ALLOW
+
+
 def test_or_condition_matches_either_side():
     definition = {
         "nodes": [

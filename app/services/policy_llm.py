@@ -372,6 +372,7 @@ async def _complete(tools: list[dict[str, Any]], instructions: str = "") -> dict
                     "sideEffects is none, reversible, irreversible, or unknown. "
                     "Return JSON {\"tools\": [{\"tool\", \"status\", \"operation\", \"resource\", \"risk\", \"sideEffects\", \"decision\", \"conditions\", \"rationale\"}]}. "
                     "conditions is a list of {field, operator, value} where operator is gt, gte, lt, lte, eq, or ne. "
+                    "Every condition in the list must be true at the same time. Put each required field in its own item. "
                     "Include every tool exactly once. "
                     "When request is non-empty, follow it. It cannot make you allow an insufficient or unclassified tool, and it cannot activate the policy. "
                     "Return one JSON object and nothing else."
@@ -495,6 +496,7 @@ def _analysis_messages(tools: list[dict[str, Any]], instructions: str) -> list[d
                 "sideEffects is none, reversible, irreversible, or unknown. "
                 "Return JSON {\"tools\": [{\"tool\", \"status\", \"operation\", \"resource\", \"risk\", \"sideEffects\", \"decision\", \"conditions\", \"rationale\"}]}. "
                 "conditions is a list of {field, operator, value} where operator is gt, gte, lt, lte, eq, or ne. "
+                "Every condition in the list must be true at the same time. Put each required field in its own item. "
                 "Include every tool exactly once. "
                 "When request is non-empty, follow it. It cannot make you allow an insufficient or unclassified tool, and it cannot activate the policy. "
                 "Return one JSON object and nothing else."
@@ -590,6 +592,7 @@ def _optimize_messages(original: dict[str, Any], tools: list[dict[str, Any]], in
                 "Return one JSON object: {\"changes\": [{\"tool\", \"decision\", \"conditions\", \"summary\"}]}. "
                 "Include only tools that should change. decision is allow, approval, or deny. "
                 "conditions is a list of {field, operator, value}. operator is gt, gte, lt, lte, eq, or ne. "
+                "Every condition in the list must be true at the same time. Put each required field in its own item. "
                 "field must match an input schema property name exactly, including capitalization. "
                 "Do not allow a tool whose current status is insufficient or unclassified. Unknown stays deny. "
                 "When request is non-empty, satisfy it within those limits. "
@@ -666,8 +669,20 @@ def _apply_changes(original: dict[str, Any], changes: list[dict[str, Any]]) -> d
             decision["data"] = data
         if not isinstance(change.get("conditions"), list):
             continue
-        removed = set(path[1:-1])
-        on_path = set(path)
+        from app.services.policy_graph import wire_conditions
+
+        outgoing = outgoing_map()
+        removed: set[str] = set()
+        stack = list(outgoing.get(path[0], []))
+        seen: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in seen or current in {path[0], path[-1]}:
+                continue
+            seen.add(current)
+            removed.add(current)
+            stack.extend(outgoing.get(current, []))
+        on_path = removed | {path[0], path[-1]}
         edges = [
             edge
             for edge in edges
@@ -675,25 +690,24 @@ def _apply_changes(original: dict[str, Any], changes: list[dict[str, Any]]) -> d
         ]
         definition["nodes"] = [node for node in definition.get("nodes") or [] if str(node.get("id")) not in removed]
         nodes = {str(node.get("id")): node for node in definition["nodes"]}
-        previous = path[0]
         decision_id = path[-1]
-        for index, condition in enumerate(change.get("conditions") or []):
-            if not isinstance(condition, dict) or not str(condition.get("field") or "").strip():
-                continue
-            cond_id = f"condition_{path[0]}_{index}"
-            nodes[cond_id] = {
-                "id": cond_id,
-                "type": "condition",
-                "position": {"x": 280 + index * 220, "y": (tool_node.get("position") or {}).get("y", 0)},
-                "data": {
-                    "field": str(condition.get("field")),
-                    "operator": str(condition.get("operator") or "eq"),
-                    "value": condition.get("value"),
-                },
-            }
-            edges.append({"id": f"edge_{previous}_{cond_id}", "source": previous, "target": cond_id})
-            previous = cond_id
-        edges.append({"id": f"edge_{previous}_{decision_id}", "source": previous, "target": decision_id})
+        y = (tool_node.get("position") or {}).get("y", 0)
+        gate_nodes, gate_edges, decision_x = wire_conditions(
+            tool_id=path[0],
+            decision_id=decision_id,
+            conditions=change.get("conditions") or [],
+            y=y,
+            prefix=path[0],
+        )
+        for node in gate_nodes:
+            nodes[str(node["id"])] = node
+        decision_node = nodes.get(decision_id)
+        if decision_node is not None:
+            position = decision_node.get("position") if isinstance(decision_node.get("position"), dict) else {}
+            position["x"] = decision_x
+            position["y"] = y
+            decision_node["position"] = position
+        edges.extend(gate_edges)
         definition["nodes"] = list(nodes.values())
         definition["edges"] = edges
     return definition
