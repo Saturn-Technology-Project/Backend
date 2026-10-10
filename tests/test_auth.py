@@ -1,3 +1,12 @@
+def test_reset_code_hash_fits_column():
+    from app.models.password_reset import PasswordReset
+    from app.services.auth_service import hash_password
+
+    stored = hash_password("123456")
+    limit = PasswordReset.__table__.c.code_hash.type.length
+    assert len(stored) <= limit
+
+
 async def test_login_and_me(client):
     me = await client.get("/auth/me")
     assert me.status_code == 200

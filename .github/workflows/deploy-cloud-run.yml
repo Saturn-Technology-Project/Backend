@@ -65,8 +65,8 @@ jobs:
           SEED_USER_NAME: ${{ vars.SEED_USER_NAME }}
           SEED_USER_PASSWORD: ${{ secrets.SEED_USER_PASSWORD }}
           SESSION_TTL_DAYS: ${{ vars.SESSION_TTL_DAYS }}
-          CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
-          PUBLIC_WS_URL: ${{ vars.BACKEND_PUBLIC_URL }}
+          CORS_ORIGINS: https://dashboard.saturn-core.com
+          PUBLIC_WS_URL: https://api.saturn-core.com
           SATURN_GITHUB_OAUTH_CLIENT_ID: ${{ secrets.SATURN_GITHUB_OAUTH_CLIENT_ID }}
           SATURN_GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.SATURN_GITHUB_OAUTH_CLIENT_SECRET }}
           SATURN_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.SATURN_GOOGLE_OAUTH_CLIENT_ID }}
