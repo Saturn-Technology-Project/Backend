@@ -95,11 +95,15 @@ class ToolSetService:
 
     async def delete(self, session: AsyncSession, user: User, tool_set_id: str) -> None:
         tool_set = await self._owned(session, user, tool_set_id)
+        agent_ids = list(
+            await session.scalars(select(Agent.id).where(Agent.tool_set_id == tool_set.id))
+        )
         await session.execute(
             update(Agent).where(Agent.tool_set_id == tool_set.id).values(tool_set_id=None)
         )
         await session.delete(tool_set)
         await session.flush()
+        self._notify_tools(agent_ids)
 
     def owns_profile(self, user: User, agent: Agent) -> bool:
         if str((agent.settings or {}).get("origin") or "") != "saturn_mcp":
@@ -125,11 +129,14 @@ class ToolSetService:
             self.owns_profile(user, agent) or may_edit_agent(employee, agent.id)
         ):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot assign a tool set to this agent")
+        previous = agent.tool_set_id
         if tool_set_id:
             await self._owned(session, user, tool_set_id)
             agent.tool_set_id = tool_set_id
         else:
             agent.tool_set_id = None
+        if agent.tool_set_id != previous:
+            self._notify_tools([agent.id])
 
     async def _replace_items(self, session: AsyncSession, user: User, tool_set: ToolSet, items: list[dict]) -> None:
         wanted: dict[str, bool] = {}
@@ -161,6 +168,15 @@ class ToolSetService:
                 )
             )
         await session.flush()
+        agent_ids = list(
+            await session.scalars(select(Agent.id).where(Agent.tool_set_id == tool_set.id))
+        )
+        self._notify_tools(agent_ids)
+
+    def _notify_tools(self, agent_ids: list[str]) -> None:
+        from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
+
+        mcp_sessions.notify(agent_ids)
 
     async def _owned(self, session: AsyncSession, user: User, tool_set_id: str) -> ToolSet:
         tool_set = await session.get(ToolSet, tool_set_id)

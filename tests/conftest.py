@@ -68,6 +68,9 @@ async def client():
 
     app.dependency_overrides[get_session] = override_session
     mcp_gateway.reset()
+    from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
+
+    mcp_sessions.reset()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
         login = await async_client.post(
@@ -80,4 +83,5 @@ async def client():
 
     app.dependency_overrides.clear()
     mcp_gateway.reset()
+    mcp_sessions.reset()
     await engine.dispose()

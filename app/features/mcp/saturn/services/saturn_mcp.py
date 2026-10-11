@@ -12,6 +12,7 @@ from app.core.ids import new_id, utcnow
 from app.models import Action, Agent, Approval, AuditLog, Run, Tool, ToolSet, ToolSetItem, User
 from app.core.enums import ActionStatus, ActorType, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
 from app.features.execution.activity.services.audit_service import audit_service
+from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 from app.features.mcp.servers.services.mcp_remote import call_remote_tool
 from app.features.policy.policies.services.policy_engine import policy_engine
 
@@ -49,25 +50,14 @@ class SaturnMcp:
         profile_id: str = "",
         client_name: str = "",
         client_id: str = "",
+        mcp_session_id: str = "",
     ) -> dict[str, Any]:
         request_id = message.get("id", 1)
         method = str(message.get("method") or "")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         await self._bind_profile(session, agent_id, user, profile_id, client_id)
         if method == "initialize" and profile_id:
-            info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
-            if client_name and not str(info.get("name") or "").strip():
-                params = {**params, "clientInfo": {"name": client_name}}
-            await self._connect_client(session, user, agent_id, profile_id, params, client_id)
-        if method == "initialize":
-            return rpc_result(
-                request_id,
-                {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "Saturn MCP", "version": "0.1.0"},
-                },
-            )
+            await self._connect_client(session, user, agent_id, profile_id, params, client_id, client_name)
         agent = await self._client_for_call(session, user, agent_id, profile_id, client_name, client_id)
         if agent is None and profile_id and client_name and not agent_id:
             await self._connect_client(
@@ -77,11 +67,23 @@ class SaturnMcp:
                 profile_id,
                 {"clientInfo": {"name": client_name}},
                 client_id,
+                client_name,
             )
             agent = await self._client_for_call(session, user, "", profile_id, client_name, client_id)
         if agent is not None and str((agent.settings or {}).get("origin") or "") == "saturn_mcp":
             agent.last_seen_at = utcnow()
             await session.flush()
+        if mcp_session_id and agent is not None and self._owns(agent, user, client_id):
+            mcp_sessions.open(mcp_session_id, user.id, agent.id, client_id)
+        if method == "initialize":
+            return rpc_result(
+                request_id,
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": True}},
+                    "serverInfo": {"name": "Saturn MCP", "version": "0.1.0"},
+                },
+            )
         if method in {"notifications/initialized", "ping"}:
             return rpc_result(request_id, {})
         if agent is None or agent.organization_id != user.organization_id:
@@ -141,9 +143,18 @@ class SaturnMcp:
             and settings.get("client_id") == client_id
         )
 
-    def _client_id(self, profile_id: str, name: str, client_id: str) -> str:
+    def _legacy_id(self, profile_id: str, name: str, client_id: str) -> str:
         digest = hashlib.sha256(f"{profile_id}\n{client_id}\n{name}".encode()).hexdigest()[:24]
         return f"mcp_{digest}"
+
+    def _stable_id(self, profile_id: str, user_id: str, name: str) -> str:
+        digest = hashlib.sha256(f"{profile_id}\n{user_id}\n{name}".encode()).hexdigest()[:24]
+        return f"mcp_{digest}"
+
+    def _product_name(self, params: dict[str, Any], client_name: str) -> str:
+        info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
+        name = str(info.get("name") or client_name or "Agent").strip()
+        return name[:255] or "Agent"
 
     async def _connect_client(
         self,
@@ -153,25 +164,18 @@ class SaturnMcp:
         profile_id: str,
         params: dict[str, Any],
         client_id: str = "",
+        client_name: str = "",
     ) -> None:
         if not client_id:
             return
-        info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
-        name = str(info.get("name") or "Agent").strip()[:255] or "Agent"
+        name = self._product_name(params, client_name)
         existing = await session.get(Agent, agent_id) if agent_id else None
         if existing is not None and not self._owns(existing, user, client_id):
             return
-        agent = existing
-        if agent is None:
-            ident = self._client_id(profile_id, name, client_id)
-            agent = await session.get(Agent, ident)
-            if agent is not None and not self._owns(agent, user, client_id):
-                return
-            if agent is None:
-                agent = await self._client_agent(session, user, profile_id, name, client_id)
+        agent = existing or await self._find_client_agent(session, user, profile_id, name, client_id)
         if agent is None:
             agent = Agent(
-                id=self._client_id(profile_id, name, client_id),
+                id=self._stable_id(profile_id, user.id, name),
                 organization_id=user.organization_id,
                 name=name,
                 description="",
@@ -181,11 +185,8 @@ class SaturnMcp:
             session.add(agent)
         settings = dict(agent.settings or {})
         current_profile = str(settings.get("profile_id") or "")
-        current_client = str(settings.get("client_id") or "")
         current_user = str(settings.get("registered_user_id") or "")
         if current_profile and current_profile != profile_id:
-            return
-        if current_client and current_client != client_id:
             return
         if current_user and current_user != user.id:
             return
@@ -193,10 +194,60 @@ class SaturnMcp:
         settings["profile_id"] = current_profile or profile_id
         settings["registered_user_id"] = user.id
         settings["client_id"] = client_id
+        settings["client_name"] = name
         agent.settings = settings
         agent.name = name
         agent.last_seen_at = utcnow()
         await session.flush()
+
+    async def _find_client_agent(
+        self,
+        session: AsyncSession,
+        user: User,
+        profile_id: str,
+        name: str,
+        client_id: str,
+    ) -> Agent | None:
+        for ident in (self._stable_id(profile_id, user.id, name), self._legacy_id(profile_id, name, client_id)):
+            direct = await session.get(Agent, ident)
+            if self._same_client(direct, user, profile_id, name):
+                return direct
+        matches = [
+            agent
+            for agent in await self._profile_agents(session, user, profile_id)
+            if self._same_client(agent, user, profile_id, name)
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda agent: (agent.tool_set_id is None, agent.created_at))
+        return matches[0]
+
+    def _same_client(self, agent: Agent | None, user: User, profile_id: str, name: str) -> bool:
+        if agent is None or agent.organization_id != user.organization_id:
+            return False
+        settings = agent.settings or {}
+        if settings.get("origin") != "saturn_mcp":
+            return False
+        if settings.get("registered_user_id") != user.id:
+            return False
+        if str(settings.get("profile_id") or "") not in {"", profile_id}:
+            return False
+        stored = str(settings.get("client_name") or agent.name or "")
+        return stored == name
+
+    async def _client_agent(
+        self,
+        session: AsyncSession,
+        user: User,
+        profile_id: str,
+        client_name: str,
+        client_id: str,
+    ) -> Agent | None:
+        name = client_name.strip()[:255] or "Agent"
+        found = await self._find_client_agent(session, user, profile_id, name, client_id)
+        if found is not None and self._owns(found, user, client_id):
+            return found
+        return None
 
     async def _profile_agents(self, session: AsyncSession, user: User, profile_id: str) -> list[Agent]:
         result = await session.execute(
@@ -210,28 +261,6 @@ class SaturnMcp:
             if settings.get("origin") == "saturn_mcp" and settings.get("profile_id") == profile_id:
                 matched.append(agent)
         return matched
-
-    async def _client_agent(
-        self,
-        session: AsyncSession,
-        user: User,
-        profile_id: str,
-        client_name: str,
-        client_id: str,
-    ) -> Agent | None:
-        name = client_name.strip()[:255] or "Agent"
-        direct = await session.get(Agent, self._client_id(profile_id, name, client_id))
-        if self._owns(direct, user, client_id):
-            return direct
-        for agent in await self._profile_agents(session, user, profile_id):
-            settings = agent.settings or {}
-            if (
-                agent.name == name
-                and settings.get("client_id") == client_id
-                and settings.get("registered_user_id") == user.id
-            ):
-                return agent
-        return None
 
     async def _bind_profile(
         self,

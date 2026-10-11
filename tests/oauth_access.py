@@ -10,6 +10,7 @@ async def oauth_tokens(
     *,
     email: str = "rick@saturn.ai",
     password: str = "saturn",
+    redirect_uri: str = "http://127.0.0.1:8765/callback",
 ) -> tuple[str, str, str]:
     saved = client.headers.get("Authorization")
     client.headers.pop("Authorization", None)
@@ -17,13 +18,13 @@ async def oauth_tokens(
     challenge = pkce_s256(verifier)
     registered = await client.post(
         "/oauth/register",
-        json={"client_name": client_name, "redirect_uris": ["http://127.0.0.1:8765/callback"]},
+        json={"client_name": client_name, "redirect_uris": [redirect_uri]},
     )
     assert registered.status_code == 201, registered.text
     query = {
         "response_type": "code",
         "client_id": registered.json()["client_id"],
-        "redirect_uri": "http://127.0.0.1:8765/callback",
+        "redirect_uri": redirect_uri,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
         "state": client_name,
@@ -51,7 +52,7 @@ async def oauth_tokens(
             "grant_type": "authorization_code",
             "code": code,
             "client_id": query["client_id"],
-            "redirect_uri": "http://127.0.0.1:8765/callback",
+            "redirect_uri": redirect_uri,
             "code_verifier": verifier,
         },
     )

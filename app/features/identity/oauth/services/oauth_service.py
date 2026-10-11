@@ -52,10 +52,17 @@ class OAuthService:
         name: str,
         redirect_uris: list[str],
     ) -> OAuthClient:
+        label = name.strip()[:255]
+        wanted = sorted({uri.strip() for uri in redirect_uris if uri.strip()})
+        existing = await session.scalars(select(OAuthClient).where(OAuthClient.name == label))
+        for client in existing:
+            current = sorted({str(uri).strip() for uri in (client.redirect_uris or []) if str(uri).strip()})
+            if current == wanted:
+                return client
         client = OAuthClient(
             id="oac_" + secrets.token_urlsafe(16),
-            name=name.strip()[:255],
-            redirect_uris=redirect_uris,
+            name=label,
+            redirect_uris=wanted,
         )
         session.add(client)
         await session.flush()
