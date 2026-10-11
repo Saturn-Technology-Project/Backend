@@ -1,11 +1,11 @@
-from app.services.agent_config import (
+from app.features.agent.agents.services.agent_config import (
     assigned_tool_names,
     default_instructions,
     infer_provider,
     public_settings,
     system_prompt,
 )
-from app.models.agent import Agent
+from app.features.agent.agents.models.agent import Agent
 
 
 def test_infer_provider_for_known_and_custom_models():

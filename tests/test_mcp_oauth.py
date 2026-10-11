@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from app.services.mcp_remote import McpUnauthorized, list_remote_tools
+from app.features.mcp.servers.services.mcp_remote import McpUnauthorized, list_remote_tools
 
 
 def _response(status_code: int, body: dict) -> httpx.Response:
@@ -55,9 +55,9 @@ async def test_marketplace_connect_opens_provider_consent_and_stores_the_token(c
             return _response(200, {"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 3600})
         raise AssertionError(url)
 
-    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.mcp_connect.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.mcp_oauth._request", requested)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth._request", requested)
 
     started = await client.post(
         "/mcp-servers/oauth/start",
@@ -91,8 +91,8 @@ async def test_marketplace_connects_without_a_popup_when_the_mcp_is_public(clien
     async def listed(endpoint, authorization=""):
         return [{"name": "docs", "description": "Docs", "inputSchema": {"type": "object", "properties": {}}}]
 
-    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.mcp_connect.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
 
     started = await client.post(
         "/mcp-servers/oauth/start",
@@ -126,8 +126,8 @@ async def test_provider_denial_does_not_store_a_token(client, monkeypatch):
             return _response(201, {"client_id": "saturn-client"})
         raise AssertionError(url)
 
-    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.mcp_oauth._request", requested)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth._request", requested)
 
     started = await client.post(
         "/mcp-servers/oauth/start",
@@ -162,7 +162,7 @@ async def test_github_401_asks_for_sign_in_instead_of_failing(monkeypatch):
                 text="bad request: missing required Authorization header",
             )
 
-    monkeypatch.setattr("app.services.mcp_remote.httpx.AsyncClient", Client)
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_remote.httpx.AsyncClient", Client)
     with pytest.raises(McpUnauthorized) as caught:
         await list_remote_tools("https://api.githubcopilot.com/mcp/", "")
     assert "oauth-protected-resource/mcp/" in caught.value.www_authenticate
@@ -200,8 +200,8 @@ async def test_github_sign_in_uses_the_configured_oauth_app(client, monkeypatch)
             )
         raise AssertionError(url)
 
-    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.mcp_oauth._request", requested)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth._request", requested)
     started = await client.post(
         "/mcp-servers/oauth/start",
         json={"name": "GitHub", "endpoint": "https://api.githubcopilot.com/mcp/", "nonce": "nonce-github1"},
@@ -246,8 +246,8 @@ async def test_github_without_an_oauth_app_asks_for_a_pasted_token(client, monke
             )
         raise AssertionError(url)
 
-    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.mcp_oauth._request", requested)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth._request", requested)
     started = await client.post(
         "/mcp-servers/oauth/start",
         json={"name": "GitHub", "endpoint": "https://api.githubcopilot.com/mcp/", "nonce": "nonce-github2"},
@@ -293,8 +293,8 @@ async def test_google_sign_in_uses_the_configured_oauth_client(client, monkeypat
         assert authorization == ""
         return [{"name": "search_threads", "description": "Search", "inputSchema": {"type": "object", "properties": {}}}]
 
-    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.mcp_oauth._request", _google_metadata)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth._request", _google_metadata)
     started = await client.post(
         "/mcp-servers/oauth/start",
         json={"name": "Gmail", "endpoint": "https://gmailmcp.googleapis.com/mcp/v1", "nonce": "nonce-google1"},
@@ -322,8 +322,8 @@ async def test_google_without_an_oauth_client_asks_for_a_pasted_token(client, mo
     async def listed(endpoint, authorization=""):
         return [{"name": "search_threads", "description": "Search", "inputSchema": {"type": "object", "properties": {}}}]
 
-    monkeypatch.setattr("app.services.mcp_oauth.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.mcp_oauth._request", _google_metadata)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth._request", _google_metadata)
     started = await client.post(
         "/mcp-servers/oauth/start",
         json={"name": "Gmail", "endpoint": "https://gmailmcp.googleapis.com/mcp/v1", "nonce": "nonce-google2"},

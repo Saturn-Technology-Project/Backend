@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from app.services.x402 import payment_requirements, settle_payment, verify_payment
+from app.features.billing.x402.services.x402 import payment_requirements, settle_payment, verify_payment
 
 
 async def test_agent_wallet_is_seeded(client):

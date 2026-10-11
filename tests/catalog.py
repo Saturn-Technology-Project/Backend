@@ -10,7 +10,7 @@ from app.core.config import get_settings
 from app.core.ids import new_id
 from app.db.seed import seed_if_empty
 from app.models import Agent, McpServer, Policy, PolicyRule, Tool, User, Wallet
-from app.services.wallet_service import wallet_service
+from app.features.billing.wallets.services.wallet_service import wallet_service
 
 settings = get_settings()
 
@@ -216,7 +216,7 @@ async def seed_test_catalog(session: AsyncSession) -> None:
     user = await session.get(User, settings.default_actor_id)
     if user is None:
         return
-    from app.services.mapping_service import mapping_service
+    from app.features.organization.org.services.mapping_service import mapping_service
 
     employee = await mapping_service.employee_for_user(session, user.id)
     if employee is None:

@@ -2,8 +2,8 @@ import base64
 
 import pytest
 
-from app.services.credential_service import open_secret, seal
-from app.services.pq_crypto import reset_key
+from app.features.credentials.vault.services.credential_service import open_secret, seal
+from app.features.credentials.vault.services.pq_crypto import reset_key
 
 
 def test_credentials_use_mlkem_1024_and_hide_the_plaintext():
@@ -40,7 +40,7 @@ async def test_connected_mcp_keeps_the_token_out_of_the_server_row(client, monke
         assert authorization == "access-1"
         return [{"name": "docs", "description": "Docs", "inputSchema": {"type": "object", "properties": {}}}]
 
-    monkeypatch.setattr("app.services.mcp_connect.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
     created = await client.post(
         "/mcp-servers",
         json={"name": "Context7", "endpoint": "https://mcp.context7.com/mcp", "authorization": "access-1"},

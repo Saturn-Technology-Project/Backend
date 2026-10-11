@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from app.services.oauth_service import pkce_s256
+from app.features.identity.oauth.services.oauth_service import pkce_s256
 
 
 @pytest.mark.asyncio

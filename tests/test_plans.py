@@ -22,13 +22,17 @@ async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
     assert signed.json()["user"]["profile_id"] == signed.json()["user"]["id"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    blocked = await client.post(
+    opened = await client.post(
         "/mcp",
         headers=headers,
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
     )
-    assert blocked.status_code == 403
-    assert blocked.json()["detail"] == "Saturn MCP requires Pro"
+    assert opened.status_code == 200
+    org = await client.get("/org", headers=headers)
+    assert org.status_code == 200
+    assert org.json()["organization"]["entitlements"]["gateway"] is True
+    assert org.json()["organization"]["entitlements"]["policies"] is False
+    assert org.json()["organization"]["entitlements"]["tool_set_limit"] == 1
 
     invited = await client.post(
         "/org/invites",

@@ -2,8 +2,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models import Organization, User
-from app.services.auth_service import auth_service
-from app.services.mapping_service import mapping_service
+from app.features.identity.auth.services.auth_service import auth_service
+from app.features.organization.org.services.mapping_service import mapping_service
 
 settings = get_settings()
 

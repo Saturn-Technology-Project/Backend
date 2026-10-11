@@ -120,30 +120,6 @@ class AppMcpWrite(BaseModel):
     attachments: dict[str, list[str]] = Field(default_factory=dict)
 
 
-class AppStateRead(BaseModel):
-    agents: list[dict] = Field(default_factory=list)
-    messages: list[dict] = Field(default_factory=list)
-    tasks: list[dict] = Field(default_factory=list)
-    wakes: list[dict] = Field(default_factory=list)
-    memories: list[dict] = Field(default_factory=list)
-
-
-class AppStateWrite(BaseModel):
-    agents: list[dict] = Field(default_factory=list)
-    messages: list[dict] = Field(default_factory=list)
-    tasks: list[dict] | None = None
-    wakes: list[dict] | None = None
-    memories: list[dict] | None = None
-
-
-class OrgAppStateRead(BaseModel):
-    agents: list[dict] = Field(default_factory=list)
-
-
-class OrgAppStateWrite(BaseModel):
-    agents: list[dict] = Field(default_factory=list)
-
-
 class ToolSetItemWrite(BaseModel):
     tool_id: str
     approval: bool = False
@@ -322,26 +298,6 @@ class ApprovalRead(ORMModel):
     resolved_at: datetime | None = None
 
 
-class ConversationMessageWrite(BaseModel):
-    input: str
-    output: str = ""
-    status: str = "running"
-    actions: list[dict[str, Any]] = Field(default_factory=list)
-    error: str | None = None
-
-
-class ConversationMessageRead(BaseModel):
-    id: str
-    agent_id: str
-    input: str
-    output: str = ""
-    status: str
-    actions: list[dict[str, Any]] = Field(default_factory=list)
-    error: str | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
 class ApprovalDecisionRead(BaseModel):
     status: str
     action: str
@@ -361,10 +317,12 @@ class ActivityEventRead(ORMModel):
     created_at: datetime
 
 
-class OrgAddonRead(BaseModel):
-    id: str
-    name: str
-    href: str | None = None
+class EntitlementsRead(BaseModel):
+    gateway: bool = True
+    tool_set_limit: int | None = 1
+    policies: bool = False
+    audit: str = "basic"
+    audit_days: int = 7
 
 
 class OrganizationRead(ORMModel):
@@ -372,7 +330,8 @@ class OrganizationRead(ORMModel):
     name: str
     plan: str = "free"
     kind: str = "personal"
-    addons: list[OrgAddonRead] = Field(default_factory=list)
+    entitlements: EntitlementsRead = Field(default_factory=EntitlementsRead)
+    photo: str | None = None
 
 
 class SubscriptionLineRead(BaseModel):
@@ -406,7 +365,6 @@ class SubscriptionRead(BaseModel):
     organization_name: str
     status: str
     plan: SubscriptionLineRead
-    addons: list[SubscriptionLineRead] = Field(default_factory=list)
     renews_on: datetime
     payment: SubscriptionPaymentRead
     invoices: list[SubscriptionInvoiceRead] = Field(default_factory=list)
@@ -423,6 +381,7 @@ class UserRead(ORMModel):
     id: str
     email: str
     name: str
+    photo: str | None = None
     status: str
     is_platform_admin: bool = False
     organization: OrganizationRead
@@ -700,6 +659,10 @@ class AdminUserRead(ORMModel):
 class ProfileUpdate(BaseModel):
     name: str
     email: str
+
+
+class PhotoUpdate(BaseModel):
+    photo: str | None = None
 
 
 class PasswordChange(BaseModel):

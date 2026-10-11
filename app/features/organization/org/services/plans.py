@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+from fastapi import HTTPException, status
+
+PLANS = {"free", "pro", "enterprise"}
+_ALIASES = {"trial": "free", "starter": "pro"}
+
+
+def canonical_plan(plan: str | None, *, strict: bool = False) -> str:
+    cleaned = _ALIASES.get((plan or "").strip().lower(), (plan or "").strip().lower())
+    if cleaned in PLANS:
+        return cleaned
+    if strict:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown plan")
+    return "free"
+
+
+def kind_for_plan(plan: str) -> str:
+    return "organization" if canonical_plan(plan) == "enterprise" else "personal"
+
+
+FREE_AUDIT_DAYS = 7
+PRO_AUDIT_DAYS = 90
+PRO_REQUIRED = "This feature requires Pro"
+FREE_TOOL_SET = "Free includes one Tool Set"
+AUDIT_SEARCH = "Audit search requires Pro"
+
+
+def allows_pro(plan: str | None) -> bool:
+    return canonical_plan(plan) in {"pro", "enterprise"}
+
+
+def allows_saturn_cloud(plan: str | None) -> bool:
+    """Every plan, including Free, can use the MCP gateway."""
+    return canonical_plan(plan) in PLANS
+
+
+def tool_set_limit(plan: str | None) -> int | None:
+    if allows_pro(plan):
+        return None
+    return 1
+
+
+def audit_retention_days(plan: str | None) -> int:
+    if allows_pro(plan):
+        return PRO_AUDIT_DAYS
+    return FREE_AUDIT_DAYS
+
+
+def entitlements(plan: str | None) -> dict:
+    pro = allows_pro(plan)
+    return {
+        "gateway": allows_saturn_cloud(plan),
+        "tool_set_limit": tool_set_limit(plan),
+        "policies": pro,
+        "audit": "full" if pro else "basic",
+        "audit_days": audit_retention_days(plan),
+    }
+
+
+def profile_identity(
+    user_id: str,
+    organization_id: str,
+    kind: str | None,
+    plan: str | None = None,
+) -> str:
+    resolved = (kind or "").strip().lower()
+    if resolved not in {"personal", "organization"}:
+        resolved = kind_for_plan(plan)
+    if resolved == "personal":
+        return user_id
+    return f"{organization_id}:{user_id}"

@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.database import Base, get_session
 from app.main import app
 from app.models import *  # noqa: F401,F403
-from app.services.mcp_gateway import mcp_gateway
+from app.features.mcp.servers.services.mcp_gateway import mcp_gateway
 from tests.catalog import seed_test_catalog
 
 

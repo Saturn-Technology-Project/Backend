@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 
-from app.models.enums import PolicyDecision
-from app.services.policy_engine import evaluate_graph_rules, merge_results, EvaluationResult
-from app.services.policy_graph import compile_definition, definition_from_analyses, diff_definitions, validate_definition
-from app.services.policy_llm import _guard
+from app.core.enums import PolicyDecision
+from app.features.policy.policies.services.policy_engine import evaluate_graph_rules, merge_results, EvaluationResult
+from app.features.policy.policies.services.policy_graph import compile_definition, definition_from_analyses, diff_definitions, validate_definition
+from app.features.policy.policies.services.policy_llm import _guard
 
 
 def _chain(tool: str, decision: str, conditions: list[dict] | None = None) -> dict:

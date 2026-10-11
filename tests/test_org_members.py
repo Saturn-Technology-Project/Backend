@@ -7,7 +7,6 @@ async def test_seed_admin_has_org_access(client):
 
     org = (await client.get("/org")).json()
     assert org["organization"]["id"] == "org_saturn"
-    assert org["organization"]["addons"] == []
     assert {item["id"] for item in org["catalog"]["resources"]} == {
         "agents",
         "policies",

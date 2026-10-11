@@ -1,7 +1,7 @@
 import re
 from urllib.parse import parse_qs, urlparse
 
-from app.services.oauth_service import pkce_s256
+from app.features.identity.oauth.services.oauth_service import pkce_s256
 
 
 async def _oauth_access(client, client_name: str) -> str:
@@ -65,8 +65,8 @@ async def test_each_agent_sees_only_its_own_tool_set(client, monkeypatch):
     async def called(endpoint, name, arguments, authorization=""):
         return {"content": [{"type": "text", "text": "ok"}], "tool": name}
 
-    monkeypatch.setattr("app.services.mcp_connect.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.saturn_mcp.call_remote_tool", called)
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.saturn.services.saturn_mcp.call_remote_tool", called)
 
     connected = await client.post(
         "/mcp-servers",
@@ -145,8 +145,8 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
         assert name in {"repo.read", "repo.delete"}
         return {"content": [{"type": "text", "text": "ok"}], "tool": name, "echo": arguments}
 
-    monkeypatch.setattr("app.services.mcp_connect.list_remote_tools", listed)
-    monkeypatch.setattr("app.services.saturn_mcp.call_remote_tool", called)
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.saturn.services.saturn_mcp.call_remote_tool", called)
 
     connected = await client.post(
         "/mcp-servers",
@@ -192,6 +192,14 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
     )
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["result"]["echo"] == {"repo": "saturn"}
+
+    unlinked = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "repo.read", "arguments": {"repo": "docs"}}},
+        headers=headers,
+    )
+    assert unlinked.status_code == 200, unlinked.text
+    assert unlinked.json()["result"]["echo"] == {"repo": "docs"}
 
     held = await client.post(
         "/mcp",

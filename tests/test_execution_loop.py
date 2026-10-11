@@ -1,5 +1,5 @@
 def test_simulator_amount_extraction():
-    from app.services.simulator import extract_amount, extract_customer
+    from app.features.execution.runs.services.simulator import extract_amount, extract_customer
 
     assert extract_amount("Refund Acme's duplicate charge.") == 840.0
     assert extract_amount("Refund 50 for Acme") == 50.0

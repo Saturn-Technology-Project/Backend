@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from app.models.enums import PolicyDecision
-from app.services.policy_engine import evaluate_condition, evaluate_rules
+from app.core.enums import PolicyDecision
+from app.features.policy.policies.services.policy_engine import evaluate_condition, evaluate_rules
 
 
 def _rule(position: int, condition: str, decision: str) -> SimpleNamespace:
