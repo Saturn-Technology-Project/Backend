@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
+from pydantic import BaseModel, Field
 
 from app.features.identity.auth.controllers.deps import ActorDep, AgentsRead, AgentsWrite, CurrentUser, SessionDep
+from app.features.identity.auth.services.notices import finish_task_notice
 from app.schemas import ActionRead, RunCreate, RunRead
 from app.features.execution.runs.services.run_service import pending_approval_id, run_service
 
@@ -32,6 +34,17 @@ async def list_runs(session: SessionDep, user: CurrentUser, _access: AgentsRead)
 async def get_run(run_id: str, session: SessionDep, user: CurrentUser, _access: AgentsRead):
     run = await run_service.get_run(session, user, run_id)
     return serialize_run(run)
+
+
+class TaskNotice(BaseModel):
+    status: str = Field(pattern="^(completed|failed)$")
+    summary: str = ""
+
+
+@router.post("/{run_id}/notice", status_code=204)
+async def finish_task(run_id: str, body: TaskNotice, session: SessionDep, user: CurrentUser, _access: AgentsRead):
+    await finish_task_notice(session, user.organization_id, run_id, body.status, body.summary)
+    return Response(status_code=204)
 
 
 @router.post("", response_model=RunRead, status_code=201)

@@ -438,6 +438,9 @@ class ApprovalService:
                 if _uncertain(exc):
                     approval.execution_state = "uncertain"
                     await session.flush()
+                    from app.features.identity.auth.services.notices import notify_task_outcome
+
+                    await notify_task_outcome(session, run, "failed")
                     raise HTTPException(
                         status.HTTP_409_CONFLICT, "Upstream outcome is uncertain"
                     ) from exc
@@ -472,6 +475,15 @@ class ApprovalService:
                     "raw_response": raw_response,
                     "source": "saturn_mcp",
                 },
+            )
+            await audit_service.log(
+                session,
+                event=AuditEvent.RUN_COMPLETED,
+                actor_type=ActorType.SYSTEM,
+                actor_id="saturn",
+                organization_id=run.organization_id,
+                run_id=run.id,
+                result="success",
             )
             return
         await run_service.execute_action(

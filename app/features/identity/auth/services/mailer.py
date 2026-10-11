@@ -138,11 +138,23 @@ def console_origin() -> str:
     return "https://dashboard.saturn-core.com"
 
 
-async def send_notice(email: str, *, kind: str, tool: str, agent: str, link: str, locale: str | None = None) -> None:
+async def send_notice(
+    email: str,
+    *,
+    kind: str,
+    tool: str,
+    agent: str,
+    link: str,
+    locale: str | None = None,
+    lines: tuple[str, ...] = (),
+    detail: str = "",
+) -> bool:
     settings = get_settings()
     if not settings.resend_api_key or not settings.resend_from:
-        return
-    subject, text, html = _notice_message(kind, tool, agent, link, normalize_locale(locale))
+        return False
+    subject, text, html = _notice_message(
+        kind, tool, agent, link, normalize_locale(locale), lines=lines, detail=detail
+    )
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             response = await client.post(
@@ -157,9 +169,8 @@ async def send_notice(email: str, *, kind: str, tool: str, agent: str, link: str
                 },
             )
     except httpx.HTTPError:
-        return
-    if response.status_code >= 400:
-        return
+        return False
+    return response.status_code < 400
 
 
 def _copy_language(locale: str) -> str:
@@ -214,49 +225,65 @@ def _code_message(code: str, kind: str, locale: str) -> tuple[str, str, str]:
 _NOTICE = {
     "approval": {
         "zh": {
-            "subject": "Saturn：{tool} 需要核准",
+            "subject": "Saturn：需要核准 — {tool}",
             "title": "需要核准",
-            "body": "{who}呼叫 {tool}。這次操作要先經過核准。",
-            "empty": "有一個工具呼叫需要核准。",
-            "link": "查看稽核紀錄",
+            "body": "{who}要執行 {tool}。這次操作要先經過核准，這封信不會直接放行。",
+            "empty": "有一個操作正在等待核准。這封信不會直接放行。",
+            "link": "前往核准",
         },
         "en": {
-            "subject": "Saturn: {tool} needs approval",
-            "title": "Approval needed",
-            "body": "{who} called {tool}. This action waits for approval.",
-            "empty": "A tool call is waiting for approval.",
-            "link": "View the audit log",
+            "subject": "Saturn: Approval required — {tool}",
+            "title": "Approval required",
+            "body": "{who} wants to run {tool}. This action waits for approval. This email does not approve it.",
+            "empty": "An action is waiting for approval. This email does not approve it.",
+            "link": "Open approvals",
         },
     },
-    "execute": {
+    "completed": {
         "zh": {
-            "subject": "Saturn：{tool} 已執行",
-            "title": "已執行",
-            "body": "{who}已執行 {tool}。",
-            "empty": "有一個工具呼叫已經執行。",
-            "link": "查看稽核紀錄",
+            "subject": "Saturn：{tool} 已完成",
+            "title": "任務完成",
+            "body": "{who}完成了「{tool}」。",
+            "empty": "一個任務已經完成。",
+            "link": "查看執行細節",
         },
         "en": {
-            "subject": "Saturn: {tool} ran",
-            "title": "Executed",
-            "body": "{who} ran {tool}.",
-            "empty": "A tool call has run.",
-            "link": "View the audit log",
+            "subject": "Saturn: {tool} completed",
+            "title": "Task completed",
+            "body": "{who} finished “{tool}”.",
+            "empty": "A task has finished.",
+            "link": "View execution details",
         },
     },
-    "audit": {
+    "failed": {
         "zh": {
-            "subject": "Saturn：{tool} 已寫入稽核",
-            "title": "已寫入稽核",
-            "body": "{who}呼叫 {tool} 已寫入稽核紀錄。",
-            "empty": "有一個工具呼叫已寫入稽核紀錄。",
+            "subject": "Saturn：任務失敗 — {tool}",
+            "title": "任務失敗",
+            "body": "{who}的「{tool}」沒有完成。",
+            "empty": "一個任務沒有完成。",
+            "link": "查看執行細節",
+        },
+        "en": {
+            "subject": "Saturn: Task failed — {tool}",
+            "title": "Task failed",
+            "body": "{who} did not finish “{tool}”.",
+            "empty": "A task did not finish.",
+            "link": "View execution details",
+        },
+    },
+    "security": {
+        "zh": {
+            "subject": "Saturn：安全警示 — {tool}",
+            "title": "安全警示",
+            "body": "{who}的 {tool} 被拒絕。Saturn 沒有執行這個操作。",
+            "empty": "有一個操作被拒絕。Saturn 沒有執行它。",
             "link": "查看稽核紀錄",
         },
         "en": {
-            "subject": "Saturn: {tool} was audited",
-            "title": "Audit record",
-            "body": "{who} called {tool}, and Saturn wrote it to the audit log.",
-            "empty": "A tool call was written to the audit log.",
+            "subject": "Saturn: Security alert — {tool}",
+            "title": "Security alert",
+            "body": "{who} was denied {tool}. Saturn did not run it.",
+            "empty": "An action was denied. Saturn did not run it.",
             "link": "View the audit log",
         },
     },
@@ -265,23 +292,43 @@ _NOTICE = {
 
 def _notice_copy(kind: str, language: str, tool: str, agent: str) -> tuple[str, str, str, str]:
     copy = _NOTICE[kind][language]
-    name = tool or ("工具呼叫" if language == "zh" else "a tool")
+    name = tool or ("這個任務" if language == "zh" else "This task")
     if agent and tool:
         body = copy["body"].format(who=agent, tool=name)
     else:
-        body = copy["empty"] if not tool else copy["body"].format(who=agent or ("有一個呼叫" if language == "zh" else "Something"), tool=name)
+        body = copy["empty"] if not tool else copy["body"].format(who=agent or ("Saturn" if language == "zh" else "Saturn"), tool=name)
     return copy["subject"].format(tool=name), copy["title"], body, copy["link"]
 
 
-def _notice_message(kind: str, tool: str, agent: str, link: str, locale: str) -> tuple[str, str, str]:
+def _notice_message(
+    kind: str,
+    tool: str,
+    agent: str,
+    link: str,
+    locale: str,
+    lines: tuple[str, ...] = (),
+    detail: str = "",
+) -> tuple[str, str, str]:
     subject, title, body, link_label = _notice_copy(kind, _copy_language(locale), tool, agent)
-    text = f"{title}\n\n{body}\n\n{link_label}: {link}\n\nSaturn\n"
+    kept = [line for line in lines if line][:8]
+    if detail:
+        body = f"{body} {detail}"
+    meta = "\n".join(kept)
+    text = f"{title}\n\n{body}\n\n{meta}\n\n{link_label}: {link}\n\nSaturn\n" if meta else f"{title}\n\n{body}\n\n{link_label}: {link}\n\nSaturn\n"
+    facts = ""
+    if kept:
+        rows = "".join(
+            f'<div style="margin:4px 0 0;font-size:13px;line-height:1.5;color:#5c5c57;">{escape(line)}</div>'
+            for line in kept
+        )
+        facts = f'<div style="margin:18px 0 0;">{rows}</div>'
     button = (
         f'<p style="margin:24px 0 0;"><a href="{escape(link)}" style="display:inline-block;padding:10px 16px;'
         f'background:#111110;color:#ffffff;border-radius:8px;font-size:13px;text-decoration:none;">{escape(link_label)}</a></p>'
     )
     inner = f"""<h1 style="margin:28px 0 0;font-size:22px;line-height:1.3;font-weight:600;letter-spacing:-0.02em;">{escape(title)}</h1>
               <p style="margin:22px 0 0;font-size:14px;line-height:1.6;">{escape(body)}</p>
+              {facts}
               {button}"""
     return subject, text, _card(normalize_locale(locale), title, inner)
 

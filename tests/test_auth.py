@@ -24,8 +24,8 @@ def test_verification_email_uses_the_account_language():
     notice_subject, notice_text, notice_html = _notice_message(
         "approval", "billing.refund", "Acme Ops", "https://dashboard.saturn-core.com/activity?event=1", "en-US"
     )
-    assert notice_subject == "Saturn: billing.refund needs approval"
-    assert "Approval needed" in notice_text
+    assert notice_subject == "Saturn: Approval required — billing.refund"
+    assert "Approval required" in notice_text
     assert "需要核准" not in notice_text
     assert "需要核准" not in notice_html
 
