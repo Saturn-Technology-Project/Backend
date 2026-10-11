@@ -25,7 +25,6 @@ class Tool(Base):
     permissions: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     input_schema: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     upstream_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
-    x402: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     mcp_server_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("mcp_servers.id"), nullable=True, index=True
     )

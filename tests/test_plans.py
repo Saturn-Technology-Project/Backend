@@ -1,5 +1,7 @@
 import pytest
 
+from tests.oauth_access import oauth_access
+
 
 @pytest.mark.asyncio
 async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
@@ -27,7 +29,15 @@ async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
         headers=headers,
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
     )
-    assert opened.status_code == 200
+    assert opened.status_code == 401
+    access = await oauth_access(client, "Ada Cursor", email="ada@personal.test", password="password1")
+    oauth_headers = {"Authorization": f"Bearer {access}"}
+    cloud = await client.post(
+        "/mcp",
+        headers=oauth_headers,
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+    )
+    assert cloud.status_code == 200
     org = await client.get("/org", headers=headers)
     assert org.status_code == 200
     assert org.json()["organization"]["entitlements"]["gateway"] is True
@@ -45,33 +55,33 @@ async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
     assert upgraded.status_code == 200
     assert upgraded.json()["kind"] == "personal"
 
-    allowed = await client.post(
+    still_blocked = await client.post(
         "/mcp",
         headers=headers,
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
     )
-    assert allowed.status_code == 200
+    assert still_blocked.status_code == 401
     mismatched = await client.post(
         "/mcp",
-        headers={**headers, "X-Saturn-Profile": "org_other:someone"},
+        headers={**oauth_headers, "X-Saturn-Profile": "org_other:someone"},
         json={"jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": {}},
     )
     assert mismatched.status_code == 200
     assert mismatched.json()["error"]["message"] == "Profile does not match"
     matched = await client.post(
         "/mcp",
-        headers={**headers, "X-Saturn-Profile": signed.json()["user"]["id"]},
+        headers={**oauth_headers, "X-Saturn-Profile": signed.json()["user"]["id"]},
         json={"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}},
     )
     assert matched.status_code == 200
-    assert matched.json()["error"]["message"] == "Unknown agent"
+    assert matched.json()["result"]["tools"] == []
     created_agent = await client.post("/agents", headers=headers, json={"name": "Ada agent"})
     assert created_agent.status_code == 201, created_agent.text
     agent_id = created_agent.json()["id"]
     bound = await client.post(
         "/mcp",
         headers={
-            **headers,
+            **oauth_headers,
             "X-Saturn-Profile": signed.json()["user"]["id"],
             "X-Saturn-Agent-Id": agent_id,
         },
@@ -79,11 +89,11 @@ async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
     )
     assert bound.status_code == 200
     listed = await client.get(f"/agents/{agent_id}", headers=headers)
-    assert listed.json()["profile_id"] == signed.json()["user"]["id"]
+    assert not listed.json().get("profile_id")
     assert not listed.json().get("origin")
     opened = await client.post(
         "/mcp",
-        headers={**headers, "X-Saturn-Profile": signed.json()["user"]["id"]},
+        headers={**oauth_headers, "X-Saturn-Profile": signed.json()["user"]["id"]},
         json={
             "jsonrpc": "2.0",
             "id": 11,

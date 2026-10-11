@@ -12,12 +12,10 @@ from app.models import (
     Employee,
     Invitation,
     McpServer,
-    Payment,
     Run,
     Tool,
     ToolSetItem,
     User,
-    Wallet,
 )
 from app.shared.models.associations import (
     agent_mcp_servers,
@@ -39,31 +37,23 @@ class RemovalService:
             action_ids = list(
                 (await session.execute(select(Action.id).where(Action.run_id.in_(run_ids)))).scalars()
             )
-        wallet_ids = list(
-            (await session.execute(select(Wallet.id).where(Wallet.agent_id == agent.id))).scalars()
-        )
         if action_ids:
             await session.execute(
                 update(AuditLog).where(AuditLog.action_id.in_(action_ids)).values(action_id=None)
             )
-            await session.execute(delete(Payment).where(Payment.action_id.in_(action_ids)))
             await session.execute(delete(Approval).where(Approval.action_id.in_(action_ids)))
         if run_ids:
             await session.execute(
                 update(AuditLog).where(AuditLog.run_id.in_(run_ids)).values(run_id=None)
             )
-            await session.execute(delete(Payment).where(Payment.run_id.in_(run_ids)))
             await session.execute(delete(Action).where(Action.run_id.in_(run_ids)))
             await session.execute(delete(Run).where(Run.id.in_(run_ids)))
-        if wallet_ids:
-            await session.execute(delete(Payment).where(Payment.wallet_id.in_(wallet_ids)))
-            await session.execute(delete(Wallet).where(Wallet.id.in_(wallet_ids)))
         await session.execute(delete(employee_agents).where(employee_agents.c.agent_id == agent.id))
         await session.execute(delete(agent_mcp_servers).where(agent_mcp_servers.c.agent_id == agent.id))
         await session.execute(delete(agent_policies).where(agent_policies.c.agent_id == agent.id))
         await self._drop_json_id(session, agent.organization_id, "agent", agent.id)
         self._unlink_loaded(session, agent, ("agents",))
-        session.expire(agent, ["runs", "wallet", "employees", "mcp_servers", "policies"])
+        session.expire(agent, ["runs", "employees", "mcp_servers", "policies"])
         for obj in list(session.identity_map.values()):
             if isinstance(obj, Employee) and "agents" in obj.__dict__:
                 session.expire(obj, ["agents"])

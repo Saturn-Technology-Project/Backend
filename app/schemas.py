@@ -46,8 +46,6 @@ class AgentUpdate(BaseModel):
     runtime_id: str | None = None
     settings: dict[str, Any] | None = None
     tool_set_id: str | None = None
-    daily_spend_limit: Decimal | None = None
-    per_tx_limit: Decimal | None = None
 
 
 class ToolRead(ORMModel):
@@ -57,7 +55,6 @@ class ToolRead(ORMModel):
     type: str
     mcp_endpoint: str
     permissions: list[Any]
-    x402: dict[str, Any] | None = None
     mcp_server_id: str | None = None
     status: str
 
@@ -632,8 +629,6 @@ class AdminUsageRow(BaseModel):
     kind: str = "personal"
     runs: int
     tool_calls: int
-    payments: int
-    payment_volume: str
 
 
 class AdminSettingsRead(BaseModel):
@@ -757,57 +752,6 @@ class LoginResponse(BaseModel):
     methods: list[str] = Field(default_factory=list)
 
 
-class WalletRead(ORMModel):
-    id: str
-    agent_id: str
-    address: str
-    network: str
-    asset: str
-    balance: Decimal
-    daily_spend_limit: Decimal
-    per_tx_limit: Decimal
-    spent_today: Decimal
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class PaymentRead(ORMModel):
-    id: str
-    wallet_id: str
-    run_id: str | None
-    action_id: str | None
-    tool: str | None
-    amount: Decimal
-    asset: str
-    network: str
-    pay_to: str
-    status: str
-    tx_hash: str | None = None
-    requirements: dict[str, Any] | None = None
-    payload: dict[str, Any] | None = None
-    facilitator: dict[str, Any] | None = None
-    created_at: datetime
-    settled_at: datetime | None = None
-
-
-class X402VerifyRequest(BaseModel):
-    paymentPayload: dict[str, Any]
-    paymentRequirements: dict[str, Any]
-
-
-class X402VerifyResponse(BaseModel):
-    isValid: bool
-    invalidReason: str | None = None
-
-
-class X402SettleResponse(BaseModel):
-    success: bool
-    transaction: str | None = None
-    network: str | None = None
-    errorReason: str | None = None
-
-
 class CredentialRead(BaseModel):
     id: str
     kind: str
@@ -819,11 +763,6 @@ class CredentialRead(BaseModel):
     broker_id: str = ""
     allowed_paths: list[str] = Field(default_factory=list)
     has_secret: bool = False
-
-
-class CredentialSecretRead(BaseModel):
-    id: str
-    secret: str = ""
 
 
 class CredentialWrite(BaseModel):

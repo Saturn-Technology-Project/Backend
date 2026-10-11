@@ -35,7 +35,6 @@ class Agent(Base):
 
     organization = relationship("Organization", back_populates="agents")
     runs = relationship("Run", back_populates="agent")
-    wallet = relationship("Wallet", back_populates="agent", uselist=False)
     employees = relationship("Employee", secondary=employee_agents, back_populates="agents")
     mcp_servers = relationship("McpServer", secondary=agent_mcp_servers, back_populates="agents")
     policies = relationship("Policy", secondary=agent_policies, back_populates="agents")

@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
-from app.models import Agent, Wallet
+from app.models import Agent
 
 RESPONSE_STYLES = ("concise", "professional", "detailed")
 AUTONOMY = ("suggest_only", "execute_when_allowed", "fully_autonomous")
@@ -190,15 +190,8 @@ def system_prompt(agent: Agent) -> str:
     return resolved_instructions(agent)
 
 
-def command_payload(agent: Agent, wallet: Wallet | None = None) -> dict[str, Any]:
+def command_payload(agent: Agent) -> dict[str, Any]:
     body = public_settings(agent)
     body["runtime_id"] = agent.runtime_id
     body["agent_id"] = agent.id
-    if wallet is not None:
-        body["wallet"] = {
-            "id": wallet.id,
-            "daily_spend": str(wallet.daily_spend_limit),
-            "per_tx": str(wallet.per_tx_limit),
-            "asset": wallet.asset,
-        }
     return body

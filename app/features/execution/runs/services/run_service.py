@@ -251,23 +251,6 @@ class RunService:
         actor_type: ActorType | str,
         actor_id: str,
     ) -> Action:
-        from app.features.billing.x402.services.x402 import x402_service
-
-        payment = await x402_service.pay_for_action(
-            session, action=action, tool=tool, agent=agent
-        )
-        if payment is not None and payment.status != "settled":
-            reason = (payment.facilitator or {}).get("reason") or payment.status
-            action.status = ActionStatus.FAILED
-            action.result = {
-                "status": "error",
-                "error": "x402_failed",
-                "reason": reason,
-                "payment_id": payment.id,
-            }
-            await session.flush()
-            return action
-
         try:
             if not settings.in_process_runtime:
                 raise MCPExecutionError("In-process MCP runtime is disabled")
@@ -280,8 +263,6 @@ class RunService:
 
         action.status = ActionStatus.COMPLETED
         action.result = result
-        if payment is not None:
-            action.result = {**result, "x402": {"payment_id": payment.id, "tx_hash": payment.tx_hash}}
         await session.flush()
         await audit_service.log(
             session,

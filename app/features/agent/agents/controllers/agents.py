@@ -18,7 +18,6 @@ from app.features.agent.agents.services.agent_config import public_settings
 from app.features.agent.agents.services.agent_service import agent_service
 from app.features.organization.org.services.mapping_service import mapping_service
 from app.features.organization.org.services.removal_service import removal_service
-from app.features.billing.wallets.services.wallet_service import wallet_service
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -149,7 +148,6 @@ async def update_agent(
     employee: AgentsWrite,
 ):
     agent = await agent_service.update_agent(session, user, employee, agent_id, body)
-    await wallet_service.ensure_wallet(session, agent)
     registrations = await _registrations(session, [agent])
     return serialize_agent(agent, pushed=False, registration=registrations.get(agent.id))
 

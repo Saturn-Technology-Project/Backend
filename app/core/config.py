@@ -16,9 +16,6 @@ class Settings(BaseSettings):
     seed_user_name: str = "Admin"
     seed_user_password: str = ""
     cors_origins: str = "http://localhost:3000,http://localhost:3001,https://dashboard.saturn-core.com"
-    x402_network: str = "base-sepolia"
-    x402_asset_address: str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
-    x402_pay_to: str = ""
     in_process_runtime: bool = False
     saturn_secret_project: str = ""
     resend_api_key: str = ""

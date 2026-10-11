@@ -1,12 +1,9 @@
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 
-from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep
+from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep, TeamWrite
 from app.features.credentials.vault.models.credential import OrgCredential
-from app.schemas import CredentialRead, CredentialSecretRead, CredentialWrite
-from app.core.enums import ActorType, AuditEvent
-from app.features.execution.activity.services.audit_service import audit_service
-from app.features.credentials.vault.services.credential_service import credential_service, open_secret
-from app.features.credentials.vault.services.secret_vault import get_secret, put_secret
+from app.schemas import CredentialRead, CredentialWrite
+from app.features.credentials.vault.services.credential_service import credential_service
 
 router = APIRouter(prefix="/org/credentials", tags=["credentials"])
 
@@ -32,43 +29,18 @@ async def list_credentials(session: SessionDep, user: CurrentUser):
     return [serialize_credential(row) for row in rows]
 
 
-@router.get("/secrets", response_model=list[CredentialSecretRead])
-async def list_credential_secrets(session: SessionDep, user: CurrentUser):
-    rows = await credential_service.list_credentials(session, user.organization_id)
-    secrets: list[CredentialSecretRead] = []
-    for row in rows:
-        secret = ""
-        if row.vault_id:
-            secret = await get_secret(session, row.vault_id)
-        elif row.secret_ciphertext:
-            secret = open_secret(row.secret_ciphertext)
-            if secret:
-                vault_id = f"org-{row.id}"
-                await put_secret(session, vault_id, secret)
-                row.vault_id = vault_id
-                row.secret_ciphertext = ""
-        if not secret:
-            continue
-        await audit_service.log(
-            session,
-            event=AuditEvent.CREDENTIAL_ACCESSED,
-            actor_type=ActorType.USER,
-            actor_id=user.id,
-            organization_id=user.organization_id,
-            result=row.name,
-            payload={"credential_id": row.vault_id or row.id, "purpose": "org_credential"},
-        )
-        secrets.append(CredentialSecretRead(id=row.id, secret=secret))
-    return secrets
+@router.get("/secrets")
+async def list_credential_secrets(_user: CurrentUser):
+    raise HTTPException(status.HTTP_403_FORBIDDEN, "Secrets are not readable")
 
 
 @router.post("", response_model=CredentialRead)
-async def upsert_credential(body: CredentialWrite, session: SessionDep, user: CurrentUser):
+async def upsert_credential(body: CredentialWrite, session: SessionDep, user: CurrentUser, _access: TeamWrite):
     row = await credential_service.upsert(session, user, body)
     return serialize_credential(row)
 
 
 @router.delete("/{credential_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_credential(credential_id: str, session: SessionDep, user: CurrentUser):
+async def delete_credential(credential_id: str, session: SessionDep, user: CurrentUser, _access: TeamWrite):
     await credential_service.delete(session, user, credential_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -1,58 +1,4 @@
-import re
-from urllib.parse import parse_qs, urlparse
-
-from app.features.identity.oauth.services.oauth_service import pkce_s256
-
-
-async def _oauth_access(client, client_name: str) -> str:
-    saved = client.headers.get("Authorization")
-    client.headers.pop("Authorization", None)
-    verifier = "c" * 43
-    challenge = pkce_s256(verifier)
-    registered = await client.post(
-        "/oauth/register",
-        json={"client_name": client_name, "redirect_uris": ["http://127.0.0.1:8765/callback"]},
-    )
-    assert registered.status_code == 201, registered.text
-    query = {
-        "response_type": "code",
-        "client_id": registered.json()["client_id"],
-        "redirect_uri": "http://127.0.0.1:8765/callback",
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "state": client_name,
-    }
-    await client.get("/oauth/authorize", params=query)
-    signed = await client.post(
-        "/oauth/login",
-        data={**query, "email": "rick@saturn.ai", "password": "saturn"},
-        follow_redirects=False,
-    )
-    assert signed.status_code == 303, signed.text
-    consent = await client.get(signed.headers["location"])
-    csrf = re.search(r'name="csrf" value="([^"]+)"', consent.text)
-    assert csrf is not None
-    allowed = await client.post(
-        "/oauth/consent",
-        data={**query, "csrf": csrf.group(1), "decision": "allow"},
-        follow_redirects=False,
-    )
-    assert allowed.status_code == 303, allowed.text
-    code = parse_qs(urlparse(allowed.headers["location"]).query)["code"][0]
-    token = await client.post(
-        "/oauth/token",
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": query["client_id"],
-            "redirect_uri": "http://127.0.0.1:8765/callback",
-            "code_verifier": verifier,
-        },
-    )
-    assert token.status_code == 200, token.text
-    if saved:
-        client.headers["Authorization"] = saved
-    return token.json()["access_token"]
+from tests.oauth_access import oauth_access
 
 
 async def test_each_agent_sees_only_its_own_tool_set(client, monkeypatch):
@@ -70,13 +16,13 @@ async def test_each_agent_sees_only_its_own_tool_set(client, monkeypatch):
 
     connected = await client.post(
         "/mcp-servers",
-        json={"name": "GitHub", "endpoint": "https://github.example/mcp", "authorization": "token-1"},
+        json={"name": "GitHub", "endpoint": "https://api.githubcopilot.com/mcp", "authorization": "token-1"},
     )
     assert connected.status_code == 201, connected.text
     read_id = next(item["id"] for item in connected.json()["catalog"] if item["name"] == "repo.read")
 
-    cursor_token = await _oauth_access(client, "Cursor")
-    claude_token = await _oauth_access(client, "Claude")
+    cursor_token = await oauth_access(client, "Cursor")
+    claude_token = await oauth_access(client, "Claude")
     for access in (cursor_token, claude_token):
         opened = await client.post(
             "/mcp",
@@ -132,7 +78,7 @@ async def test_each_agent_sees_only_its_own_tool_set(client, monkeypatch):
 
 async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
     async def listed(endpoint, authorization=""):
-        assert endpoint == "https://github.example/mcp"
+        assert endpoint == "https://api.githubcopilot.com/mcp"
         assert authorization == "token-1"
         return [
             {"name": "repo.read", "description": "Read a repo", "inputSchema": {"type": "object", "properties": {}}},
@@ -140,7 +86,7 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
         ]
 
     async def called(endpoint, name, arguments, authorization=""):
-        assert endpoint == "https://github.example/mcp"
+        assert endpoint == "https://api.githubcopilot.com/mcp"
         assert authorization == "token-1"
         assert name in {"repo.read", "repo.delete"}
         return {"content": [{"type": "text", "text": "ok"}], "tool": name, "echo": arguments}
@@ -150,7 +96,7 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
 
     connected = await client.post(
         "/mcp-servers",
-        json={"name": "GitHub", "endpoint": "https://github.example/mcp", "authorization": "token-1"},
+        json={"name": "GitHub", "endpoint": "https://api.githubcopilot.com/mcp", "authorization": "token-1"},
     )
     assert connected.status_code == 201, connected.text
     body = connected.json()
@@ -172,14 +118,26 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
     assert created.status_code == 201, created.text
     tool_set_id = created.json()["id"]
 
-    assigned = await client.patch(
-        "/agents/agent_customer_ops",
-        json={"tool_set_id": tool_set_id},
+    access = await oauth_access(client, "Mapped Agent")
+    opened = await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {access}"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
     )
+    assert opened.status_code == 200, opened.text
+    agent_id = next(item["id"] for item in (await client.get("/agents")).json() if item["name"] == "Mapped Agent")
+    assigned = await client.patch(f"/agents/{agent_id}", json={"tool_set_id": tool_set_id})
     assert assigned.status_code == 200, assigned.text
     assert assigned.json()["tool_set_id"] == tool_set_id
 
-    headers = {"X-Saturn-Agent-Id": "agent_customer_ops"}
+    session_call = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        headers={"X-Saturn-Agent-Id": agent_id},
+    )
+    assert session_call.status_code == 401
+
+    headers = {"Authorization": f"Bearer {access}", "X-Saturn-Agent-Id": agent_id}
     listed_tools = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, headers=headers)
     assert listed_tools.status_code == 200, listed_tools.text
     names = [item["name"] for item in listed_tools.json()["result"]["tools"]]
@@ -228,19 +186,34 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
         headers=headers,
     )
     assert hidden.json()["error"]["message"] == "Agent is not allowed to call this tool"
+    activity = (await client.get("/activity")).json()
+    denied = next(item for item in activity if item["tool"] == "repo.missing")
+    assert denied["event"] == "tool_requested"
+    assert denied["result"] == "denied"
+    assert denied["actor_id"] == agent_id
+    assert denied["payload"]["code"] == -32003
+    assert denied["payload"]["reason"] == "Agent is not allowed to call this tool"
 
     other = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {}},
-        headers={"X-Saturn-Agent-Id": "agent_unmapped"},
+        headers={"Authorization": f"Bearer {access}", "X-Saturn-Agent-Id": "agent_unmapped"},
     )
-    assert other.json()["result"]["tools"] == []
+    assert other.json()["error"]["message"] == "Unknown agent"
+
+    stranger = await oauth_access(client, "Stranger")
+    stolen = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {}},
+        headers={"Authorization": f"Bearer {stranger}", "X-Saturn-Agent-Id": agent_id},
+    )
+    assert stolen.json()["error"]["message"] == "Unknown agent"
 
     denied = await client.post(
         "/policies",
         json={
             "name": "No deletes",
-            "agent_ids": ["agent_customer_ops"],
+            "agent_ids": [agent_id],
             "tool": "repo.read",
             "rules": [{"tool": "repo.read", "condition": "true", "decision": "deny"}],
         },

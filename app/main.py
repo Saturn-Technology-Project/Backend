@@ -9,8 +9,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.config import get_settings
 from app.features.agent.agents.routes import router as agents_router
 from app.features.billing.payments.routes import router as payments_router
-from app.features.billing.wallets.routes import router as wallets_router
-from app.features.billing.x402.routes import router as x402_router
 from app.features.credentials.vault.routes import router as credentials_router
 from app.features.execution.activity.routes import router as activity_router
 from app.features.execution.approvals.routes import router as approvals_router
@@ -94,13 +92,11 @@ app.include_router(mcp_servers_router)
 app.include_router(oauth_router)
 app.include_router(tool_sets_router)
 app.include_router(saturn_mcp_router)
-app.include_router(wallets_router)
 app.include_router(runs_router)
 app.include_router(tools_router)
 app.include_router(policies_router)
 app.include_router(approvals_router)
 app.include_router(payments_router)
-app.include_router(x402_router)
 app.include_router(activity_router)
 
 

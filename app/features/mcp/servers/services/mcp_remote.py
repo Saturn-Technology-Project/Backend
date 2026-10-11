@@ -7,6 +7,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import httpx
 from fastapi import HTTPException, status
 
+from app.features.mcp.servers.services.mcp_endpoint import require_mcp_endpoint
+
 
 def sec_api_request(endpoint: str, authorization: str) -> tuple[str, str]:
     """SEC-API.io reads the key from apiKey, not from Authorization."""
@@ -120,12 +122,10 @@ async def _rpc(
 
 
 async def list_remote_tools(endpoint: str, authorization: str = "") -> list[dict[str, Any]]:
-    url = endpoint.strip()
-    if not url:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint is required")
+    url = require_mcp_endpoint(endpoint)
     request_url, header_auth = sec_api_request(url, authorization)
     headers = _headers(header_auth)
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
         init = await _rpc(
             client,
             request_url,
@@ -156,10 +156,10 @@ async def call_remote_tool(
     arguments: dict[str, Any],
     authorization: str = "",
 ) -> dict[str, Any]:
-    url = endpoint.strip()
+    url = require_mcp_endpoint(endpoint)
     request_url, header_auth = sec_api_request(url, authorization)
     headers = _headers(header_auth)
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=60, follow_redirects=False) as client:
         init = await _rpc(
             client,
             request_url,

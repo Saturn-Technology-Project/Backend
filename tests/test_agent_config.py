@@ -84,8 +84,6 @@ async def test_patch_agent_settings_persists(client):
         "/agents/agent_customer_ops",
         json={
             "runtime_id": "runtime_ops",
-            "daily_spend_limit": "50",
-            "per_tx_limit": "5",
             "settings": {
                 "environment": "ACME Production",
                 "region": "Taiwan",
@@ -97,7 +95,3 @@ async def test_patch_agent_settings_persists(client):
     assert live.json()["pushed"] is False
     assert live.json()["runtime_id"] == "runtime_ops"
     assert live.json()["settings"]["region"] == "Taiwan"
-
-    wallet = (await client.get("/agents/agent_customer_ops/wallet")).json()
-    assert float(wallet["daily_spend_limit"]) == 50
-    assert float(wallet["per_tx_limit"]) == 5

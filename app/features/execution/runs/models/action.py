@@ -34,4 +34,3 @@ class Action(Base):
 
     run = relationship("Run", back_populates="actions")
     approval = relationship("Approval", back_populates="action", uselist=False)
-    payment = relationship("Payment", back_populates="action", uselist=False)

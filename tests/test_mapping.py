@@ -70,6 +70,3 @@ async def test_creating_agent_assigns_it_to_employee(client):
     me = (await client.get("/auth/me")).json()
     assert any(agent["id"] == agent_id for agent in me["agents"])
     assert agent_id in me["assigned_agent_ids"]
-
-    wallet = await client.get(f"/agents/{agent_id}/wallet")
-    assert wallet.status_code == 200

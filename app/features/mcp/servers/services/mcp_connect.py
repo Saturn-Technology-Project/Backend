@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 from app.core.ids import new_id
 from app.models import McpServer, Tool, User
 from app.core.enums import ToolStatus, ToolType
+from app.features.mcp.servers.services.mcp_endpoint import require_mcp_endpoint
 from app.features.mcp.servers.services.mcp_grant import read_grant, write_grant
 from app.features.mcp.servers.services.mcp_remote import McpUnauthorized, list_remote_tools
 
@@ -45,17 +46,19 @@ class McpConnectService:
         url = endpoint.strip()
         if not label or not url:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name and endpoint are required")
+        url = require_mcp_endpoint(url)
         existing = await session.scalar(
             select(McpServer).where(
                 McpServer.organization_id == user.organization_id,
                 McpServer.name == label,
             )
         )
+        endpoint_changed = existing is not None and existing.endpoint.strip() != url
         token = ""
-        if existing is not None:
-            token = (await read_grant(session, existing))["access_token"]
         if authorization is not None:
             token = authorization.strip()
+        elif existing is not None and not endpoint_changed:
+            token = (await read_grant(session, existing))["access_token"]
         try:
             discovered = await list_remote_tools(url, token)
         except McpUnauthorized as exc:
@@ -85,6 +88,8 @@ class McpConnectService:
                 )
             else:
                 await write_grant(session, server, {})
+        elif endpoint_changed:
+            await write_grant(session, server, {})
         await self._store_tools(session, server, discovered)
         result = await session.execute(
             select(McpServer).options(selectinload(McpServer.tools)).where(McpServer.id == server.id)
@@ -97,17 +102,18 @@ class McpConnectService:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "MCP server not found")
         if not server.endpoint:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP server has no endpoint")
+        url = require_mcp_endpoint(server.endpoint)
         from app.features.mcp.oauth.services.mcp_oauth import mcp_oauth
 
         secret = await mcp_oauth.authorization_for(session, server)
         try:
-            discovered = await list_remote_tools(server.endpoint, secret)
+            discovered = await list_remote_tools(url, secret)
         except McpUnauthorized:
             secret = await mcp_oauth.refresh_after_reject(session, server)
             if not secret:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Access token was rejected")
             try:
-                discovered = await list_remote_tools(server.endpoint, secret)
+                discovered = await list_remote_tools(url, secret)
             except McpUnauthorized as exc:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Access token was rejected") from exc
         await self._store_tools(session, server, discovered)

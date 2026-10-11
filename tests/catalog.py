@@ -1,7 +1,5 @@
 """Test-only catalog. Production startup does not load this."""
 
-from decimal import Decimal
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -9,8 +7,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import get_settings
 from app.core.ids import new_id
 from app.db.seed import seed_if_empty
-from app.models import Agent, McpServer, Policy, PolicyRule, Tool, User, Wallet
-from app.features.billing.wallets.services.wallet_service import wallet_service
+from app.models import Agent, McpServer, Policy, PolicyRule, Tool, User
 
 settings = get_settings()
 
@@ -35,13 +32,6 @@ TOOLS = [
         "description": "Refund a customer payment",
         "mcp_endpoint": "mcp://billing/refund",
         "permissions": ["write"],
-        "x402": {
-            "scheme": "exact",
-            "network": "base-sepolia",
-            "price": "0.05",
-            "asset": "USDC",
-            "pay_to": "0x00000000000000000000000000000000000C0DE",
-        },
     },
     {
         "id": "tool_email_send",
@@ -140,25 +130,8 @@ async def seed_test_catalog(session: AsyncSession) -> None:
                     **tool,
                 )
             )
-        elif tool["id"] == "tool_billing_refund" and not found.x402:
-            found.x402 = tool["x402"]
-            found.mcp_server_id = TOOL_SERVERS.get(tool["id"])
         elif found.mcp_server_id is None:
             found.mcp_server_id = TOOL_SERVERS.get(tool["id"])
-
-    agent = await session.get(Agent, "agent_customer_ops")
-    if agent is not None:
-        existing_wallet = await session.execute(
-            select(Wallet).where(Wallet.agent_id == agent.id)
-        )
-        if existing_wallet.scalar_one_or_none() is None:
-            await wallet_service.ensure_wallet(
-                session,
-                agent,
-                wallet_id="wallet_customer_ops",
-                address="0xa11ce0000000000000000000000000000000c0de",
-                balance=Decimal("100"),
-            )
 
     result = await session.execute(
         select(Policy)

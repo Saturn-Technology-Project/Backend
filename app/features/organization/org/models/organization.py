@@ -29,7 +29,6 @@ class Organization(Base):
     tools = relationship("Tool", back_populates="organization")
     policies = relationship("Policy", back_populates="organization")
     runs = relationship("Run", back_populates="organization")
-    wallets = relationship("Wallet", back_populates="organization")
     users = relationship("User", back_populates="organization")
     employees = relationship("Employee", back_populates="organization")
     invitations = relationship("Invitation", back_populates="organization")

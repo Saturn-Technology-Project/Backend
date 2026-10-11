@@ -44,15 +44,6 @@ class ActorType(str, Enum):
     USER = "user"
     AGENT = "agent"
     SYSTEM = "system"
-    WALLET = "wallet"
-
-
-class PaymentStatus(str, Enum):
-    PENDING = "pending"
-    VERIFIED = "verified"
-    SETTLED = "settled"
-    DENIED = "denied"
-    FAILED = "failed"
 
 
 class AuditEvent(str, Enum):
@@ -63,10 +54,6 @@ class AuditEvent(str, Enum):
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_GRANTED = "approval_granted"
     APPROVAL_REJECTED = "approval_rejected"
-    X402_PAYMENT_REQUIRED = "x402_payment_required"
-    WALLET_EVALUATED = "wallet_evaluated"
-    X402_SETTLED = "x402_settled"
-    X402_FAILED = "x402_failed"
     TOOL_EXECUTED = "tool_executed"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"

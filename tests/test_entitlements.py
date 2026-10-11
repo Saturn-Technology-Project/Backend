@@ -1,6 +1,7 @@
 import pytest
 
 from app.features.organization.org.services.plans import allows_pro, allows_saturn_cloud, entitlements
+from tests.oauth_access import oauth_access
 
 
 def test_unknown_plan_keeps_the_gateway_and_denies_pro():
@@ -71,7 +72,7 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
     connected = await client.post(
         "/mcp-servers",
         headers=headers,
-        json={"name": "GitHub", "endpoint": "https://github.example/free", "authorization": "token-1"},
+        json={"name": "GitHub", "endpoint": "https://api.githubcopilot.com/free", "authorization": "token-1"},
     )
     assert connected.status_code == 201, connected.text
     catalog = {item["name"]: item["id"] for item in connected.json()["catalog"]}
@@ -115,7 +116,30 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
         assert assigned.status_code == 200, assigned.text
         assert assigned.json()["tool_set_id"] == tool_set_id
 
-    agent_headers = {**headers, "X-Saturn-Agent-Id": first.json()["id"]}
+    blocked = await client.post(
+        "/mcp",
+        headers={**headers, "X-Saturn-Agent-Id": first.json()["id"]},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "repo.read", "arguments": {"repo": "saturn"}}},
+    )
+    assert blocked.status_code == 401
+
+    access = await oauth_access(client, "Free Caller", email="free-ent@example.com", password="password1")
+    opened = await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {access}"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    )
+    assert opened.status_code == 200, opened.text
+    caller_id = next(item["id"] for item in (await client.get("/agents", headers=headers)).json() if item["name"] == "Free Caller")
+    caller_set = await client.patch(f"/agents/{caller_id}", headers=headers, json={"tool_set_id": tool_set_id})
+    assert caller_set.status_code == 200, caller_set.text
+    agent_headers = {"Authorization": f"Bearer {access}", "X-Saturn-Agent-Id": caller_id}
+    stolen = await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {access}", "X-Saturn-Agent-Id": first.json()["id"]},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "repo.read", "arguments": {"repo": "saturn"}}},
+    )
+    assert stolen.json()["error"]["message"] == "Unknown agent"
     allowed = await client.post(
         "/mcp",
         headers={**agent_headers, "X-Saturn-Run-Id": "run_free_1", "X-Saturn-Action-Id": "act_free_read"},
@@ -191,7 +215,7 @@ async def test_pro_manages_policies_sets_and_audit(client, monkeypatch):
     connected = await client.post(
         "/mcp-servers",
         headers=headers,
-        json={"name": "GitHub", "endpoint": "https://github.example/pro", "authorization": "token-1"},
+        json={"name": "GitHub", "endpoint": "https://api.githubcopilot.com/pro", "authorization": "token-1"},
     )
     assert connected.status_code == 201, connected.text
     tool_id = connected.json()["catalog"][0]["id"]

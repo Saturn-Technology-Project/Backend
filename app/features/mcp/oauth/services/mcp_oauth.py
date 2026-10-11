@@ -23,6 +23,7 @@ from app.features.identity.auth.services.auth_service import hash_token
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.credentials.vault.services.credential_service import open_secret, seal
 from app.features.mcp.servers.services.mcp_grant import read_grant, write_grant
+from app.features.mcp.servers.services.mcp_endpoint import require_mcp_endpoint
 from app.features.mcp.servers.services.mcp_remote import McpUnauthorized, list_remote_tools
 from app.features.identity.oauth.services.oauth_service import pkce_s256
 
@@ -229,8 +230,7 @@ class McpOAuth:
         url = endpoint.strip()
         if not label or not url:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name and endpoint are required")
-        if not url_allowed(url):
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint is not allowed")
+        url = require_mcp_endpoint(url)
         if not _NONCE.match(nonce):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sign-in nonce is invalid")
         try:

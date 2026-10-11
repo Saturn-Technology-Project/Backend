@@ -11,7 +11,6 @@ from app.features.organization.org.services.access import allows, may_edit_agent
 from app.features.agent.agents.services.agent_config import default_instructions, merge_settings
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.organization.org.services.mapping_service import mapping_service
-from app.features.billing.wallets.services.wallet_service import wallet_service
 
 
 def _slug_id(prefix: str, name: str) -> str:
@@ -52,7 +51,6 @@ class AgentService:
         )
         session.add(agent)
         await session.flush()
-        await wallet_service.ensure_wallet(session, agent)
         await mapping_service.assign_agent(session, user, agent)
         return agent
 
@@ -71,11 +69,7 @@ class AgentService:
         if not may_edit_agent(employee, agent.id) and not (set_only and tool_set_service.owns_profile(user, agent)):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "You cannot modify this agent")
         admin = allows(employee.permissions, "team", "write")
-        if (
-            body.runtime_id is not None
-            or body.daily_spend_limit is not None
-            or body.per_tx_limit is not None
-        ) and not admin:
+        if body.runtime_id is not None and not admin:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
         previous_prompt = str((agent.settings or {}).get("instructions") or "")
         if body.name is not None:
@@ -113,13 +107,6 @@ class AgentService:
             settings = dict(agent.settings or {})
             settings["model"] = body.model
             agent.settings = settings
-        if body.daily_spend_limit is not None or body.per_tx_limit is not None:
-            wallet = await wallet_service.ensure_wallet(session, agent)
-            wallet_service.update_limits(
-                wallet,
-                daily=body.daily_spend_limit,
-                per_tx=body.per_tx_limit,
-            )
         await session.flush()
         return agent
 

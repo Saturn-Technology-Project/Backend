@@ -16,7 +16,6 @@ from app.models import (
     Employee,
     McpServer,
     Organization,
-    Payment,
     Policy,
     Run,
     Tool,
@@ -384,7 +383,7 @@ class AdminService:
                     select(AuditLog)
                     .where(
                         AuditLog.organization_id == org.id,
-                        AuditLog.event.in_(("run_failed", "x402_failed")),
+                        AuditLog.event == "run_failed",
                     )
                     .order_by(AuditLog.created_at.desc())
                     .limit(1)
@@ -471,21 +470,9 @@ class AdminService:
                 )
             ).all()
         }
-        pay_rows = {
-            row[0]: (int(row[1]), str(row[2] or 0))
-            for row in (
-                await session.execute(
-                    select(Run.organization_id, func.count(Payment.id), func.coalesce(func.sum(Payment.amount), 0))
-                    .select_from(Payment)
-                    .join(Run, Run.id == Payment.run_id)
-                    .group_by(Run.organization_id)
-                )
-            ).all()
-        }
         orgs = (await session.execute(select(Organization).order_by(Organization.name.asc()))).scalars()
         rows = []
         for org in orgs:
-            count, volume = pay_rows.get(org.id, (0, "0"))
             rows.append(
                 {
                     "organization_id": org.id,
@@ -494,8 +481,6 @@ class AdminService:
                     "kind": org.kind if org.kind in {"personal", "organization"} else kind_for_plan(org.plan),
                     "runs": run_rows.get(org.id, 0),
                     "tool_calls": call_rows.get(org.id, 0),
-                    "payments": count,
-                    "payment_volume": volume,
                 }
             )
         return rows
@@ -517,11 +502,9 @@ class AdminService:
             "infrastructure": {
                 "runtime": "in-process",
                 "mcp": "mcp-gateway",
-                "x402_network": settings.x402_network,
                 "secrets": [
                     {"id": "database_url", "kind": "dsn", "configured": True},
                     {"id": "redis_url", "kind": "url", "configured": True},
-                    {"id": "x402_pay_to", "kind": "address", "configured": True},
                 ],
             },
             "admins": admins,
