@@ -21,6 +21,7 @@ from app.features.identity.auth.models.mfa import EmailCode, LoginChallenge, Pas
 from app.features.policy.policies.models.policy import Policy, PolicyRule
 from app.features.execution.runs.models.run import Run
 from app.features.identity.auth.models.session import AuthSession
+from app.features.identity.auth.models.throttle import AuthThrottle
 from app.features.tooling.tools.models.tool import Tool
 from app.features.tooling.tool_sets.models.tool_set import ToolSet, ToolSetItem
 from app.features.identity.auth.models.user import User
@@ -31,6 +32,7 @@ __all__ = [
     "Approval",
     "AuditLog",
     "AuthSession",
+    "AuthThrottle",
     "OrgCredential",
     "EmailCode",
     "Employee",

@@ -12,7 +12,12 @@ from app.core.ids import new_id, utcnow
 from app.models import Agent, Employee, McpServer, Organization, User
 from app.features.organization.org.models.invitation import Invitation
 from app.features.identity.auth.models.session import AuthSession
-from app.features.organization.org.services.access import is_org_admin, permissions_for_role, resolve_permissions
+from app.features.organization.org.services.access import (
+    access_reduced,
+    is_org_admin,
+    permissions_for_role,
+    resolve_permissions,
+)
 from app.features.identity.auth.services.auth_service import hash_password, hash_token
 
 INVITE_TTL_DAYS = 7
@@ -325,6 +330,15 @@ class MemberService:
         loaded = await self.load_member(session, employee.id)
         assert loaded is not None
         return loaded
+        reduced = (
+            access_reduced(previous_perms, next_perms)
+            or next_status == "disabled"
+            or (agent_ids is not None and bool(previous_agents - set(agent_ids)))
+            or (mcp_server_ids is not None and bool(previous_mcp - set(mcp_server_ids)))
+            or (agent_edit_ids is not None and bool(previous_edit - set(agent_edit_ids)))
+        )
+        if reduced and employee.user_id:
+            await self._revoke_oauth(session, employee.user_id)
 
     async def reset_password(
         self,
@@ -345,6 +359,7 @@ class MemberService:
         loaded = await self.load_member(session, employee.id)
         assert loaded is not None
         return loaded
+        await self._revoke_oauth(session, employee.user_id)
 
     async def _revoke_sessions(self, session: AsyncSession, user_id: str) -> None:
         result = await session.execute(

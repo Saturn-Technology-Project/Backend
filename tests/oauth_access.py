@@ -4,13 +4,13 @@ from urllib.parse import parse_qs, urlparse
 from app.features.identity.oauth.services.oauth_service import pkce_s256
 
 
-async def oauth_access(
+async def oauth_tokens(
     client,
     client_name: str,
     *,
     email: str = "rick@saturn.ai",
     password: str = "saturn",
-) -> str:
+) -> tuple[str, str, str]:
     saved = client.headers.get("Authorization")
     client.headers.pop("Authorization", None)
     verifier = "c" * 43
@@ -58,4 +58,16 @@ async def oauth_access(
     assert token.status_code == 200, token.text
     if saved:
         client.headers["Authorization"] = saved
-    return token.json()["access_token"]
+    body = token.json()
+    return body["access_token"], body["refresh_token"], query["client_id"]
+
+
+async def oauth_access(
+    client,
+    client_name: str,
+    *,
+    email: str = "rick@saturn.ai",
+    password: str = "saturn",
+) -> str:
+    access, _refresh, _client_id = await oauth_tokens(client, client_name, email=email, password=password)
+    return access

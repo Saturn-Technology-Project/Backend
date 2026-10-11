@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import timedelta, timezone
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 from app.core.ids import new_id, utcnow
 from app.features.identity.auth.models.mfa import EmailCode, LoginChallenge, Passkey
 from app.features.identity.auth.services.auth_service import hash_password, hash_token, verify_password
+from app.features.identity.auth.services.throttle import consume
 from app.models import User
 
 CODE_TTL = timedelta(minutes=10)
@@ -58,14 +59,15 @@ class MfaService:
         name: str,
         email: str,
         password: str,
-    ) -> str:
+        request: Request,
+    ) -> str | None:
         cleaned_name = _name(name)
         normalized = _email(email)
         secret = _password(password)
+        await consume(session, request, "signup", normalized)
         existing = await session.execute(select(User).where(User.email == normalized))
         if existing.scalar_one_or_none() is not None:
-            raise HTTPException(status.HTTP_409_CONFLICT, "Email is already used")
-        await self._throttle(session, normalized, "signup")
+            return None
         await self._close_open(session, normalized, "signup")
         code = _new_code()
         session.add(
@@ -150,6 +152,129 @@ class MfaService:
     async def disable_email_mfa(self, session: AsyncSession, user: User) -> None:
         user.email_mfa = False
         await session.flush()
+
+    async def begin_email_change(self, session: AsyncSession, user: User, email: str) -> tuple[str, str]:
+        normalized = _email(email)
+        if normalized == user.email:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email is invalid")
+        existing = await session.execute(select(User).where(User.email == normalized))
+        other = existing.scalar_one_or_none()
+        if other is not None and other.id != user.id:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Email is already used")
+        await self._throttle(session, user.email, "email_current")
+        await self._close_open(session, user.email, "email_current")
+        await self._close_open(session, normalized, "email_next")
+        current_code = _new_code()
+        next_code = _new_code()
+        while next_code == current_code:
+            next_code = _new_code()
+        now = utcnow()
+        session.add(
+            EmailCode(
+                id=new_id("eml"),
+                email=user.email,
+                purpose="email_current",
+                user_id=user.id,
+                name=normalized,
+                code_hash=hash_password(current_code),
+                expires_at=now + CODE_TTL,
+                attempts=0,
+            )
+        )
+        session.add(
+            EmailCode(
+                id=new_id("eml"),
+                email=normalized,
+                purpose="email_next",
+                user_id=user.id,
+                name=normalized,
+                code_hash=hash_password(next_code),
+                expires_at=now + CODE_TTL,
+                attempts=0,
+            )
+        )
+        await session.flush()
+        return current_code, next_code
+
+    async def discard_email_change(self, session: AsyncSession, user: User) -> None:
+        result = await session.execute(
+            select(EmailCode).where(
+                EmailCode.user_id == user.id,
+                EmailCode.purpose.in_(("email_current", "email_next")),
+                EmailCode.used_at.is_(None),
+            )
+        )
+        for record in result.scalars():
+            await session.delete(record)
+        await session.flush()
+
+    async def confirm_email_change(
+        self,
+        session: AsyncSession,
+        user: User,
+        current_code: str,
+        next_code: str,
+    ) -> None:
+        current = await self._open_code(session, user.email, "email_current")
+        pending = current.name if current is not None and current.user_id == user.id else ""
+        nxt = await self._open_code(session, pending, "email_next") if pending else None
+        now = utcnow()
+        if (
+            current is None
+            or nxt is None
+            or nxt.user_id != user.id
+            or nxt.name != pending
+            or not self._code_ok(current, current_code, now)
+            or not self._code_ok(nxt, next_code, now)
+        ):
+            for record in (current, nxt):
+                if record is None:
+                    continue
+                record.attempts += 1
+                if record.attempts >= MAX_ATTEMPTS:
+                    record.used_at = now
+            await session.flush()
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        current.used_at = now
+        nxt.used_at = now
+        user.email = pending
+        await session.flush()
+
+    async def request_reauth_code(self, session: AsyncSession, user: User) -> str:
+        await self._throttle(session, user.email, "reauth")
+        await self._close_open(session, user.email, "reauth")
+        code = _new_code()
+        session.add(
+            EmailCode(
+                id=new_id("eml"),
+                email=user.email,
+                purpose="reauth",
+                user_id=user.id,
+                code_hash=hash_password(code),
+                expires_at=utcnow() + CODE_TTL,
+                attempts=0,
+            )
+        )
+        await session.flush()
+        return code
+
+    async def discard_reauth_code(self, session: AsyncSession, user: User) -> None:
+        record = await self._open_code(session, user.email, "reauth")
+        if record is not None:
+            await session.delete(record)
+            await session.flush()
+
+    async def consume_reauth_code(self, session: AsyncSession, user: User, code: str) -> None:
+        record = await self._consume_code(session, user.email, "reauth", code)
+        if record is None or record.user_id != user.id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+
+    def _code_ok(self, record: EmailCode, code: str, now) -> bool:
+        return (
+            _as_utc(record.expires_at) > now
+            and record.attempts < MAX_ATTEMPTS
+            and verify_password(code.strip(), record.code_hash)
+        )
 
     async def factors(self, session: AsyncSession, user: User) -> list[str]:
         methods: list[str] = []

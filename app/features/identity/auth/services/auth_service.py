@@ -5,7 +5,7 @@ import hmac
 import secrets
 from datetime import timedelta, timezone
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -14,9 +14,11 @@ from app.core.config import get_settings
 from app.core.ids import new_id, utcnow
 from app.models import Organization, PasswordReset, User
 from app.features.identity.auth.models.session import AuthSession
+from app.features.identity.auth.services.throttle import consume
 
 settings = get_settings()
 PBKDF2_ROUNDS = 210_000
+RECENT_AUTH = timedelta(minutes=10)
 
 
 def hash_password(password: str) -> str:
@@ -78,6 +80,7 @@ class AuthService:
             user_id=user.id,
             token_hash=hash_token(raw),
             expires_at=utcnow() + timedelta(days=settings.session_ttl_days),
+            authenticated_at=utcnow(),
         )
         session.add(record)
         await session.flush()
@@ -106,12 +109,6 @@ class AuthService:
         domain = normalized.split("@")[-1] if "@" in normalized else ""
         if not domain or "." not in domain or " " in normalized:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email is invalid")
-        if normalized != user.email:
-            existing = await session.execute(select(User).where(User.email == normalized))
-            other = existing.scalar_one_or_none()
-            if other is not None and other.id != user.id:
-                raise HTTPException(status.HTTP_409_CONFLICT, "Email is already used")
-            user.email = normalized
         user.name = cleaned
         await session.flush()
         return user
@@ -157,24 +154,9 @@ class AuthService:
             record.revoked_at = now
         await session.flush()
 
-    async def request_password_reset(self, session: AsyncSession, email: str) -> str | None:
+    async def request_password_reset(self, session: AsyncSession, email: str, request: Request) -> str | None:
         normalized = email.strip().lower()
-        recent = await session.execute(
-            select(PasswordReset)
-            .where(PasswordReset.email == normalized)
-            .order_by(PasswordReset.created_at.desc())
-            .limit(1)
-        )
-        last = recent.scalar_one_or_none()
-        if last is not None:
-            created = last.created_at
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            if utcnow() - created < timedelta(seconds=60):
-                raise HTTPException(
-                    status.HTTP_429_TOO_MANY_REQUESTS,
-                    "Wait a minute before requesting another code",
-                )
+        await consume(session, request, "reset", normalized)
         user = await self._active_user(session, normalized)
         if user is None:
             return None
@@ -249,6 +231,7 @@ class AuthService:
         user.password_hash = hash_password(password)
         record.used_at = now
         await self.revoke_user_sessions(session, user.id)
+        await self._revoke_oauth(session, user.id)
 
     async def change_password(
         self,
@@ -265,6 +248,42 @@ class AuthService:
         user.password_hash = hash_password(new_password)
         keep_hash = hash_token(keep_token) if keep_token else None
         await self.revoke_user_sessions(session, user.id, keep_hash=keep_hash)
+        if keep_token:
+            await self.mark_session_authenticated(session, keep_token)
+        await self._revoke_oauth(session, user.id)
+
+    async def _session_record(self, session: AsyncSession, token: str) -> AuthSession | None:
+        if not token:
+            return None
+        result = await session.execute(
+            select(AuthSession).where(AuthSession.token_hash == hash_token(token))
+        )
+        record = result.scalar_one_or_none()
+        if record is None or record.revoked_at is not None:
+            return None
+        return record
+
+    async def require_recent_auth(self, session: AsyncSession, token: str) -> None:
+        record = await self._session_record(session, token)
+        if record is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
+        stamp = record.authenticated_at
+        if stamp is not None and stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if stamp is None or utcnow() - stamp > RECENT_AUTH:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Reauthentication required")
+
+    async def mark_session_authenticated(self, session: AsyncSession, token: str) -> None:
+        record = await self._session_record(session, token)
+        if record is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
+        record.authenticated_at = utcnow()
+        await session.flush()
+
+    async def _revoke_oauth(self, session: AsyncSession, user_id: str) -> None:
+        from app.features.identity.oauth.services.oauth_service import oauth_service
+
+        await oauth_service.revoke_user_tokens(session, user_id)
 
     async def _active_user(self, session: AsyncSession, email: str) -> User | None:
         result = await session.execute(select(User).where(User.email == email))

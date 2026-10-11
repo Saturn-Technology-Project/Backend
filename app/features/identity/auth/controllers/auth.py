@@ -13,6 +13,7 @@ from app.models import Employee, User
 from app.schemas import (
     AcceptInviteRequest,
     EmployeeRead,
+    EmailChangeConfirm,
     ForgotPasswordRequest,
     LoginChallengeRequest,
     LoginEmailRequest,
@@ -31,6 +32,7 @@ from app.schemas import (
     PasswordChange,
     PhotoUpdate,
     ProfileUpdate,
+    ReauthRequest,
     RegisterRequest,
     ResetPasswordRequest,
     SignupCodeRequest,
@@ -39,13 +41,15 @@ from app.schemas import (
 from app.features.organization.org.services.access import allows, empty_permissions, normalize_permissions
 from app.features.organization.org.services.organization_service import serialize_organization
 from app.features.platform.admin.services.admin_service import admin_service
-from app.features.identity.auth.services.auth_service import auth_service
+from app.features.identity.auth.services.auth_service import auth_service, hash_token, verify_password
 from app.features.identity.auth.services.mfa import mfa_service
 from app.features.identity.auth.services.passkeys import passkey_service
 from app.features.identity.auth.services.photo import clean_photo
 from app.features.identity.auth.services.mailer import (
     normalize_locale,
+    send_email_change_code,
     send_login_code,
+    send_reauth_code,
     send_reset_code,
     send_signup_code,
 )
@@ -171,13 +175,16 @@ async def _begin_mfa(session, user: User, locale: str | None) -> LoginResponse |
 
 
 @router.post("/register/code", status_code=204)
-async def register_code(body: SignupCodeRequest, session: SessionDep):
+async def register_code(body: SignupCodeRequest, request: Request, session: SessionDep):
     code = await mfa_service.request_signup(
         session,
         name=body.name,
         email=body.email,
         password=body.password,
+        request=request,
     )
+    if not code:
+        return
     try:
         await send_signup_code(body.email.strip().lower(), code, body.locale)
     except HTTPException:
@@ -283,7 +290,13 @@ async def mfa_email_enable(body: MfaCodeRequest, user: CurrentUser, session: Ses
 
 
 @router.delete("/mfa/email", status_code=204)
-async def mfa_email_disable(user: CurrentUser, session: SessionDep):
+async def mfa_email_disable(
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    await auth_service.require_recent_auth(session, _presented_token(request, creds))
     await mfa_service.disable_email_mfa(session, user)
 
 
@@ -304,8 +317,71 @@ async def create_passkey(
 
 
 @router.delete("/passkeys/{passkey_id}", status_code=204)
-async def delete_passkey(passkey_id: str, user: CurrentUser, session: SessionDep):
+async def delete_passkey(
+    passkey_id: str,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    await auth_service.require_recent_auth(session, _presented_token(request, creds))
     await passkey_service.delete(session, user, passkey_id)
+
+
+@router.post("/reauth", status_code=204)
+async def reauthenticate(
+    body: ReauthRequest,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    token = _presented_token(request, creds)
+    if body.password:
+        if not verify_password(body.password, user.password_hash):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
+    elif body.code:
+        await mfa_service.consume_reauth_code(session, user, body.code)
+    elif body.credential:
+        await passkey_service.reauth_verify(session, request, user, body.credential)
+    else:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Reauthentication required")
+    await auth_service.mark_session_authenticated(session, token)
+
+
+@router.post("/reauth/email/code", status_code=204)
+async def reauth_email_code(user: CurrentUser, session: SessionDep):
+    code = await mfa_service.request_reauth_code(session, user)
+    try:
+        await send_reauth_code(user.email, code, user.locale)
+    except HTTPException:
+        await mfa_service.discard_reauth_code(session, user)
+        raise
+
+
+@router.post("/reauth/passkey/options")
+async def reauth_passkey_options(request: Request, user: CurrentUser, session: SessionDep):
+    return await passkey_service.reauth_options(session, request, user)
+
+
+@router.post("/email/confirm", response_model=UserRead)
+async def confirm_email_change(
+    body: EmailChangeConfirm,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    await mfa_service.confirm_email_change(session, user, body.current_code, body.next_code)
+    token = _presented_token(request, creds)
+    await auth_service.revoke_user_sessions(
+        session,
+        user.id,
+        keep_hash=hash_token(token) if token else None,
+    )
+    await auth_service._revoke_oauth(session, user.id)
+    await mapping_service.bind_workspace(session, user)
+    return await serialize_user(session, user)
 
 
 @router.post("/session", status_code=204)
@@ -351,10 +427,31 @@ async def update_my_photo(body: PhotoUpdate, user: CurrentUser, session: Session
 
 
 @router.patch("/me", response_model=UserRead)
-async def update_me(body: ProfileUpdate, user: CurrentUser, session: SessionDep):
-    await auth_service.update_profile(session, user, name=body.name, email=body.email)
+async def update_me(
+    body: ProfileUpdate,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    pending = False
+    next_email = body.email.strip().lower()
+    await auth_service.update_profile(session, user, name=body.name, email=user.email)
+    if next_email != user.email:
+        await auth_service.require_recent_auth(session, _presented_token(request, creds))
+        current_code, next_code = await mfa_service.begin_email_change(session, user, next_email)
+        pending = True
+        try:
+            await send_email_change_code(user.email, current_code, "email_current", user.locale)
+            await send_email_change_code(next_email, next_code, "email_next", user.locale)
+        except HTTPException:
+            await mfa_service.discard_email_change(session, user)
+            raise
     await mapping_service.bind_workspace(session, user)
-    return await serialize_user(session, user)
+    read = await serialize_user(session, user)
+    if pending:
+        read = read.model_copy(update={"email_change_pending": True})
+    return read
 
 
 @router.post("/accept-invite", response_model=LoginResponse)
@@ -367,8 +464,8 @@ async def accept_invite(body: AcceptInviteRequest, request: Request, response: R
 
 
 @router.post("/forgot-password", status_code=204)
-async def forgot_password(body: ForgotPasswordRequest, session: SessionDep):
-    code = await auth_service.request_password_reset(session, body.email)
+async def forgot_password(body: ForgotPasswordRequest, request: Request, session: SessionDep):
+    code = await auth_service.request_password_reset(session, body.email, request)
     if not code:
         return
     account = await session.scalar(select(User).where(User.email == body.email.strip().lower()))

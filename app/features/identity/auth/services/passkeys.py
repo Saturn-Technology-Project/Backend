@@ -106,6 +106,47 @@ class PasskeyService:
         await session.delete(record)
         await session.flush()
 
+    async def reauth_options(self, session: AsyncSession, request: Request, user: User) -> dict:
+        rp_id, _origin = relying_party(request)
+        records = await self.list_passkeys(session, user)
+        if not records:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Passkey could not be verified")
+        options = generate_authentication_options(
+            rp_id=rp_id,
+            allow_credentials=[
+                PublicKeyCredentialDescriptor(id=base64url_to_bytes(item.credential_id)) for item in records
+            ],
+            user_verification=UserVerificationRequirement.PREFERRED,
+        )
+        await self._store_challenge(session, user.id, "reauth", options.challenge)
+        return json.loads(options_to_json(options))
+
+    async def reauth_verify(self, session: AsyncSession, request: Request, user: User, credential: dict) -> None:
+        rp_id, origin = relying_party(request)
+        credential_id = credential.get("id") if isinstance(credential, dict) else None
+        if not isinstance(credential_id, str) or not credential_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Passkey could not be verified")
+        result = await session.execute(
+            select(Passkey).where(Passkey.credential_id == credential_id, Passkey.user_id == user.id)
+        )
+        record = result.scalar_one_or_none()
+        if record is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Passkey could not be verified")
+        challenge = await self._take_challenge(session, user.id, "reauth")
+        try:
+            verified = verify_authentication_response(
+                credential=credential,
+                expected_challenge=base64url_to_bytes(challenge),
+                expected_rp_id=rp_id,
+                expected_origin=origin,
+                credential_public_key=base64url_to_bytes(record.public_key),
+                credential_current_sign_count=record.sign_count,
+            )
+        except WebAuthnException as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Passkey could not be verified") from exc
+        record.sign_count = verified.new_sign_count
+        await session.flush()
+
     async def authentication_options(self, session: AsyncSession, request: Request, token: str) -> dict:
         rp_id, _origin = relying_party(request)
         user = await mfa_service.user_for_challenge(session, token)

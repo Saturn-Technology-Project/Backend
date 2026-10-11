@@ -397,6 +397,7 @@ class UserRead(ORMModel):
     role: str | None = None
     profile_id: str = ""
     locale: str = "zh-Hant"
+    email_change_pending: bool = False
 
 
 class AccessPermissions(BaseModel):
@@ -650,6 +651,17 @@ class AdminUserRead(ORMModel):
     title: str | None = None
     role: str | None = None
     created_at: datetime
+
+
+class ReauthRequest(BaseModel):
+    password: str | None = None
+    code: str | None = None
+    credential: dict[str, Any] | None = None
+
+
+class EmailChangeConfirm(BaseModel):
+    current_code: str
+    next_code: str
 
 
 class ProfileUpdate(BaseModel):

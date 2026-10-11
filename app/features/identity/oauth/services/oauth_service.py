@@ -138,6 +138,26 @@ class OAuthService:
         current.revoked_at = utcnow()
         return await self._issue_tokens(session, client_id=client_id, user_id=current.user_id)
 
+    async def revoke_user_tokens(self, session: AsyncSession, user_id: str) -> None:
+        now = utcnow()
+        access = await session.execute(
+            select(OAuthAccess).where(
+                OAuthAccess.user_id == user_id,
+                OAuthAccess.revoked_at.is_(None),
+            )
+        )
+        for record in access.scalars():
+            record.revoked_at = now
+        grants = await session.execute(
+            select(OAuthGrant).where(
+                OAuthGrant.user_id == user_id,
+                OAuthGrant.used_at.is_(None),
+            )
+        )
+        for grant in grants.scalars():
+            grant.used_at = now
+        await session.flush()
+
     async def user_from_access_token(
         self,
         session: AsyncSession,

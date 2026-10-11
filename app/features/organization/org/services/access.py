@@ -74,6 +74,17 @@ def resolve_permissions(role: str, override: Any | None = None) -> tuple[str, di
     return cleaned_role, permissions_for_role(cleaned_role)
 
 
+def access_reduced(before: Any | None, after: Any | None) -> bool:
+    previous = before if isinstance(before, dict) else {}
+    nxt = after if isinstance(after, dict) else {}
+    for resource in RESOURCES:
+        old = _RANK.get(str(previous.get(resource, "none")).strip().lower(), 0)
+        new = _RANK.get(str(nxt.get(resource, "none")).strip().lower(), 0)
+        if new < old:
+            return True
+    return False
+
+
 def allows(permissions: Any | None, resource: str, level: str) -> bool:
     if resource not in RESOURCES:
         return False

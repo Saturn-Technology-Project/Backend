@@ -154,7 +154,7 @@ async def test_public_register_creates_a_personal_org(client, monkeypatch):
     assert invited.status_code == 403
 
     duplicate = await client.post("/auth/register/code", json=payload)
-    assert duplicate.status_code == 409
+    assert duplicate.status_code == 429
 
     listed = (await client.get("/admin/orgs")).json()
     org = next(item for item in listed if item["name"] == "Mina")

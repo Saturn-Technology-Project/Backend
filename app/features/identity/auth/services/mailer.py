@@ -36,6 +36,48 @@ _COPY = {
             "ignore": "If you didn't request this, you can ignore this email.",
         },
     },
+    "email_current": {
+        "zh": {
+            "subject": "{code} 是你的 Saturn 電子郵件變更碼",
+            "title": "確認變更電子郵件",
+            "body": "輸入下面的驗證碼，確認你要變更這個帳號的電子郵件。這組碼 10 分鐘內有效。",
+            "ignore": "如果你沒有提出這個要求，可以忽略這封信。",
+        },
+        "en": {
+            "subject": "{code} is your Saturn email change code",
+            "title": "Confirm the email change",
+            "body": "Enter this code to confirm you want to change the email on this account. It expires in 10 minutes.",
+            "ignore": "If you didn't request this, you can ignore this email.",
+        },
+    },
+    "email_next": {
+        "zh": {
+            "subject": "{code} 是你的 Saturn 新電子郵件確認碼",
+            "title": "確認新的電子郵件",
+            "body": "輸入下面的驗證碼，把 Saturn 帳號改到這個信箱。這組碼 10 分鐘內有效。",
+            "ignore": "如果你沒有提出這個要求，可以忽略這封信。",
+        },
+        "en": {
+            "subject": "{code} is your Saturn new email code",
+            "title": "Confirm this email",
+            "body": "Enter this code to use this address for your Saturn account. It expires in 10 minutes.",
+            "ignore": "If you didn't request this, you can ignore this email.",
+        },
+    },
+    "reauth": {
+        "zh": {
+            "subject": "{code} 是你的 Saturn 安全確認碼",
+            "title": "確認是你本人",
+            "body": "輸入下面的驗證碼，繼續變更帳號安全設定。這組碼 10 分鐘內有效。",
+            "ignore": "如果你沒有提出這個要求，可以忽略這封信。",
+        },
+        "en": {
+            "subject": "{code} is your Saturn security code",
+            "title": "Confirm it's you",
+            "body": "Enter this code to continue a security change on your account. It expires in 10 minutes.",
+            "ignore": "If you didn't request this, you can ignore this email.",
+        },
+    },
     "reset": {
         "zh": {
             "subject": "{code} 是你的 Saturn 密碼重設碼",
@@ -78,6 +120,14 @@ async def send_signup_code(email: str, code: str, locale: str | None = None) -> 
 
 async def send_login_code(email: str, code: str, locale: str | None = None) -> None:
     await _send(email, code, "login", mail_locale(locale))
+
+
+async def send_email_change_code(email: str, code: str, kind: str, locale: str | None = None) -> None:
+    await _send(email, code, kind, mail_locale(locale))
+
+
+async def send_reauth_code(email: str, code: str, locale: str | None = None) -> None:
+    await _send(email, code, "reauth", mail_locale(locale))
 
 
 def console_origin() -> str:
