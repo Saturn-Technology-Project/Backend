@@ -418,3 +418,48 @@ async def test_payment_needs_finance_and_admin(client, monkeypatch):
     resumed = await _request(client, access, agent_id, {"amount": 900}, action="act_split")
     assert resumed["result"]["tool"] == "pay.send"
     assert calls["n"] == 1
+
+
+async def test_deleting_a_group_drops_it_from_the_approval_policy(client):
+    admin = await client.post("/org/groups", json={"name": "Admin"})
+    finance = await client.post("/org/groups", json={"name": "Finance"})
+    assert admin.status_code == 201, admin.text
+    assert finance.status_code == 201, finance.text
+    policy = await client.post(
+        "/org/approval-policies",
+        json={
+            "name": "Both",
+            "requirements": [
+                {"group_id": finance.json()["id"], "required_count": 2},
+                {"group_id": admin.json()["id"], "required_count": 1},
+            ],
+        },
+    )
+    assert policy.status_code == 201, policy.text
+    removed = await client.delete(f"/org/groups/{finance.json()['id']}")
+    assert removed.status_code == 204, removed.text
+    names = [item["name"] for item in (await client.get("/org/groups")).json()]
+    assert "Finance" not in names
+    assert "Admin" in names
+    saved = next(item for item in (await client.get("/org/approval-policies")).json() if item["id"] == policy.json()["id"])
+    assert [(item["group_name"], item["required_count"]) for item in saved["requirements"]] == [("Admin", 1)]
+    assert saved["required_count"] == 1
+    missing = await client.delete(f"/org/groups/{finance.json()['id']}")
+    assert missing.status_code == 404
+
+
+async def test_removing_the_last_member_deletes_the_group(client):
+    people = await _people(client)
+    group = await client.post("/org/groups", json={"name": "Temporary"})
+    assert group.status_code == 201, group.text
+    group_id = group.json()["id"]
+    added = await client.post(f"/org/groups/{group_id}/members", json={"employee_id": people[0][0]})
+    assert added.status_code == 200, added.text
+    kept = await client.post(f"/org/groups/{group_id}/members", json={"employee_id": people[1][0]})
+    assert kept.status_code == 200, kept.text
+    one_left = await client.delete(f"/org/groups/{group_id}/members/{people[0][0]}")
+    assert one_left.status_code == 200, one_left.text
+    assert group_id in {item["id"] for item in (await client.get("/org/groups")).json()}
+    gone = await client.delete(f"/org/groups/{group_id}/members/{people[1][0]}")
+    assert gone.status_code == 204, gone.text
+    assert group_id not in {item["id"] for item in (await client.get("/org/groups")).json()}

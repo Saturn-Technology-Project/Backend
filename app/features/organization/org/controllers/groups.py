@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from pydantic import BaseModel
 
 from app.features.identity.auth.controllers.deps import ActorDep, CurrentUser, SessionDep, TeamRead, TeamWrite
@@ -132,4 +132,22 @@ async def remove_group_member(
         employee_id,
         actor_id=actor_id,
     )
+    if group is None:
+        return Response(status_code=204)
     return serialize_group(group)
+
+
+@router.delete("/{group_id}", status_code=204)
+async def delete_group(
+    group_id: str,
+    session: SessionDep,
+    user: CurrentUser,
+    actor_id: ActorDep,
+    _access: TeamWrite,
+):
+    await group_service.delete_group(
+        session,
+        user.organization_id,
+        group_id,
+        actor_id=actor_id,
+    )

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import ActorType, AuditEvent
 from app.core.ids import new_id, utcnow
 from app.features.execution.activity.services.audit_service import audit_service
+from app.features.execution.approvals.models.approval import ApprovalPolicy, ApprovalRequirement
 from app.features.organization.org.models.group import Group, GroupMember
 from app.features.organization.org.services.plans import GROUPS_REQUIRED, allows_groups
 from app.models import Employee, Organization
@@ -145,7 +146,7 @@ class GroupService:
         employee_id: str,
         *,
         actor_id: str,
-    ) -> Group:
+    ) -> Group | None:
         group = await self.get_group(session, organization_id, group_id)
         member = await session.scalar(
             select(GroupMember).where(
@@ -166,7 +167,74 @@ class GroupService:
             result="member_removed",
             payload={"group_id": group.id, "employee_id": employee_id},
         )
+        remaining = await session.scalar(
+            select(func.count()).select_from(GroupMember).where(GroupMember.group_id == group.id)
+        )
+        if int(remaining or 0) == 0:
+            await self.delete_group(session, organization_id, group.id, actor_id=actor_id)
+            return None
         return await self.get_group(session, organization_id, group.id)
+
+    async def delete_group(
+        self,
+        session: AsyncSession,
+        organization_id: str,
+        group_id: str,
+        *,
+        actor_id: str,
+    ) -> None:
+        group = await self.get_group(session, organization_id, group_id)
+        requirements = list(
+            (
+                await session.scalars(
+                    select(ApprovalRequirement).where(ApprovalRequirement.group_id == group.id)
+                )
+            ).all()
+        )
+        policy_ids = {item.approval_policy_id for item in requirements}
+        for item in requirements:
+            await session.delete(item)
+        linked = list(
+            (
+                await session.scalars(
+                    select(ApprovalPolicy).where(
+                        ApprovalPolicy.organization_id == organization_id,
+                        ApprovalPolicy.group_id == group.id,
+                    )
+                )
+            ).all()
+        )
+        for policy in linked:
+            policy.group_id = None
+            policy_ids.add(policy.id)
+        await session.flush()
+        for policy_id in policy_ids:
+            policy = await session.get(ApprovalPolicy, policy_id)
+            if policy is None:
+                continue
+            remaining = list(
+                (
+                    await session.scalars(
+                        select(ApprovalRequirement).where(ApprovalRequirement.approval_policy_id == policy.id)
+                    )
+                ).all()
+            )
+            policy.required_count = sum(int(item.required_count) for item in remaining) if remaining else 1
+            policy.version = (policy.version or 1) + 1
+            policy.updated_at = utcnow()
+        session.expire(group, ["members"])
+        await session.refresh(group, attribute_names=["members"])
+        await session.delete(group)
+        await session.flush()
+        await audit_service.log(
+            session,
+            event=AuditEvent.GROUP_UPDATED,
+            actor_type=ActorType.USER,
+            actor_id=actor_id,
+            organization_id=organization_id,
+            result="deleted",
+            payload={"group_id": group_id, "name": group.name},
+        )
 
     async def _require_plan(self, session: AsyncSession, organization_id: str) -> None:
         org = await session.get(Organization, organization_id)
