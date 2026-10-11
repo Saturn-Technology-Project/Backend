@@ -134,7 +134,7 @@ Frontend / Dashboard:
 | `FRONTEND_CLOUD_RUN_SERVICE` | variable, e.g. `saturn-frontend` |
 | `DASHBOARD_CLOUD_RUN_SERVICE` | variable, e.g. `saturn-dashboard` |
 
-`BACKEND_PUBLIC_URL` is the Cloud Run URL of the API, for example `https://saturn-backend-xxxxx.run.app`. Frontend and Dashboard bake this into the `/saturn-api` HTTP rewrite. Backend copies it to `PUBLIC_WS_URL` so enroll returns `wss://saturn-backend-…/ws/connectors`. Connector must dial that origin, not the console.
+`BACKEND_PUBLIC_URL` is the public API origin, for example `https://api.saturn-core.com`. Frontend and Dashboard bake this into the `/saturn-api` HTTP rewrite. Backend sets `PUBLIC_WS_URL` to that origin so MCP OAuth callbacks use `${PUBLIC_WS_URL}/mcp-servers/oauth/callback`.
 
 ## Deploy
 
