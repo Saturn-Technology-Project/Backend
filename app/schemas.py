@@ -399,6 +399,7 @@ class UserRead(ORMModel):
     permissions: dict[str, str] = Field(default_factory=dict)
     role: str | None = None
     profile_id: str = ""
+    locale: str = "zh-Hant"
 
 
 class AccessPermissions(BaseModel):
@@ -699,6 +700,11 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     code: str
+    locale: str | None = None
+
+
+class LocaleUpdate(BaseModel):
+    locale: str
 
 
 class LoginChallengeRequest(BaseModel):
@@ -735,6 +741,12 @@ class PasskeyRead(BaseModel):
 class MfaStatus(BaseModel):
     email_mfa: bool
     passkeys: list[PasskeyRead] = Field(default_factory=list)
+
+
+class NoticeSettings(BaseModel):
+    approval: bool = False
+    execute: bool = False
+    audit: bool = False
 
 
 class LoginResponse(BaseModel):

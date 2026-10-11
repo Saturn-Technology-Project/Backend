@@ -38,6 +38,9 @@ class AuditService:
         )
         session.add(entry)
         await session.flush()
+        from app.features.identity.auth.services.notices import notify_audit
+
+        await notify_audit(session, entry)
         return entry
 
 

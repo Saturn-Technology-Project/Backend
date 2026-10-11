@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import select
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.features.agent.agents.controllers.agents import serialize_agent
@@ -19,9 +20,11 @@ from app.schemas import (
     LoginRequest,
     LoginResponse,
     LocaleRequest,
+    LocaleUpdate,
     McpGatewayRead,
     MfaCodeRequest,
     MfaStatus,
+    NoticeSettings,
     OrgUserRead,
     PasskeyCreateRequest,
     PasskeyRead,
@@ -40,7 +43,12 @@ from app.features.identity.auth.services.auth_service import auth_service
 from app.features.identity.auth.services.mfa import mfa_service
 from app.features.identity.auth.services.passkeys import passkey_service
 from app.features.identity.auth.services.photo import clean_photo
-from app.features.identity.auth.services.mailer import send_login_code, send_reset_code, send_signup_code
+from app.features.identity.auth.services.mailer import (
+    normalize_locale,
+    send_login_code,
+    send_reset_code,
+    send_signup_code,
+)
 from app.features.organization.org.services.mapping_service import mapping_service
 from app.features.mcp.servers.services.mcp_gateway import mcp_gateway
 from app.features.organization.org.services.member_service import member_service
@@ -131,6 +139,7 @@ async def serialize_user(session, user: User) -> UserRead:
             user.organization.kind,
             user.organization.plan,
         ),
+        locale=normalize_locale(user.locale),
     )
 
 
@@ -154,7 +163,7 @@ async def _begin_mfa(session, user: User, locale: str | None) -> LoginResponse |
     challenge, methods, code = pending
     if code is not None:
         try:
-            await send_login_code(user.email, code, locale)
+            await send_login_code(user.email, code, user.locale or locale)
         except HTTPException:
             await mfa_service.discard_login(session, challenge)
             raise
@@ -190,6 +199,7 @@ async def register(body: RegisterRequest, request: Request, response: Response, 
         email=email,
         password=password,
     )
+    user.locale = normalize_locale(body.locale)
     return await _issue_login(session, request, response, user)
 
 
@@ -219,6 +229,31 @@ async def login_passkey(body: LoginPasskeyRequest, request: Request, response: R
     return await _issue_login(session, request, response, user)
 
 
+@router.patch("/locale", response_model=LocaleUpdate)
+async def update_locale(body: LocaleUpdate, user: CurrentUser, session: SessionDep):
+    user.locale = normalize_locale(body.locale)
+    await session.flush()
+    return LocaleUpdate(locale=user.locale)
+
+
+@router.get("/notices", response_model=NoticeSettings)
+async def read_notices(user: CurrentUser):
+    return NoticeSettings(
+        approval=user.notify_approval,
+        execute=user.notify_execute,
+        audit=user.notify_audit,
+    )
+
+
+@router.patch("/notices", response_model=NoticeSettings)
+async def update_notices(body: NoticeSettings, user: CurrentUser, session: SessionDep):
+    user.notify_approval = body.approval
+    user.notify_execute = body.execute
+    user.notify_audit = body.audit
+    await session.flush()
+    return body
+
+
 @router.get("/mfa", response_model=MfaStatus)
 async def mfa_status(user: CurrentUser, session: SessionDep):
     records = await passkey_service.list_passkeys(session, user)
@@ -236,7 +271,7 @@ async def mfa_email_code(
 ):
     code = await mfa_service.request_email_mfa(session, user)
     try:
-        await send_login_code(user.email, code, None if body is None else body.locale)
+        await send_login_code(user.email, code, user.locale)
     except HTTPException:
         await mfa_service.discard_email_mfa(session, user)
         raise
@@ -336,8 +371,9 @@ async def forgot_password(body: ForgotPasswordRequest, session: SessionDep):
     code = await auth_service.request_password_reset(session, body.email)
     if not code:
         return
+    account = await session.scalar(select(User).where(User.email == body.email.strip().lower()))
     try:
-        await send_reset_code(body.email, code, body.locale)
+        await send_reset_code(body.email, code, account.locale if account is not None else body.locale)
     except HTTPException:
         await auth_service.discard_password_reset(session, body.email)
         raise

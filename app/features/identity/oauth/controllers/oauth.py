@@ -14,7 +14,7 @@ from app.core.enums import ActorType
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.identity.auth.controllers.deps import SessionDep
 from app.features.identity.auth.services.auth_service import auth_service
-from app.features.identity.auth.services.mailer import mail_locale, send_login_code
+from app.features.identity.auth.services.mailer import is_english, normalize_locale, send_login_code
 from app.features.identity.auth.services.mfa import mfa_service
 from app.features.identity.oauth.services.oauth_service import ACCESS_TTL, REFRESH_TTL, SCOPE, oauth_service, redirect_allowed
 from app.features.organization.org.services.plans import profile_identity
@@ -137,7 +137,7 @@ def _redirect(uri: str, **params: str) -> RedirectResponse:
 
 
 def _legal_links(locale: str) -> tuple[str, str]:
-    if locale == "en":
+    if is_english(locale):
         return "https://saturn.technology/terms", "https://saturn.technology/privacy"
     return "https://saturn.technology/zh/terms", "https://saturn.technology/zh/privacy"
 
@@ -193,7 +193,7 @@ def _consent_body(locale: str, client_name: str, client_id: str, identity: str, 
     days = REFRESH_TTL.days
     set_name = scope["set_name"]
     policy_name = "、".join(scope["policies"]) if scope["policies"] else ""
-    if locale == "en":
+    if is_english(locale):
         if scope["connected"]:
             set_label = set_name or "Not assigned"
             set_detail = (
@@ -338,12 +338,12 @@ async def authorize(request: Request, session: SessionDep):
     identity = profile_identity(user.id, user.organization_id, user.organization.kind, user.organization.plan)
     csrf = secrets.token_urlsafe(18)
     scope = await _consent_scope(session, user, client.id)
-    locale = mail_locale(request.headers.get("accept-language"))
+    locale = normalize_locale(user.locale)
     page = _page(
-        "Authorize agent" if locale == "en" else "授權代理人",
+        "Authorize agent" if is_english(locale) else "授權代理人",
         _consent_body(locale, client.name, client.id, identity, scope, fields, csrf),
         wide=True,
-        lang="en" if locale == "en" else "zh-Hant",
+        lang=locale,
     )
     _set_cookie(page, request, token, csrf)
     return page
@@ -365,7 +365,7 @@ async def oauth_login(request: Request, session: SessionDep):
         challenge, _methods, code = pending
         if code is not None:
             try:
-                await send_login_code(user.email, code, mail_locale(request.headers.get("accept-language")))
+                await send_login_code(user.email, code, user.locale)
             except HTTPException as exc:
                 await mfa_service.discard_login(session, challenge)
                 return _page("Connect Agents", f"<h1>無法寄信</h1><p>{escape(str(exc.detail))}</p>", exc.status_code)
