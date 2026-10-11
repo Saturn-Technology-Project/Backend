@@ -29,6 +29,8 @@ async def serialize_approval(session, approval) -> ApprovalRead:
         requirements=[ApprovalRequirementProgress(**item) for item in progress],
         execution_state=approval.execution_state or "none",
         expires_at=approval.expires_at,
+        resubmit_expires_at=approval.resubmit_expires_at,
+        expired_phase=approval.expired_phase,
     )
 
 

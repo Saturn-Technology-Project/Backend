@@ -31,6 +31,7 @@ from app.features.identity.auth.models.throttle import AuthThrottle
 from app.features.tooling.tools.models.tool import Tool
 from app.features.tooling.tool_sets.models.tool_set import ToolSet, ToolSetItem
 from app.features.identity.auth.models.notice_delivery import NoticeDelivery
+from app.features.webhooks.models.webhook import WebhookAttempt, WebhookDelivery, WebhookEndpoint
 from app.features.identity.auth.models.user import User
 
 __all__ = [

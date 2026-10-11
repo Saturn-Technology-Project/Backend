@@ -1,4 +1,5 @@
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,7 @@ from app.features.mcp.saturn.routes import router as saturn_mcp_router
 from app.features.mcp.servers.routes import router as mcp_servers_router
 from app.features.organization.org.controllers.groups import router as groups_router
 from app.features.organization.org.routes import router as org_router
+from app.features.webhooks.controllers.webhooks import router as webhooks_router
 from app.features.platform.admin.routes import router as admin_router
 from app.features.policy.policies.routes import router as policies_router
 from app.features.tooling.tool_sets.routes import router as tool_sets_router
@@ -57,8 +59,19 @@ async def lifespan(_app: FastAPI):
         async with SessionLocal() as session:
             await seed_if_empty(session)
             await session.commit()
-    yield
-    await engine.dispose()
+    worker = None
+    if not settings.skip_db_bootstrap:
+        from app.features.webhooks.services.worker import run_webhook_worker
+
+        worker = asyncio.create_task(run_webhook_worker())
+    try:
+        yield
+    finally:
+        if worker is not None:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+        await engine.dispose()
 
 
 app = FastAPI(
@@ -88,6 +101,7 @@ async def unhandled_error(_request: Request, exc: Exception):
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(org_router)
+app.include_router(webhooks_router)
 app.include_router(groups_router)
 app.include_router(approval_policies_router)
 app.include_router(agents_router)

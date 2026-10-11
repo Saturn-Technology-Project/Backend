@@ -49,6 +49,7 @@ class ApprovalPolicyService:
         requirements: list[dict] | None = None,
         allow_requester: bool = True,
         expires_minutes: int | None = None,
+        resubmit_minutes: int | None = None,
     ) -> ApprovalPolicy:
         cleaned = name.strip()
         if not cleaned:
@@ -67,8 +68,12 @@ class ApprovalPolicyService:
             count = int(required_count)
             if count < 1 or count > 20:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Required approvals must be from 1 to 20")
-        if expires_minutes is not None and expires_minutes < 1:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Expiration must be at least one minute")
+        from app.features.execution.approvals.services.expiration import check_minutes
+
+        if expires_minutes is not None:
+            expires_minutes = check_minutes(expires_minutes)
+        if resubmit_minutes is not None:
+            resubmit_minutes = check_minutes(resubmit_minutes)
         await self._require_capability(
             session,
             organization_id,
@@ -87,6 +92,7 @@ class ApprovalPolicyService:
             group_id=None if grouped else group_id,
             allow_requester=allow_requester,
             expires_minutes=expires_minutes,
+            resubmit_minutes=resubmit_minutes,
             version=1,
         )
         session.add(policy)
@@ -138,6 +144,7 @@ class ApprovalPolicyService:
         clear_group: bool = False,
         allow_requester: bool | None = None,
         expires_minutes: int | None = None,
+        resubmit_minutes: int | None = None,
     ) -> ApprovalPolicy:
         policy = await self.get_policy(session, organization_id, policy_id)
         if name is not None:
@@ -184,10 +191,12 @@ class ApprovalPolicyService:
             policy.group_id = group_id
         if allow_requester is not None:
             policy.allow_requester = allow_requester
+        from app.features.execution.approvals.services.expiration import check_minutes
+
         if expires_minutes is not None:
-            if expires_minutes < 1:
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Expiration must be at least one minute")
-            policy.expires_minutes = expires_minutes
+            policy.expires_minutes = check_minutes(expires_minutes)
+        if resubmit_minutes is not None:
+            policy.resubmit_minutes = check_minutes(resubmit_minutes)
         await self._require_capability(
             session,
             organization_id,

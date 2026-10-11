@@ -16,6 +16,7 @@ def test_unknown_plan_keeps_the_gateway_and_denies_pro():
     free = entitlements("free")
     assert free["tool_set_limit"] == 1
     assert free["policies"] is False
+    assert free["webhooks"] is False
     assert free["audit"] == "basic"
     assert entitlements(None)["policies"] is False
     assert entitlements("enterprise")["tool_set_limit"] is None
@@ -48,6 +49,7 @@ async def test_seed_org_is_pro(client):
     org = (await client.get("/org")).json()["organization"]
     assert org["plan"] == "enterprise"
     assert org["entitlements"]["policies"] is True
+    assert org["entitlements"]["webhooks"] is True
     assert org["entitlements"]["audit"] == "full"
     assert org["entitlements"]["tool_set_limit"] is None
 

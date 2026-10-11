@@ -34,6 +34,8 @@ class Approval(Base):
     policy_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     approval_policy_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resubmit_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_phase: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     execution_state: Mapped[str] = mapped_column(String(32), default="none", nullable=False)
     requester_user_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     group_requirements: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
@@ -60,6 +62,7 @@ class ApprovalPolicy(Base):
     group_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     allow_requester: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     expires_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    resubmit_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
@@ -92,6 +95,15 @@ class ApprovalRequirement(Base):
 
     policy = relationship("ApprovalPolicy", back_populates="requirements")
     group = relationship("Group")
+
+
+class ApprovalWindow(Base):
+    __tablename__ = "approval_windows"
+
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), primary_key=True)
+    pending_ttl_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=1440)
+    resubmit_ttl_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=1440)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class ApprovalDecision(Base):

@@ -59,6 +59,7 @@ def entitlements(plan: str | None) -> dict:
         "gateway": allows_saturn_cloud(plan),
         "tool_set_limit": tool_set_limit(plan),
         "policies": pro,
+        "webhooks": pro,
         "groups": allows_groups(plan),
         "audit": "full" if pro else "basic",
         "audit_days": audit_retention_days(plan),

@@ -42,6 +42,7 @@ async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
     assert org.status_code == 200
     assert org.json()["organization"]["entitlements"]["gateway"] is True
     assert org.json()["organization"]["entitlements"]["policies"] is False
+    assert org.json()["organization"]["entitlements"]["webhooks"] is False
     assert org.json()["organization"]["entitlements"]["tool_set_limit"] == 1
 
     invited = await client.post(

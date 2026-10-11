@@ -85,7 +85,7 @@ async def _dispatch(session: AsyncSession, entry: AuditLog) -> None:
     if event == "policy_evaluated" and result == "deny":
         await _send_security(session, entry, "deny")
         return
-    if event in {"run_completed", "run_failed", "approval_rejected"}:
+    if event in {"run_completed", "run_failed", "approval_rejected", "approval_expired"}:
         if not entry.run_id or not entry.organization_id:
             return
         outcome = "completed" if event == "run_completed" else "failed"

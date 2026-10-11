@@ -23,6 +23,14 @@ from app.core.enums import (
     RunStatus,
 )
 from app.features.execution.activity.services.audit_service import audit_service
+from app.features.execution.approvals.services.expiration import (
+    arm_pending,
+    arm_resubmit,
+    clamp_minutes,
+    expire_due,
+    expire_if_due,
+    notify_transition,
+)
 from app.features.execution.runs.services.run_service import run_service
 
 settings = get_settings()
@@ -30,6 +38,7 @@ settings = get_settings()
 
 class ApprovalService:
     async def list_approvals(self, session: AsyncSession, organization_id: str) -> list[Approval]:
+        await expire_due(session, organization_id, now=utcnow())
         result = await session.execute(
             select(Approval)
             .options(selectinload(Approval.decisions))
@@ -51,6 +60,7 @@ class ApprovalService:
         run = await session.get(Run, approval.run_id)
         if run is None or run.organization_id != organization_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Approval not found")
+        await expire_if_due(session, approval, utcnow())
         return approval
 
     async def approve(
@@ -118,6 +128,10 @@ class ApprovalService:
         )
 
         if mapped or not settings.in_process_runtime:
+            await arm_resubmit(session, approval, run.organization_id)
+        await notify_transition(session, run.organization_id, "approval.granted", approval, action.tool)
+
+        if mapped or not settings.in_process_runtime:
             run.status = RunStatus.RUNNING
             run.updated_at = utcnow()
             await session.flush()
@@ -151,7 +165,7 @@ class ApprovalService:
             session, approval_id, actor_id, organization_id=organization_id
         )
         if int(approval.required_count or 1) > 1:
-            self._ensure_open(approval)
+            await self._ensure_open(session, approval)
             employee = await self._employee(session, actor_id, organization_id)
             await self._assert_voter(session, approval, employee, actor_id)
         mapped = action.policy_reason in {"tool_set_approval", "saturn_mcp"}
@@ -174,6 +188,7 @@ class ApprovalService:
             result="rejected",
             payload={"approval_id": approval.id, **({"source": "saturn_mcp"} if mapped else {})},
         )
+        await notify_transition(session, run.organization_id, "approval.rejected", approval, action.tool)
         return await run_service.load_run(session, run.id), action
 
     async def _load_pending(
@@ -197,6 +212,8 @@ class ApprovalService:
         approval = result.scalar_one_or_none()
         if approval is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Approval not found")
+        if await expire_if_due(session, approval, utcnow()):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Approval expired")
         if approval.status != ApprovalStatus.PENDING:
             raise HTTPException(status.HTTP_409_CONFLICT, "Approval is not pending")
 
@@ -268,6 +285,8 @@ class ApprovalService:
         approval.execution_state = approval.execution_state or "none"
         policy_id = getattr(decision, "approval_policy_id", None)
         if not policy_id:
+            await arm_pending(session, approval, organization_id)
+            await session.flush()
             return
         policy = await session.get(ApprovalPolicy, policy_id)
         if (
@@ -275,6 +294,8 @@ class ApprovalService:
             or policy.organization_id != organization_id
             or policy.status != "active"
         ):
+            await arm_pending(session, approval, organization_id)
+            await session.flush()
             return
         approval.approval_policy_id = policy.id
         approval.approval_policy_version = policy.version or 1
@@ -300,7 +321,9 @@ class ApprovalService:
             approval.required_count = int(policy.required_count or 1)
             approval.group_id = policy.group_id
         if policy.expires_minutes:
-            approval.expires_at = utcnow() + timedelta(minutes=int(policy.expires_minutes))
+            approval.expires_at = utcnow() + timedelta(minutes=clamp_minutes(int(policy.expires_minutes)))
+        else:
+            await arm_pending(session, approval, organization_id)
         await session.flush()
 
     async def _approve_quorum(
@@ -312,7 +335,7 @@ class ApprovalService:
         agent: Agent,
         actor_id: str,
     ) -> tuple[Run, Action, str, str | None]:
-        self._ensure_open(approval)
+        await self._ensure_open(session, approval)
         employee = await self._employee(session, actor_id, run.organization_id)
         await self._assert_voter(session, approval, employee, actor_id)
         duplicate = await session.scalar(
@@ -377,6 +400,9 @@ class ApprovalService:
             )
         )
         if claimed.rowcount != 1:
+            await session.refresh(approval)
+            if str(getattr(approval.status, "value", approval.status)) == ApprovalStatus.EXPIRED.value:
+                raise HTTPException(status.HTTP_409_CONFLICT, "Approval expired")
             raise HTTPException(status.HTTP_409_CONFLICT, "Execution already claimed")
         approval.status = ApprovalStatus.APPROVED.value
         approval.execution_state = "claimed"
@@ -409,6 +435,7 @@ class ApprovalService:
             result="claimed",
             payload={"approval_id": approval.id, "source": "saturn_mcp"},
         )
+        await notify_transition(session, run.organization_id, "approval.granted", approval, action.tool)
         try:
             await self._execute_claimed(session, approval, action, run, agent, actor_id)
         except HTTPException as exc:
@@ -567,10 +594,8 @@ class ApprovalService:
         await session.flush()
         raise HTTPException(status.HTTP_409_CONFLICT, "Approval no longer matches this operation")
 
-    def _ensure_open(self, approval: Approval) -> None:
-        if approval.expires_at is not None and _as_utc(approval.expires_at) <= utcnow():
-            approval.status = ApprovalStatus.EXPIRED
-            approval.resolved_at = utcnow()
+    async def _ensure_open(self, session: AsyncSession, approval: Approval) -> None:
+        if await expire_if_due(session, approval, utcnow()):
             raise HTTPException(status.HTTP_409_CONFLICT, "Approval expired")
         state = approval.execution_state or "none"
         if state in {"executed", "claimed", "uncertain", "failed"}:

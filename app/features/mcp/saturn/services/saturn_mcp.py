@@ -30,6 +30,23 @@ def _split_remote(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]
     return body, body
 
 
+def _status_text(value: Any) -> str:
+    return value.value if hasattr(value, "value") else str(value or "")
+
+
+def _approval_expired(request_id: Any, approval: Approval, phase: str) -> dict[str, Any]:
+    return rpc_error(
+        request_id,
+        -32006,
+        "approval_expired",
+        {
+            "reason": "APPROVAL_EXPIRED",
+            "phase": phase or "pending",
+            "approval_id": approval.id,
+        },
+    )
+
+
 def rpc_error(request_id: Any, code: int, message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     error: dict[str, Any] = {"code": code, "message": message}
     if data:
@@ -457,12 +474,12 @@ class SaturnMcp:
         action = await session.get(Action, action_id) if action_id else None
         if action is not None:
             approval = await session.scalar(select(Approval).where(Approval.action_id == action.id))
-            expires_at = approval.expires_at if approval is not None else None
-            if expires_at is not None and expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=utcnow().tzinfo)
-            if approval is not None and expires_at is not None and expires_at <= utcnow():
-                approval.status = ApprovalStatus.EXPIRED.value
-                return rpc_error(request_id, -32002, "approval_expired")
+            if approval is not None:
+                from app.features.execution.approvals.services.expiration import expire_if_due
+
+                phase = await expire_if_due(session, approval, utcnow())
+                if phase:
+                    return _approval_expired(request_id, approval, phase)
             if approval is not None and approval.status == ApprovalStatus.APPROVED.value:
                 stored = action.arguments if isinstance(action.arguments, dict) else {}
                 if stored != arguments:
@@ -483,10 +500,17 @@ class SaturnMcp:
                     return rpc_error(request_id, -32005, "execution_in_progress")
                 claimed = await session.execute(
                     update(Approval)
-                    .where(Approval.id == approval.id, Approval.execution_state == "none")
+                    .where(
+                        Approval.id == approval.id,
+                        Approval.status == ApprovalStatus.APPROVED.value,
+                        Approval.execution_state == "none",
+                    )
                     .values(execution_state="claimed")
                 )
                 if claimed.rowcount != 1:
+                    await session.refresh(approval)
+                    if _status_text(approval.status) == ApprovalStatus.EXPIRED.value:
+                        return _approval_expired(request_id, approval, approval.expired_phase or "resubmit")
                     return rpc_error(request_id, -32005, "execution_in_progress")
                 approval.execution_state = "claimed"
                 fresh = await policy_engine.evaluate_named(
@@ -549,9 +573,10 @@ class SaturnMcp:
                     "approval_required",
                     {"approval_id": approval.id, "run_id": action.run_id, "action_id": action.id},
                 )
+            if approval is not None and _status_text(approval.status) == ApprovalStatus.EXPIRED.value:
+                return _approval_expired(request_id, approval, approval.expired_phase or "pending")
             if approval is not None and approval.status in {
                 ApprovalStatus.REJECTED.value,
-                ApprovalStatus.EXPIRED.value,
                 ApprovalStatus.CANCELLED.value,
                 ApprovalStatus.INVALIDATED.value,
             }:
@@ -607,6 +632,10 @@ class SaturnMcp:
                 arguments=arguments,
                 requester_user_id=user.id,
             )
+        else:
+            from app.features.execution.approvals.services.expiration import arm_pending
+
+            await arm_pending(session, approval, agent.organization_id)
         await self._audit(
             session,
             event=AuditEvent.APPROVAL_REQUESTED,

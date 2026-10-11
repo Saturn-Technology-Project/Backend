@@ -36,6 +36,7 @@ class ApprovalPolicyRead(BaseModel):
     requirements: list[ApprovalRequirementRead] = []
     allow_requester: bool
     expires_minutes: int | None = None
+    resubmit_minutes: int | None = None
     version: int
 
 
@@ -46,6 +47,7 @@ class ApprovalPolicyWrite(BaseModel):
     requirements: list[ApprovalRequirementWrite] | None = None
     allow_requester: bool = True
     expires_minutes: int | None = None
+    resubmit_minutes: int | None = None
 
 
 class ApprovalPolicyUpdate(BaseModel):
@@ -57,6 +59,7 @@ class ApprovalPolicyUpdate(BaseModel):
     clear_group: bool = False
     allow_requester: bool | None = None
     expires_minutes: int | None = None
+    resubmit_minutes: int | None = None
 
 
 def serialize_policy(policy: ApprovalPolicy) -> ApprovalPolicyRead:
@@ -76,6 +79,7 @@ def serialize_policy(policy: ApprovalPolicy) -> ApprovalPolicyRead:
         ],
         allow_requester=policy.allow_requester,
         expires_minutes=policy.expires_minutes,
+        resubmit_minutes=policy.resubmit_minutes,
         version=policy.version or 1,
     )
 
@@ -104,6 +108,7 @@ async def create_approval_policy(
         requirements=[item.model_dump() for item in body.requirements] if body.requirements is not None else None,
         allow_requester=body.allow_requester,
         expires_minutes=body.expires_minutes,
+        resubmit_minutes=body.resubmit_minutes,
     )
     return serialize_policy(policy)
 
@@ -130,5 +135,6 @@ async def update_approval_policy(
         clear_group=body.clear_group,
         allow_requester=body.allow_requester,
         expires_minutes=body.expires_minutes,
+        resubmit_minutes=body.resubmit_minutes,
     )
     return serialize_policy(policy)

@@ -307,6 +307,8 @@ class ApprovalRead(ORMModel):
     requirements: list[ApprovalRequirementProgress] = []
     execution_state: str = "none"
     expires_at: datetime | None = None
+    resubmit_expires_at: datetime | None = None
+    expired_phase: str | None = None
 
 
 class ApprovalDecisionRead(BaseModel):
@@ -332,6 +334,7 @@ class EntitlementsRead(BaseModel):
     gateway: bool = True
     tool_set_limit: int | None = 1
     policies: bool = False
+    webhooks: bool = False
     groups: bool = False
     audit: str = "basic"
     audit_days: int = 7

@@ -57,6 +57,7 @@ class AuditEvent(str, Enum):
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_GRANTED = "approval_granted"
     APPROVAL_REJECTED = "approval_rejected"
+    APPROVAL_EXPIRED = "approval_expired"
     APPROVAL_QUORUM = "approval_quorum"
     APPROVAL_INVALIDATED = "approval_invalidated"
     EXECUTION_CLAIMED = "execution_claimed"
