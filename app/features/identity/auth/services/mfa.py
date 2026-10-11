@@ -1,0 +1,344 @@
+from __future__ import annotations
+
+import secrets
+from datetime import timedelta, timezone
+
+from fastapi import HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.ids import new_id, utcnow
+from app.features.identity.auth.models.mfa import EmailCode, LoginChallenge, Passkey
+from app.features.identity.auth.services.auth_service import hash_password, hash_token, verify_password
+from app.models import User
+
+CODE_TTL = timedelta(minutes=10)
+CHALLENGE_TTL = timedelta(minutes=10)
+RESEND_WAIT = timedelta(seconds=60)
+MAX_ATTEMPTS = 5
+
+
+def _as_utc(value):
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _email(value: str) -> str:
+    normalized = value.strip().lower()
+    domain = normalized.split("@")[-1] if "@" in normalized else ""
+    if not domain or "." not in domain or " " in normalized:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email is invalid")
+    return normalized
+
+
+def _name(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > 255:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name is required")
+    return cleaned
+
+
+def _password(value: str) -> str:
+    if len(value) < 8:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters")
+    return value
+
+
+def _new_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+class MfaService:
+    async def request_signup(
+        self,
+        session: AsyncSession,
+        *,
+        name: str,
+        email: str,
+        password: str,
+    ) -> str:
+        cleaned_name = _name(name)
+        normalized = _email(email)
+        secret = _password(password)
+        existing = await session.execute(select(User).where(User.email == normalized))
+        if existing.scalar_one_or_none() is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Email is already used")
+        await self._throttle(session, normalized, "signup")
+        await self._close_open(session, normalized, "signup")
+        code = _new_code()
+        session.add(
+            EmailCode(
+                id=new_id("eml"),
+                email=normalized,
+                purpose="signup",
+                name=cleaned_name,
+                password_hash=hash_password(secret),
+                code_hash=hash_password(code),
+                expires_at=utcnow() + CODE_TTL,
+                attempts=0,
+            )
+        )
+        await session.flush()
+        return code
+
+    async def discard_signup(self, session: AsyncSession, email: str) -> None:
+        record = await self._open_code(session, _email(email), "signup")
+        if record is not None:
+            await session.delete(record)
+            await session.flush()
+
+    async def confirm_signup(
+        self,
+        session: AsyncSession,
+        *,
+        email: str,
+        password: str,
+        code: str,
+    ) -> tuple[str, str, str]:
+        normalized = _email(email)
+        pending = await self._open_code(session, normalized, "signup")
+        now = utcnow()
+        if (
+            pending is None
+            or pending.password_hash is None
+            or _as_utc(pending.expires_at) <= now
+            or pending.attempts >= MAX_ATTEMPTS
+            or not verify_password(password, pending.password_hash)
+        ):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        record = await self._consume_code(session, normalized, "signup", code)
+        if record is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        existing = await session.execute(select(User).where(User.email == normalized))
+        if existing.scalar_one_or_none() is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Email is already used")
+        return record.name or "", normalized, password
+
+    async def request_email_mfa(self, session: AsyncSession, user: User) -> str:
+        await self._throttle(session, user.email, "mfa")
+        await self._close_open(session, user.email, "mfa")
+        code = _new_code()
+        session.add(
+            EmailCode(
+                id=new_id("eml"),
+                email=user.email,
+                purpose="mfa",
+                user_id=user.id,
+                code_hash=hash_password(code),
+                expires_at=utcnow() + CODE_TTL,
+                attempts=0,
+            )
+        )
+        await session.flush()
+        return code
+
+    async def discard_email_mfa(self, session: AsyncSession, user: User) -> None:
+        record = await self._open_code(session, user.email, "mfa")
+        if record is not None:
+            await session.delete(record)
+            await session.flush()
+
+    async def enable_email_mfa(self, session: AsyncSession, user: User, code: str) -> None:
+        record = await self._consume_code(session, user.email, "mfa", code)
+        if record is None or record.user_id != user.id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        user.email_mfa = True
+        await session.flush()
+
+    async def disable_email_mfa(self, session: AsyncSession, user: User) -> None:
+        user.email_mfa = False
+        await session.flush()
+
+    async def factors(self, session: AsyncSession, user: User) -> list[str]:
+        methods: list[str] = []
+        if user.email_mfa:
+            methods.append("email")
+        count = await session.scalar(
+            select(func.count()).select_from(Passkey).where(Passkey.user_id == user.id)
+        )
+        if count:
+            methods.append("passkey")
+        return methods
+
+    async def start_login(
+        self,
+        session: AsyncSession,
+        user: User,
+        *,
+        include_email: bool = False,
+    ) -> tuple[str, list[str], str | None] | None:
+        methods = await self.factors(session, user)
+        if not methods:
+            return None
+        if include_email and "email" not in methods:
+            methods = ["email", *methods]
+        await self._throttle_login(session, user.id)
+        code = _new_code() if "email" in methods else None
+        raw = secrets.token_urlsafe(32)
+        now = utcnow()
+        open_rows = await session.execute(
+            select(LoginChallenge).where(
+                LoginChallenge.user_id == user.id,
+                LoginChallenge.used_at.is_(None),
+            )
+        )
+        for row in open_rows.scalars():
+            row.used_at = now
+        session.add(
+            LoginChallenge(
+                id=new_id("mfa"),
+                user_id=user.id,
+                token_hash=hash_token(raw),
+                code_hash=hash_password(code) if code else None,
+                attempts=0,
+                expires_at=now + CHALLENGE_TTL,
+            )
+        )
+        await session.flush()
+        return raw, methods, code
+
+    async def discard_login(self, session: AsyncSession, token: str) -> None:
+        record = await self._challenge(session, token)
+        if record is not None and record.used_at is None:
+            await session.delete(record)
+            await session.flush()
+
+    async def user_for_challenge(self, session: AsyncSession, token: str) -> User:
+        record = await self._live_challenge(session, token)
+        user = await self._user(session, record.user_id)
+        if user is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sign-in challenge is incorrect or expired")
+        return user
+
+    async def finish_email(self, session: AsyncSession, token: str, code: str) -> User:
+        record = await self._live_challenge(session, token)
+        if record.code_hash is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        if not verify_password(code.strip(), record.code_hash):
+            record.attempts += 1
+            if record.attempts >= MAX_ATTEMPTS:
+                record.used_at = utcnow()
+            await session.flush()
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        user = await self._user(session, record.user_id)
+        if user is None:
+            record.used_at = utcnow()
+            await session.flush()
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        record.used_at = utcnow()
+        await session.flush()
+        return user
+
+    async def finish_passkey(self, session: AsyncSession, token: str) -> User:
+        record = await self._live_challenge(session, token)
+        user = await self._user(session, record.user_id)
+        if user is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sign-in challenge is incorrect or expired")
+        record.used_at = utcnow()
+        await session.flush()
+        return user
+
+    async def _throttle(self, session: AsyncSession, email: str, purpose: str) -> None:
+        recent = await session.execute(
+            select(EmailCode)
+            .where(EmailCode.email == email, EmailCode.purpose == purpose)
+            .order_by(EmailCode.created_at.desc())
+            .limit(1)
+        )
+        last = recent.scalar_one_or_none()
+        if last is not None and utcnow() - _as_utc(last.created_at) < RESEND_WAIT:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Wait a minute before requesting another code",
+            )
+
+    async def _throttle_login(self, session: AsyncSession, user_id: str) -> None:
+        recent = await session.execute(
+            select(LoginChallenge)
+            .where(LoginChallenge.user_id == user_id, LoginChallenge.used_at.is_(None))
+            .order_by(LoginChallenge.created_at.desc())
+            .limit(1)
+        )
+        last = recent.scalar_one_or_none()
+        if last is not None and utcnow() - _as_utc(last.created_at) < RESEND_WAIT:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Wait a minute before requesting another code",
+            )
+
+    async def _close_open(self, session: AsyncSession, email: str, purpose: str) -> None:
+        result = await session.execute(
+            select(EmailCode).where(
+                EmailCode.email == email,
+                EmailCode.purpose == purpose,
+                EmailCode.used_at.is_(None),
+            )
+        )
+        now = utcnow()
+        for record in result.scalars():
+            record.used_at = now
+
+    async def _open_code(self, session: AsyncSession, email: str, purpose: str) -> EmailCode | None:
+        result = await session.execute(
+            select(EmailCode)
+            .where(
+                EmailCode.email == email,
+                EmailCode.purpose == purpose,
+                EmailCode.used_at.is_(None),
+            )
+            .order_by(EmailCode.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def _consume_code(
+        self,
+        session: AsyncSession,
+        email: str,
+        purpose: str,
+        code: str,
+    ) -> EmailCode | None:
+        record = await self._open_code(session, email, purpose)
+        now = utcnow()
+        if record is None or _as_utc(record.expires_at) <= now or record.attempts >= MAX_ATTEMPTS:
+            return None
+        if not verify_password(code.strip(), record.code_hash):
+            record.attempts += 1
+            if record.attempts >= MAX_ATTEMPTS:
+                record.used_at = now
+            await session.flush()
+            return None
+        record.used_at = now
+        await session.flush()
+        return record
+
+    async def _challenge(self, session: AsyncSession, token: str) -> LoginChallenge | None:
+        result = await session.execute(
+            select(LoginChallenge).where(LoginChallenge.token_hash == hash_token(token))
+        )
+        return result.scalar_one_or_none()
+
+    async def _live_challenge(self, session: AsyncSession, token: str) -> LoginChallenge:
+        record = await self._challenge(session, token)
+        if (
+            record is None
+            or record.used_at is not None
+            or _as_utc(record.expires_at) <= utcnow()
+            or record.attempts >= MAX_ATTEMPTS
+        ):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sign-in challenge is incorrect or expired")
+        return record
+
+    async def _user(self, session: AsyncSession, user_id: str) -> User | None:
+        result = await session.execute(
+            select(User).options(selectinload(User.organization)).where(User.id == user_id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None or user.status != "active":
+            return None
+        return user
+
+
+mfa_service = MfaService()

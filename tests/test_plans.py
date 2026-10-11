@@ -111,11 +111,17 @@ async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
 
 
 @pytest.mark.asyncio
-async def test_public_register_creates_a_personal_org(client):
-    created = await client.post(
-        "/auth/register",
-        json={"name": "Mina", "email": "mina@personal.test", "password": "password1"},
-    )
+async def test_public_register_creates_a_personal_org(client, monkeypatch):
+    sent = {}
+
+    async def capture(_email, code, _locale=None):
+        sent["code"] = code
+
+    monkeypatch.setattr("app.features.identity.auth.controllers.auth.send_signup_code", capture)
+    payload = {"name": "Mina", "email": "mina@personal.test", "password": "password1"}
+    requested = await client.post("/auth/register/code", json=payload)
+    assert requested.status_code == 204, requested.text
+    created = await client.post("/auth/register", json={**payload, "code": sent["code"]})
     assert created.status_code == 201, created.text
     body = created.json()
     assert body["token"]
@@ -137,10 +143,7 @@ async def test_public_register_creates_a_personal_org(client):
     )
     assert invited.status_code == 403
 
-    duplicate = await client.post(
-        "/auth/register",
-        json={"name": "Mina", "email": "mina@personal.test", "password": "password1"},
-    )
+    duplicate = await client.post("/auth/register/code", json=payload)
     assert duplicate.status_code == 409
 
     listed = (await client.get("/admin/orgs")).json()

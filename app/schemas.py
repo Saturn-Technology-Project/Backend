@@ -672,6 +672,7 @@ class PasswordChange(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     email: str
+    locale: str | None = None
 
 
 class ResetPasswordRequest(BaseModel):
@@ -683,17 +684,65 @@ class ResetPasswordRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+    locale: str | None = None
+
+
+class SignupCodeRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+    locale: str | None = None
 
 
 class RegisterRequest(BaseModel):
     name: str
     email: str
     password: str
+    code: str
+
+
+class LoginChallengeRequest(BaseModel):
+    challenge: str
+
+
+class LoginEmailRequest(BaseModel):
+    challenge: str
+    code: str
+
+
+class LoginPasskeyRequest(BaseModel):
+    challenge: str
+    credential: dict
+
+
+class MfaCodeRequest(BaseModel):
+    code: str
+
+
+class LocaleRequest(BaseModel):
+    locale: str | None = None
+
+
+class PasskeyCreateRequest(BaseModel):
+    credential: dict
+
+
+class PasskeyRead(BaseModel):
+    id: str
+    created_at: datetime
+
+
+class MfaStatus(BaseModel):
+    email_mfa: bool
+    passkeys: list[PasskeyRead] = Field(default_factory=list)
 
 
 class LoginResponse(BaseModel):
-    token: str
-    user: UserRead
+    token: str | None = None
+    user: UserRead | None = None
+    mfa_required: bool = False
+    challenge: str | None = None
+    methods: list[str] = Field(default_factory=list)
 
 
 class WalletRead(ORMModel):

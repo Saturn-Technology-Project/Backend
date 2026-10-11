@@ -13,4 +13,5 @@ pytest-asyncio==0.25.3
 aiosqlite==0.21.0
 eval-type-backport==0.2.2
 cryptography==50.0.2
+webauthn==3.0.1
 google-cloud-secret-manager==2.31.0

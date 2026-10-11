@@ -17,6 +17,7 @@ from app.features.identity.oauth.models.oauth import OAuthAccess, OAuthClient, O
 from app.features.credentials.vault.models.secret_vault import SecretVault
 from app.features.organization.org.models.organization import Organization
 from app.features.identity.auth.models.password_reset import PasswordReset
+from app.features.identity.auth.models.mfa import EmailCode, LoginChallenge, Passkey, WebAuthnChallenge
 from app.features.billing.payments.models.payment import Payment
 from app.features.policy.policies.models.policy import Policy, PolicyRule
 from app.features.execution.runs.models.run import Run
@@ -33,14 +34,17 @@ __all__ = [
     "AuditLog",
     "AuthSession",
     "OrgCredential",
+    "EmailCode",
     "Employee",
     "Invitation",
+    "LoginChallenge",
     "McpOAuthPending",
     "McpServer",
     "OAuthAccess",
     "OAuthClient",
     "OAuthGrant",
     "Organization",
+    "Passkey",
     "PasswordReset",
     "Payment",
     "Policy",
@@ -51,6 +55,7 @@ __all__ = [
     "ToolSet",
     "ToolSetItem",
     "User",
+    "WebAuthnChallenge",
     "Wallet",
     "agent_mcp_servers",
     "agent_policies",

@@ -7,10 +7,18 @@ from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from app.core.enums import ActorType
+from app.features.execution.activity.services.audit_service import audit_service
 from app.features.identity.auth.controllers.deps import SessionDep
 from app.features.identity.auth.services.auth_service import auth_service
-from app.features.identity.oauth.services.oauth_service import SCOPE, oauth_service, redirect_allowed
+from app.features.identity.auth.services.mailer import mail_locale, send_login_code
+from app.features.identity.auth.services.mfa import mfa_service
+from app.features.identity.oauth.services.oauth_service import ACCESS_TTL, REFRESH_TTL, SCOPE, oauth_service, redirect_allowed
 from app.features.organization.org.services.plans import profile_identity
+from app.models import Agent, Policy, ToolSet, ToolSetItem
 
 router = APIRouter(tags=["oauth"])
 COOKIE = "saturn_oauth"
@@ -43,24 +51,33 @@ def protected_resource(origin: str) -> dict:
     }
 
 
-def _page(title: str, body: str, status_code: int = 200) -> HTMLResponse:
+def _page(title: str, body: str, status_code: int = 200, *, wide: bool = False, lang: str = "zh-Hant") -> HTMLResponse:
+    width = "520px" if wide else "420px"
     html = f"""<!doctype html>
-<html lang="zh-Hant">
+<html lang="{escape(lang)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(title)}</title>
   <style>
     body {{ margin: 0; background: #f7f7f5; color: #111110; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }}
-    main {{ max-width: 420px; margin: 48px auto; padding: 0 20px; }}
-    h1 {{ font-size: 22px; font-weight: 560; letter-spacing: -0.02em; }}
+    main {{ max-width: {width}; margin: 48px auto; padding: 0 20px 48px; }}
+    h1 {{ margin: 8px 0 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }}
+    h2 {{ margin: 22px 0 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8a8a84; }}
     p {{ color: #5c5c57; }}
+    .kicker {{ margin: 0; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #8a8a84; }}
+    .card {{ margin-top: 8px; padding: 12px 14px; border: 1px solid #e6e6e1; border-radius: 10px; background: #fff; }}
+    .card strong {{ display: block; color: #111110; font-size: 14px; }}
+    .card p, .note {{ margin: 4px 0 0; }}
     label {{ display: block; margin-top: 14px; font-size: 12px; color: #5c5c57; }}
     input {{ width: 100%; box-sizing: border-box; margin-top: 6px; height: 36px; border: 1px solid #e6e6e1; border-radius: 8px; background: #fff; padding: 0 10px; }}
+    .legal {{ margin-top: 22px; font-size: 12px; line-height: 1.6; }}
+    .legal a {{ color: #111110; }}
     .row {{ display: flex; gap: 8px; margin-top: 18px; }}
-    button {{ height: 36px; border: 0; border-radius: 8px; padding: 0 14px; background: #171716; color: #f7f7f5; }}
+    .row button {{ flex: 1; }}
+    button {{ height: 36px; border: 0; border-radius: 8px; padding: 0 14px; background: #171716; color: #f7f7f5; cursor: pointer; }}
     button.secondary {{ background: #efefe9; color: #111110; }}
-    code {{ display: block; margin-top: 8px; padding: 8px 10px; border: 1px solid #e6e6e1; border-radius: 8px; background: #fff; word-break: break-all; }}
+    code {{ display: block; margin-top: 8px; padding: 8px 10px; border: 1px solid #e6e6e1; border-radius: 8px; background: #fff; word-break: break-all; color: #111110; }}
   </style>
 </head>
 <body><main>{body}</main></body>
@@ -117,6 +134,138 @@ def _redirect(uri: str, **params: str) -> RedirectResponse:
     query.update({key: value for key, value in params.items() if value})
     target = urlunparse(parsed._replace(query=urlencode(query)))
     return RedirectResponse(target, status_code=303)
+
+
+def _legal_links(locale: str) -> tuple[str, str]:
+    if locale == "en":
+        return "https://saturn.technology/terms", "https://saturn.technology/privacy"
+    return "https://saturn.technology/zh/terms", "https://saturn.technology/zh/privacy"
+
+
+async def _consent_scope(session, user, client_id: str) -> dict:
+    agents = await session.execute(select(Agent).where(Agent.organization_id == user.organization_id))
+    agent = next(
+        (
+            item
+            for item in agents.scalars()
+            if (item.settings or {}).get("origin") == "saturn_mcp"
+            and (item.settings or {}).get("client_id") == client_id
+        ),
+        None,
+    )
+    set_name = None
+    approval_tools = False
+    if agent is not None and agent.tool_set_id:
+        tool_set = await session.get(ToolSet, agent.tool_set_id)
+        if tool_set is not None and tool_set.organization_id == user.organization_id:
+            set_name = tool_set.name
+            items = await session.execute(select(ToolSetItem).where(ToolSetItem.tool_set_id == tool_set.id))
+            approval_tools = any(item.approval for item in items.scalars())
+    policies = await session.execute(
+        select(Policy)
+        .options(selectinload(Policy.agents))
+        .where(Policy.organization_id == user.organization_id)
+    )
+    names: list[str] = []
+    for policy in policies.scalars():
+        if (policy.status or "active").lower() != "active":
+            continue
+        bound = list(policy.agents or [])
+        if agent is None:
+            applies = False
+        elif not bound:
+            applies = True
+        else:
+            applies = any(item.id == agent.id for item in bound)
+        if applies:
+            names.append(policy.name)
+    return {
+        "connected": agent is not None,
+        "set_name": set_name,
+        "policies": names,
+        "approval_tools": approval_tools,
+    }
+
+
+def _consent_body(locale: str, client_name: str, client_id: str, identity: str, scope: dict, fields: dict[str, str], csrf: str) -> str:
+    terms, privacy = _legal_links(locale)
+    hours = max(1, int(ACCESS_TTL.total_seconds() // 3600))
+    days = REFRESH_TTL.days
+    set_name = scope["set_name"]
+    policy_name = "、".join(scope["policies"]) if scope["policies"] else ""
+    if locale == "en":
+        if scope["connected"]:
+            set_label = set_name or "Not assigned"
+            set_detail = (
+                "This agent can use the tools and operations explicitly allowed in this set."
+                if set_name
+                else "No set is assigned. This agent cannot call tools until one is."
+            )
+            policy_label = policy_name or "None applied"
+            approval_detail = "A call runs only when the rules allow it. Anything that needs approval waits for that decision."
+            if scope["approval_tools"]:
+                approval_detail += " Some tools in this set are marked as requiring approval."
+            access = f"""<div class="card"><strong>Set: {escape(set_label)}</strong><p>{escape(set_detail)}</p></div>
+        <div class="card"><strong>Policy: {escape(policy_label)}</strong><p>Saturn checks permission rules, denials, and approval requirements before a tool runs.</p></div>
+        <div class="card"><strong>Approval required</strong><p>{escape(approval_detail)}</p></div>"""
+        else:
+            access = """<div class="card"><strong>Connection only</strong><p>This first authorization does not include a set or a policy. After the agent appears in the console, assign the tools it may use and the policy that applies. Until a set is assigned, this agent cannot call tools.</p></div>"""
+        return f"""<p class="kicker">Connect to Saturn</p>
+        <h1>Agent authorization request</h1>
+        <h2>Requesting agent</h2>
+        <div class="card"><strong>{escape(client_name)}</strong><p>Name supplied by the agent developer. Client {escape(client_id)}</p></div>
+        <h2>Access requested</h2>
+        {access}
+        <h2>Before you connect</h2>
+        <p class="note">Connecting does not grant unlimited access. Saturn checks each tool call against the granted set, the active policy, and the approval rules, and writes the call to the audit log. You can revoke this connection from the console.</p>
+        <p class="note">Access lasts {hours} hour for the access token and {days} days for the refresh token, or until you revoke it.</p>
+        <label>Connecting as</label>
+        <code>{escape(identity)}</code>
+        <p class="legal">By continuing, you acknowledge the <a href="{terms}" target="_blank" rel="noopener">Terms of Service</a> and <a href="{privacy}" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+        <form method="post" action="/oauth/consent">
+          {_hidden(fields)}
+          <input type="hidden" name="csrf" value="{escape(csrf)}">
+          <div class="row">
+            <button class="secondary" type="submit" name="decision" value="deny">Deny</button>
+            <button type="submit" name="decision" value="allow">Authorize agent</button>
+          </div>
+        </form>"""
+    if scope["connected"]:
+        set_label = set_name or "尚未指定"
+        set_detail = (
+            "可使用此 Set 中明確允許的工具與操作。"
+            if set_name
+            else "尚未指定 Set。在指定之前，這個代理人不能呼叫工具。"
+        )
+        policy_label = policy_name or "尚未套用"
+        approval_detail = "符合規則時才執行。需要核准的操作必須先經過核准。"
+        if scope["approval_tools"]:
+            approval_detail += "這個 Set 裡有工具被標成需要核准。"
+        access = f"""<div class="card"><strong>Set：{escape(set_label)}</strong><p>{escape(set_detail)}</p></div>
+    <div class="card"><strong>Policy：{escape(policy_label)}</strong><p>受 Saturn 的權限規則、拒絕條件與核准要求約束。</p></div>
+    <div class="card"><strong>需要核准</strong><p>{escape(approval_detail)}</p></div>"""
+    else:
+        access = """<div class="card"><strong>僅建立連線</strong><p>首次授權還沒有 Set，也還沒有套用 Policy。代理人出現在控制台後，再指定可以使用的工具與要套用的政策。在指定 Set 之前，這個代理人不能呼叫工具。</p></div>"""
+    return f"""<p class="kicker">連接 Saturn</p>
+    <h1>代理人授權請求</h1>
+    <h2>申請連線的代理人</h2>
+    <div class="card"><strong>{escape(client_name)}</strong><p>由代理人開發者提供的名稱。識別碼 {escape(client_id)}</p></div>
+    <h2>要求的存取</h2>
+    {access}
+    <h2>連線之前</h2>
+    <p class="note">連線不代表授予無限制存取權。Saturn 會依照已授予的 Set、有效 Policy 與審批規則檢查每次工具呼叫，並寫入稽核紀錄。你可以在控制台撤銷這次連線。</p>
+    <p class="note">存取權杖 {hours} 小時，重新整理權杖 {days} 天，或直到撤銷。</p>
+    <label>以此身分連線</label>
+    <code>{escape(identity)}</code>
+    <p class="legal">繼續即表示你知悉 <a href="{terms}" target="_blank" rel="noopener">服務條款</a> 與 <a href="{privacy}" target="_blank" rel="noopener">隱私權政策</a>。</p>
+    <form method="post" action="/oauth/consent">
+      {_hidden(fields)}
+      <input type="hidden" name="csrf" value="{escape(csrf)}">
+      <div class="row">
+        <button class="secondary" type="submit" name="decision" value="deny">拒絕</button>
+        <button type="submit" name="decision" value="allow">授權代理人</button>
+      </div>
+    </form>"""
 
 
 @router.get("/.well-known/oauth-protected-resource")
@@ -188,20 +337,13 @@ async def authorize(request: Request, session: SessionDep):
         )
     identity = profile_identity(user.id, user.organization_id, user.organization.kind, user.organization.plan)
     csrf = secrets.token_urlsafe(18)
+    scope = await _consent_scope(session, user, client.id)
+    locale = mail_locale(request.headers.get("accept-language"))
     page = _page(
-        "Connect Agents",
-        f"""<h1>連接代理人</h1>
-        <p>{escape(client.name)} will connect to Saturn MCP as this profile.</p>
-        <label>身分識別碼 Identity</label>
-        <code>{escape(identity)}</code>
-        <form method="post" action="/oauth/consent">
-          {_hidden(fields)}
-          <input type="hidden" name="csrf" value="{escape(csrf)}">
-          <div class="row">
-            <button type="submit" name="decision" value="allow">允許 Allow</button>
-            <button class="secondary" type="submit" name="decision" value="deny">拒絕 Deny</button>
-          </div>
-        </form>""",
+        "Authorize agent" if locale == "en" else "授權代理人",
+        _consent_body(locale, client.name, client.id, identity, scope, fields, csrf),
+        wide=True,
+        lang="en" if locale == "en" else "zh-Hant",
     )
     _set_cookie(page, request, token, csrf)
     return page
@@ -212,9 +354,48 @@ async def oauth_login(request: Request, session: SessionDep):
     form = await _posted(request)
     fields = {key: form.get(key, "") for key in ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type")}
     try:
-        token, _user = await auth_service.login(session, form.get("email", ""), form.get("password", ""))
+        user = await auth_service.authenticate(session, form.get("email", ""), form.get("password", ""))
     except HTTPException:
         return _page("Connect Agents", "<h1>登入失敗</h1><p>Email or password is incorrect.</p>", 401)
+    try:
+        pending = await mfa_service.start_login(session, user, include_email=True)
+    except HTTPException as exc:
+        return _page("Connect Agents", f"<h1>請稍後再試</h1><p>{escape(str(exc.detail))}</p>", exc.status_code)
+    if pending is not None:
+        challenge, _methods, code = pending
+        if code is not None:
+            try:
+                await send_login_code(user.email, code, mail_locale(request.headers.get("accept-language")))
+            except HTTPException as exc:
+                await mfa_service.discard_login(session, challenge)
+                return _page("Connect Agents", f"<h1>無法寄信</h1><p>{escape(str(exc.detail))}</p>", exc.status_code)
+        return _page(
+            "Verify sign-in",
+            f"""<h1>驗證登入</h1>
+            <p>We emailed a sign-in code. Enter it to continue.</p>
+            <form method="post" action="/oauth/login/code">
+              {_hidden(fields)}
+              <input type="hidden" name="challenge" value="{escape(challenge)}">
+              <label>驗證碼 Code<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+              <div class="row"><button type="submit">繼續 Continue</button></div>
+            </form>""",
+        )
+    token, _user = await auth_service.issue_session(session, user)
+    csrf = secrets.token_urlsafe(18)
+    response = RedirectResponse("/oauth/authorize?" + urlencode(fields), status_code=303)
+    _set_cookie(response, request, token, csrf)
+    return response
+
+
+@router.post("/oauth/login/code")
+async def oauth_login_code(request: Request, session: SessionDep):
+    form = await _posted(request)
+    fields = {key: form.get(key, "") for key in ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type")}
+    try:
+        user = await mfa_service.finish_email(session, form.get("challenge", ""), form.get("code", ""))
+    except HTTPException:
+        return _page("Connect Agents", "<h1>驗證失敗</h1><p>That code is incorrect or expired.</p>", 400)
+    token, _user = await auth_service.issue_session(session, user)
     csrf = secrets.token_urlsafe(18)
     response = RedirectResponse("/oauth/authorize?" + urlencode(fields), status_code=303)
     _set_cookie(response, request, token, csrf)
@@ -235,6 +416,23 @@ async def oauth_consent(request: Request, session: SessionDep):
         return _page("Saturn", "<h1>無法連線</h1><p>Sign in again to connect this agent.</p>", 400)
     if form.get("decision", "") != "allow":
         return _redirect(fields["redirect_uri"], error="access_denied", state=fields["state"])
+    scope = await _consent_scope(session, user, client.id)
+    identity = profile_identity(user.id, user.organization_id, user.organization.kind, user.organization.plan)
+    await audit_service.log(
+        session,
+        event="agent_authorized",
+        actor_type=ActorType.USER,
+        actor_id=user.id,
+        organization_id=user.organization_id,
+        result="allow",
+        payload={
+            "client_id": client.id,
+            "client_name": client.name,
+            "tool_set": scope["set_name"],
+            "policies": scope["policies"],
+            "profile_id": identity,
+        },
+    )
     code = await oauth_service.issue_code(
         session,
         client=client,

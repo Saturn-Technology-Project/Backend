@@ -51,7 +51,7 @@ def hash_token(token: str) -> str:
 
 
 class AuthService:
-    async def login(self, session: AsyncSession, email: str, password: str) -> tuple[str, User]:
+    async def authenticate(self, session: AsyncSession, email: str, password: str) -> User:
         normalized = email.strip().lower()
         result = await session.execute(
             select(User)
@@ -65,7 +65,10 @@ class AuthService:
             or not verify_password(password, user.password_hash)
         ):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+        return user
 
+    async def login(self, session: AsyncSession, email: str, password: str) -> tuple[str, User]:
+        user = await self.authenticate(session, email, password)
         return await self.issue_session(session, user)
 
     async def issue_session(self, session: AsyncSession, user: User) -> tuple[str, User]:

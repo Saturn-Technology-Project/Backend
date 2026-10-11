@@ -23,6 +23,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     photo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    email_mfa: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_platform_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     created_at: Mapped[datetime] = mapped_column(

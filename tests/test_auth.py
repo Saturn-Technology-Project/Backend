@@ -1,3 +1,24 @@
+def test_verification_email_uses_one_language():
+    from app.features.identity.auth.services.mailer import _code_message, mail_locale
+
+    assert mail_locale("en-US,en;q=0.9") == "en"
+    assert mail_locale("zh-TW,zh;q=0.9,en;q=0.8") == "zh"
+    assert mail_locale(None) == "zh"
+
+    zh_subject, zh_text, zh_html = _code_message("482193", "signup", "zh")
+    en_subject, en_text, en_html = _code_message("482193", "signup", "en")
+    assert zh_subject == "482193 是你的 Saturn 帳號確認碼"
+    assert "確認你的帳號" in zh_text
+    assert "Confirm your account" not in zh_text
+    assert 'lang="zh-Hant"' in zh_html
+    assert en_subject == "482193 is your Saturn confirmation code"
+    assert "Confirm your account" in en_text
+    assert "確認你的帳號" not in en_text
+    assert 'lang="en"' in en_html
+    assert "482193" in zh_html and "482193" in en_html
+    assert "<script" not in zh_html
+
+
 def test_reset_code_hash_fits_column():
     from app.features.identity.auth.models.password_reset import PasswordReset
     from app.features.identity.auth.services.auth_service import hash_password

@@ -13,23 +13,34 @@ from app.schemas import (
     AcceptInviteRequest,
     EmployeeRead,
     ForgotPasswordRequest,
+    LoginChallengeRequest,
+    LoginEmailRequest,
+    LoginPasskeyRequest,
     LoginRequest,
     LoginResponse,
+    LocaleRequest,
     McpGatewayRead,
+    MfaCodeRequest,
+    MfaStatus,
     OrgUserRead,
+    PasskeyCreateRequest,
+    PasskeyRead,
     PasswordChange,
     PhotoUpdate,
     ProfileUpdate,
     RegisterRequest,
     ResetPasswordRequest,
+    SignupCodeRequest,
     UserRead,
 )
 from app.features.organization.org.services.access import allows, empty_permissions, normalize_permissions
 from app.features.organization.org.services.organization_service import serialize_organization
 from app.features.platform.admin.services.admin_service import admin_service
 from app.features.identity.auth.services.auth_service import auth_service
+from app.features.identity.auth.services.mfa import mfa_service
+from app.features.identity.auth.services.passkeys import passkey_service
 from app.features.identity.auth.services.photo import clean_photo
-from app.features.identity.auth.services.mailer import send_reset_code
+from app.features.identity.auth.services.mailer import send_login_code, send_reset_code, send_signup_code
 from app.features.organization.org.services.mapping_service import mapping_service
 from app.features.mcp.servers.services.mcp_gateway import mcp_gateway
 from app.features.organization.org.services.member_service import member_service
@@ -129,26 +140,137 @@ def _presented_token(request: Request, creds: HTTPAuthorizationCredentials | Non
     return request.cookies.get(COOKIE_NAME, "")
 
 
-@router.post("/register", response_model=LoginResponse, status_code=201)
-async def register(body: RegisterRequest, request: Request, response: Response, session: SessionDep):
-    user = await admin_service.register_personal(
-        session,
-        name=body.name,
-        email=body.email,
-        password=body.password,
-    )
+async def _issue_login(session, request: Request, response: Response, user: User) -> LoginResponse:
     await mapping_service.bind_workspace(session, user)
     token, user = await auth_service.issue_session(session, user)
     set_session_cookie(response, request, token)
     return LoginResponse(token=token, user=await serialize_user(session, user))
 
 
+async def _begin_mfa(session, user: User, locale: str | None) -> LoginResponse | None:
+    pending = await mfa_service.start_login(session, user)
+    if pending is None:
+        return None
+    challenge, methods, code = pending
+    if code is not None:
+        try:
+            await send_login_code(user.email, code, locale)
+        except HTTPException:
+            await mfa_service.discard_login(session, challenge)
+            raise
+    return LoginResponse(mfa_required=True, challenge=challenge, methods=methods)
+
+
+@router.post("/register/code", status_code=204)
+async def register_code(body: SignupCodeRequest, session: SessionDep):
+    code = await mfa_service.request_signup(
+        session,
+        name=body.name,
+        email=body.email,
+        password=body.password,
+    )
+    try:
+        await send_signup_code(body.email.strip().lower(), code, body.locale)
+    except HTTPException:
+        await mfa_service.discard_signup(session, body.email)
+        raise
+
+
+@router.post("/register", response_model=LoginResponse, status_code=201)
+async def register(body: RegisterRequest, request: Request, response: Response, session: SessionDep):
+    name, email, password = await mfa_service.confirm_signup(
+        session,
+        email=body.email,
+        password=body.password,
+        code=body.code,
+    )
+    user = await admin_service.register_personal(
+        session,
+        name=name,
+        email=email,
+        password=password,
+    )
+    return await _issue_login(session, request, response, user)
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest, request: Request, response: Response, session: SessionDep):
-    token, user = await auth_service.login(session, body.email, body.password)
-    await mapping_service.bind_workspace(session, user)
-    set_session_cookie(response, request, token)
-    return LoginResponse(token=token, user=await serialize_user(session, user))
+    user = await auth_service.authenticate(session, body.email, body.password)
+    pending = await _begin_mfa(session, user, body.locale)
+    if pending is not None:
+        return pending
+    return await _issue_login(session, request, response, user)
+
+
+@router.post("/login/email", response_model=LoginResponse)
+async def login_email(body: LoginEmailRequest, request: Request, response: Response, session: SessionDep):
+    user = await mfa_service.finish_email(session, body.challenge, body.code)
+    return await _issue_login(session, request, response, user)
+
+
+@router.post("/login/passkey/options")
+async def login_passkey_options(body: LoginChallengeRequest, request: Request, session: SessionDep):
+    return await passkey_service.authentication_options(session, request, body.challenge)
+
+
+@router.post("/login/passkey", response_model=LoginResponse)
+async def login_passkey(body: LoginPasskeyRequest, request: Request, response: Response, session: SessionDep):
+    user = await passkey_service.authenticate(session, request, body.challenge, body.credential)
+    return await _issue_login(session, request, response, user)
+
+
+@router.get("/mfa", response_model=MfaStatus)
+async def mfa_status(user: CurrentUser, session: SessionDep):
+    records = await passkey_service.list_passkeys(session, user)
+    return MfaStatus(
+        email_mfa=user.email_mfa,
+        passkeys=[PasskeyRead(id=item.id, created_at=item.created_at) for item in records],
+    )
+
+
+@router.post("/mfa/email/code", status_code=204)
+async def mfa_email_code(
+    user: CurrentUser,
+    session: SessionDep,
+    body: LocaleRequest | None = None,
+):
+    code = await mfa_service.request_email_mfa(session, user)
+    try:
+        await send_login_code(user.email, code, None if body is None else body.locale)
+    except HTTPException:
+        await mfa_service.discard_email_mfa(session, user)
+        raise
+
+
+@router.post("/mfa/email", status_code=204)
+async def mfa_email_enable(body: MfaCodeRequest, user: CurrentUser, session: SessionDep):
+    await mfa_service.enable_email_mfa(session, user, body.code)
+
+
+@router.delete("/mfa/email", status_code=204)
+async def mfa_email_disable(user: CurrentUser, session: SessionDep):
+    await mfa_service.disable_email_mfa(session, user)
+
+
+@router.post("/passkeys/options")
+async def passkey_options(request: Request, user: CurrentUser, session: SessionDep):
+    return await passkey_service.registration_options(session, request, user)
+
+
+@router.post("/passkeys", response_model=PasskeyRead, status_code=201)
+async def create_passkey(
+    body: PasskeyCreateRequest,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+):
+    record = await passkey_service.register(session, request, user, body.credential)
+    return PasskeyRead(id=record.id, created_at=record.created_at)
+
+
+@router.delete("/passkeys/{passkey_id}", status_code=204)
+async def delete_passkey(passkey_id: str, user: CurrentUser, session: SessionDep):
+    await passkey_service.delete(session, user, passkey_id)
 
 
 @router.post("/session", status_code=204)
@@ -215,7 +337,7 @@ async def forgot_password(body: ForgotPasswordRequest, session: SessionDep):
     if not code:
         return
     try:
-        await send_reset_code(body.email, code)
+        await send_reset_code(body.email, code, body.locale)
     except HTTPException:
         await auth_service.discard_password_reset(session, body.email)
         raise

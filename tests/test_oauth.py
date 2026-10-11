@@ -57,6 +57,12 @@ async def test_agent_registers_with_oauth_and_binds_its_profile(client):
     assert signed.status_code == 303
     consent = await client.get(signed.headers["location"])
     assert "org_saturn:user_operator" in consent.text
+    assert "授權代理人" in consent.text
+    assert "僅建立連線" in consent.text
+    assert "Set：" not in consent.text
+    assert "Policy：" not in consent.text
+    assert 'type="checkbox"' not in consent.text
+    assert "服務條款" in consent.text
     csrf = re.search(r'name="csrf" value="([^"]+)"', consent.text)
     assert csrf is not None
     allowed = await client.post(
