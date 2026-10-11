@@ -182,6 +182,7 @@ class PolicyRuleIn(BaseModel):
     conditions: list[PolicyConditionIn] = Field(default_factory=list)
     decision: str
     priority: int | None = None
+    approval_policy_id: str | None = None
 
 
 class PolicyRuleRead(ORMModel):
@@ -191,6 +192,7 @@ class PolicyRuleRead(ORMModel):
     conditions: list[dict[str, Any]] = Field(default_factory=list)
     decision: str
     position: int = 0
+    approval_policy_id: str | None = None
 
 
 class PolicyCreate(BaseModel):
@@ -284,6 +286,13 @@ class RunRead(ORMModel):
     updated_at: datetime
 
 
+class ApprovalRequirementProgress(BaseModel):
+    group_id: str
+    group_name: str = ""
+    required_count: int
+    approved_count: int = 0
+
+
 class ApprovalRead(ORMModel):
     id: str
     run_id: str
@@ -293,6 +302,11 @@ class ApprovalRead(ORMModel):
     resolved_by: str | None = None
     created_at: datetime
     resolved_at: datetime | None = None
+    required_count: int = 1
+    approved_count: int = 0
+    requirements: list[ApprovalRequirementProgress] = []
+    execution_state: str = "none"
+    expires_at: datetime | None = None
 
 
 class ApprovalDecisionRead(BaseModel):
@@ -318,6 +332,7 @@ class EntitlementsRead(BaseModel):
     gateway: bool = True
     tool_set_limit: int | None = 1
     policies: bool = False
+    groups: bool = False
     audit: str = "basic"
     audit_days: int = 7
 

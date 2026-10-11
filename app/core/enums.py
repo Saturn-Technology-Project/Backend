@@ -32,6 +32,9 @@ class ApprovalStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+    INVALIDATED = "invalidated"
 
 
 class PolicyDecision(str, Enum):
@@ -54,6 +57,10 @@ class AuditEvent(str, Enum):
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_GRANTED = "approval_granted"
     APPROVAL_REJECTED = "approval_rejected"
+    APPROVAL_QUORUM = "approval_quorum"
+    APPROVAL_INVALIDATED = "approval_invalidated"
+    EXECUTION_CLAIMED = "execution_claimed"
+    GROUP_UPDATED = "group_updated"
     TOOL_EXECUTED = "tool_executed"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"

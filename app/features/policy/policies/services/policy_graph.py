@@ -163,6 +163,11 @@ def compile_definition(definition: dict[str, Any]) -> tuple[list[dict[str, Any]]
                     "classification": classification,
                     "enforcement": {key: enforcement[key] for key in ("rateLimit",) if key in enforcement},
                     "nodeId": decision["id"],
+                    **(
+                        {"approvalPolicyId": str(decision_data.get("approvalPolicyId") or decision_data.get("approval_policy_id")).strip()}
+                        if str(decision_data.get("approvalPolicyId") or decision_data.get("approval_policy_id") or "").strip()
+                        else {}
+                    ),
                 },
             }
         )

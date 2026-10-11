@@ -4,7 +4,7 @@ import hashlib
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -381,6 +381,7 @@ class SaturnMcp:
                 run_id=run_id,
                 action_id=action_id,
                 audit_no=audit_no,
+                decision=decision,
             )
         raw_response = await self._proxy(session, tool, arguments)
         raw_response, result = _split_remote(raw_response)
@@ -420,10 +421,19 @@ class SaturnMcp:
         run_id: str,
         action_id: str,
         audit_no: int,
+        decision=None,
     ) -> dict[str, Any]:
+        from app.features.execution.approvals.services.approval_service import approval_service, parameter_digest
+
         action = await session.get(Action, action_id) if action_id else None
         if action is not None:
             approval = await session.scalar(select(Approval).where(Approval.action_id == action.id))
+            expires_at = approval.expires_at if approval is not None else None
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=utcnow().tzinfo)
+            if approval is not None and expires_at is not None and expires_at <= utcnow():
+                approval.status = ApprovalStatus.EXPIRED.value
+                return rpc_error(request_id, -32002, "approval_expired")
             if approval is not None and approval.status == ApprovalStatus.APPROVED.value:
                 stored = action.arguments if isinstance(action.arguments, dict) else {}
                 if stored != arguments:
@@ -433,6 +443,23 @@ class SaturnMcp:
                         "approval_mismatch",
                         {"reason": "Approved parameters no longer match this call"},
                     )
+                if approval.execution_state == "executed":
+                    cached = action.result if isinstance(action.result, dict) else {}
+                    return rpc_result(request_id, cached)
+                if approval.execution_state == "uncertain":
+                    return rpc_error(request_id, -32005, "execution_uncertain")
+                if approval.execution_state == "failed":
+                    return rpc_error(request_id, -32005, "execution_failed")
+                if approval.execution_state == "claimed":
+                    return rpc_error(request_id, -32005, "execution_in_progress")
+                claimed = await session.execute(
+                    update(Approval)
+                    .where(Approval.id == approval.id, Approval.execution_state == "none")
+                    .values(execution_state="claimed")
+                )
+                if claimed.rowcount != 1:
+                    return rpc_error(request_id, -32005, "execution_in_progress")
+                approval.execution_state = "claimed"
                 fresh = await policy_engine.evaluate_named(
                     session,
                     organization_id=agent.organization_id,
@@ -452,6 +479,7 @@ class SaturnMcp:
                 reply = rpc_result(request_id, result)
                 action.status = ActionStatus.COMPLETED.value
                 action.result = result
+                approval.execution_state = "executed"
                 run = await session.get(Run, action.run_id)
                 if run is not None:
                     run.status = RunStatus.COMPLETED.value
@@ -477,14 +505,28 @@ class SaturnMcp:
                 )
                 return reply
             if approval is not None and approval.status == ApprovalStatus.PENDING.value:
+                if approval.parameter_digest and approval.parameter_digest != parameter_digest(arguments):
+                    approval.status = ApprovalStatus.INVALIDATED.value
+                    action.status = ActionStatus.DENIED.value
+                    return rpc_error(
+                        request_id,
+                        -32004,
+                        "approval_mismatch",
+                        {"reason": "Approved parameters no longer match this call"},
+                    )
                 return rpc_error(
                     request_id,
                     -32001,
                     "approval_required",
                     {"approval_id": approval.id, "run_id": action.run_id, "action_id": action.id},
                 )
-            if approval is not None and approval.status == ApprovalStatus.REJECTED.value:
-                return rpc_error(request_id, -32002, "approval_rejected")
+            if approval is not None and approval.status in {
+                ApprovalStatus.REJECTED.value,
+                ApprovalStatus.EXPIRED.value,
+                ApprovalStatus.CANCELLED.value,
+                ApprovalStatus.INVALIDATED.value,
+            }:
+                return rpc_error(request_id, -32002, f"approval_{approval.status}")
 
         ident = run_id or new_id("run")
         run = await session.get(Run, ident)
@@ -527,6 +569,15 @@ class SaturnMcp:
         )
         session.add(approval)
         await session.flush()
+        if decision is not None:
+            await approval_service.configure_request(
+                session,
+                approval,
+                organization_id=agent.organization_id,
+                decision=decision,
+                arguments=arguments,
+                requester_user_id=user.id,
+            )
         await self._audit(
             session,
             event=AuditEvent.APPROVAL_REQUESTED,

@@ -1,6 +1,11 @@
 from app.features.execution.runs.models.action import Action
 from app.features.agent.agents.models.agent import Agent
-from app.features.execution.approvals.models.approval import Approval
+from app.features.execution.approvals.models.approval import (
+    Approval,
+    ApprovalDecision,
+    ApprovalPolicy,
+    ApprovalRequirement,
+)
 from app.shared.models.associations import (
     agent_mcp_servers,
     agent_policies,
@@ -10,6 +15,7 @@ from app.shared.models.associations import (
 from app.features.execution.activity.models.audit import AuditLog
 from app.features.credentials.vault.models.credential import OrgCredential
 from app.features.organization.org.models.employee import Employee
+from app.features.organization.org.models.group import Group, GroupMember
 from app.features.organization.org.models.invitation import Invitation
 from app.features.mcp.oauth.models.mcp_oauth import McpOAuthPending
 from app.features.mcp.servers.models.mcp_server import McpServer
@@ -30,12 +36,17 @@ __all__ = [
     "Action",
     "Agent",
     "Approval",
+    "ApprovalDecision",
+    "ApprovalPolicy",
+    "ApprovalRequirement",
     "AuditLog",
     "AuthSession",
     "AuthThrottle",
     "OrgCredential",
     "EmailCode",
     "Employee",
+    "Group",
+    "GroupMember",
     "Invitation",
     "LoginChallenge",
     "McpOAuthPending",

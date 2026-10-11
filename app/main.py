@@ -11,12 +11,14 @@ from app.features.agent.agents.routes import router as agents_router
 from app.features.billing.payments.routes import router as payments_router
 from app.features.credentials.vault.routes import router as credentials_router
 from app.features.execution.activity.routes import router as activity_router
+from app.features.execution.approvals.controllers.approval_policies import router as approval_policies_router
 from app.features.execution.approvals.routes import router as approvals_router
 from app.features.execution.runs.routes import router as runs_router
 from app.features.identity.auth.routes import router as auth_router
 from app.features.identity.oauth.routes import router as oauth_router
 from app.features.mcp.saturn.routes import router as saturn_mcp_router
 from app.features.mcp.servers.routes import router as mcp_servers_router
+from app.features.organization.org.controllers.groups import router as groups_router
 from app.features.organization.org.routes import router as org_router
 from app.features.platform.admin.routes import router as admin_router
 from app.features.policy.policies.routes import router as policies_router
@@ -86,6 +88,8 @@ async def unhandled_error(_request: Request, exc: Exception):
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(org_router)
+app.include_router(groups_router)
+app.include_router(approval_policies_router)
 app.include_router(agents_router)
 app.include_router(credentials_router)
 app.include_router(mcp_servers_router)

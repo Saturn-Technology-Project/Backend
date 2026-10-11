@@ -49,6 +49,12 @@ def _rule_payload(rule: PolicyRuleIn, fallback_tool: str | None) -> tuple[str, s
     return tool, condition, structured, decision, rule.priority
 
 
+def _approval_policy_id(rule: PolicyRule) -> str | None:
+    attributes = rule.attributes if isinstance(rule.attributes, dict) else {}
+    raw = attributes.get("approvalPolicyId") or attributes.get("approval_policy_id")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
 def serialize_rule(rule: PolicyRule) -> PolicyRuleRead:
     structured = rule.conditions if isinstance(rule.conditions, list) else []
     if not structured:
@@ -60,6 +66,7 @@ def serialize_rule(rule: PolicyRule) -> PolicyRuleRead:
         conditions=structured,
         decision=rule.decision,
         position=rule.position,
+        approval_policy_id=_approval_policy_id(rule),
     )
 
 
@@ -248,6 +255,7 @@ class PolicyService:
         await session.flush()
         for index, rule in enumerate(rules):
             tool, condition, structured, decision, priority = _rule_payload(rule, fallback_tool)
+            attributes = {"approvalPolicyId": rule.approval_policy_id} if rule.approval_policy_id else None
             session.add(
                 PolicyRule(
                     id=rule.id or new_id("rule"),
@@ -257,6 +265,7 @@ class PolicyService:
                     conditions=structured or None,
                     decision=decision,
                     position=priority if priority is not None else index,
+                    attributes=attributes,
                 )
             )
 

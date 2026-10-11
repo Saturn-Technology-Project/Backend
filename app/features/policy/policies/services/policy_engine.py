@@ -52,6 +52,7 @@ class EvaluationResult:
     policy_version: int | None = None
     matched_rule_id: str | None = None
     reason: str | None = None
+    approval_policy_id: str | None = None
 
 
 def normalize_decision(raw: str) -> PolicyDecision:
@@ -263,6 +264,14 @@ def match_rule(rule: PolicyRule | Any, arguments: dict[str, Any], agent_id: str 
     return evaluate_condition(getattr(rule, "condition", "") or "true", arguments)
 
 
+def _linked_approval_policy(rule: PolicyRule | Any) -> str | None:
+    attributes = getattr(rule, "attributes", None)
+    if not isinstance(attributes, dict):
+        return None
+    raw = attributes.get("approvalPolicyId") or attributes.get("approval_policy_id")
+    return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
+
 def _result_for(rule: PolicyRule | Any, arguments: dict[str, Any]) -> EvaluationResult:
     return EvaluationResult(
         decision=normalize_decision(rule.decision),
@@ -270,6 +279,7 @@ def _result_for(rule: PolicyRule | Any, arguments: dict[str, Any]) -> Evaluation
         policy_id=getattr(rule, "policy_id", None),
         matched_rule_id=getattr(rule, "id", None),
         reason=describe_reason(rule, arguments),
+        approval_policy_id=_linked_approval_policy(rule),
     )
 
 

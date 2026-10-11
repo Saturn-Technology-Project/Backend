@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException, status
 
-PLANS = {"free", "pro", "enterprise"}
+PLANS = {"free", "pro", "team", "enterprise"}
 _ALIASES = {"trial": "free", "starter": "pro"}
 
 
@@ -16,18 +16,24 @@ def canonical_plan(plan: str | None, *, strict: bool = False) -> str:
 
 
 def kind_for_plan(plan: str) -> str:
-    return "organization" if canonical_plan(plan) == "enterprise" else "personal"
+    return "organization" if canonical_plan(plan) in {"team", "enterprise"} else "personal"
 
 
 FREE_AUDIT_DAYS = 7
 PRO_AUDIT_DAYS = 90
 PRO_REQUIRED = "This feature requires Pro"
+GROUPS_REQUIRED = "Groups and multi-member approval require Team"
 FREE_TOOL_SET = "Free includes one Tool Set"
 AUDIT_SEARCH = "Audit search requires Pro"
 
 
 def allows_pro(plan: str | None) -> bool:
-    return canonical_plan(plan) in {"pro", "enterprise"}
+    return canonical_plan(plan) in {"pro", "team", "enterprise"}
+
+
+def allows_groups(plan: str | None) -> bool:
+    """Team and Enterprise are the multi-member plans. Pro stays single approval."""
+    return canonical_plan(plan) in {"team", "enterprise"}
 
 
 def allows_saturn_cloud(plan: str | None) -> bool:
@@ -53,6 +59,7 @@ def entitlements(plan: str | None) -> dict:
         "gateway": allows_saturn_cloud(plan),
         "tool_set_limit": tool_set_limit(plan),
         "policies": pro,
+        "groups": allows_groups(plan),
         "audit": "full" if pro else "basic",
         "audit_days": audit_retention_days(plan),
     }

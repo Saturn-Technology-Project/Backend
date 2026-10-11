@@ -555,10 +555,10 @@ class AdminService:
             resolved_kind = (kind or "").strip().lower() or kind_for_plan(cleaned_plan)
             if resolved_kind not in {"personal", "organization"}:
                 raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Account type must be personal or team")
-            if resolved_kind == "personal" and cleaned_plan == "enterprise":
+            if resolved_kind == "personal" and cleaned_plan in {"team", "enterprise"}:
                 raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "A personal account uses Free or Pro")
-            if resolved_kind == "organization" and cleaned_plan != "enterprise":
-                raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "A team account uses Enterprise")
+            if resolved_kind == "organization" and cleaned_plan not in {"team", "enterprise"}:
+                raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "A team account uses Team or Enterprise")
             organization = Organization(
                 id=new_id("org"),
                 name=(org_name or "").strip() or cleaned_name,

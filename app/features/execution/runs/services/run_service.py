@@ -218,6 +218,16 @@ class RunService:
                 session.add(approval)
                 action.status = ActionStatus.WAITING_APPROVAL
                 await session.flush()
+                from app.features.execution.approvals.services.approval_service import approval_service
+
+                await approval_service.configure_request(
+                    session,
+                    approval,
+                    organization_id=agent.organization_id,
+                    decision=decision,
+                    arguments=action.arguments if isinstance(action.arguments, dict) else {},
+                    requester_user_id=None,
+                )
                 await audit_service.log(
                     session,
                     event=AuditEvent.APPROVAL_REQUESTED,

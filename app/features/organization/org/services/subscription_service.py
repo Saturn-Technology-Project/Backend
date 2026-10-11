@@ -22,6 +22,7 @@ from app.features.organization.org.services.plans import canonical_plan
 PLAN_CATALOG = {
     "free": {"name": "Free", "amount": "0.00"},
     "pro": {"name": "Pro", "amount": "0.00"},
+    "team": {"name": "Team", "amount": "0.00"},
     "enterprise": {"name": "Enterprise", "amount": "0.00"},
 }
 

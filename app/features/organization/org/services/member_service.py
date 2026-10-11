@@ -278,6 +278,10 @@ class MemberService:
 
         org_id = organization_id or actor.organization_id
         employee = await self.require_org_member(session, org_id, employee_id)
+        previous_perms = dict(employee.permissions or {})
+        previous_agents = {agent.id for agent in employee.agents}
+        previous_mcp = {server.id for server in employee.mcp_servers}
+        previous_edit = set(employee.agent_edit_ids or [])
         next_role = employee.role
         next_perms = dict(employee.permissions or {})
         if role is not None or permissions is not None:
@@ -327,9 +331,6 @@ class MemberService:
             assigned = {agent.id for agent in employee.agents}
             employee.agent_edit_ids = [agent_id for agent_id in agent_edit_ids if agent_id in assigned]
         await session.flush()
-        loaded = await self.load_member(session, employee.id)
-        assert loaded is not None
-        return loaded
         reduced = (
             access_reduced(previous_perms, next_perms)
             or next_status == "disabled"
@@ -339,6 +340,9 @@ class MemberService:
         )
         if reduced and employee.user_id:
             await self._revoke_oauth(session, employee.user_id)
+        loaded = await self.load_member(session, employee.id)
+        assert loaded is not None
+        return loaded
 
     async def reset_password(
         self,
@@ -355,11 +359,11 @@ class MemberService:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "User account not found")
         employee.user.password_hash = hash_password(password)
         await self._revoke_sessions(session, employee.user_id)
+        await self._revoke_oauth(session, employee.user_id)
         await session.flush()
         loaded = await self.load_member(session, employee.id)
         assert loaded is not None
         return loaded
-        await self._revoke_oauth(session, employee.user_id)
 
     async def _revoke_sessions(self, session: AsyncSession, user_id: str) -> None:
         result = await session.execute(
@@ -371,6 +375,11 @@ class MemberService:
         for record in result.scalars():
             record.revoked_at = now
         await session.flush()
+
+    async def _revoke_oauth(self, session: AsyncSession, user_id: str) -> None:
+        from app.features.identity.oauth.services.oauth_service import oauth_service
+
+        await oauth_service.revoke_user_tokens(session, user_id)
 
 
 member_service = MemberService()
