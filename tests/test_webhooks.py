@@ -235,7 +235,7 @@ async def test_delivery_signs_the_body_and_retries_only_retryable_failures(clien
 
     again, retries = await _endpoint(client, monkeypatch, [(500, ""), (429, ""), (None, "timeout"), (200, "")])
     calls, access, agent_id = await _deferred(client, monkeypatch)
-    pending = await _request(client, access, agent_id, {"amount": 5}, action="act_retry")
+    pending = await _request(client, access, agent_id, {"amount": 5})
     assert pending["error"]["code"] == -32001
     approved = await client.post(f"/approvals/{pending['error']['data']['approval_id']}/approve")
     assert approved.status_code == 200, approved.text
@@ -251,7 +251,7 @@ async def test_delivery_signs_the_body_and_retries_only_retryable_failures(clien
     await client.patch(f"/org/webhooks/{again['id']}", json={"enabled": False})
 
     permanent, permanent_seen = await _endpoint(client, monkeypatch, [(400, "no"), (200, "")])
-    pending = await _request(client, access, agent_id, {"amount": 6}, action="act_permanent")
+    pending = await _request(client, access, agent_id, {"amount": 6})
     await client.post(f"/approvals/{pending['error']['data']['approval_id']}/reject")
     await client.post("/org/webhooks/dispatch")
     await client.post("/org/webhooks/dispatch")
@@ -268,7 +268,7 @@ async def test_delivery_signs_the_body_and_retries_only_retryable_failures(clien
 async def test_redirect_is_not_followed(client, monkeypatch):
     _created, seen = await _endpoint(client, monkeypatch, [(302, "redirect not followed")])
     calls, access, agent_id = await _deferred(client, monkeypatch)
-    pending = await _request(client, access, agent_id, {"amount": 1}, action="act_redirect")
+    pending = await _request(client, access, agent_id, {"amount": 1})
     await client.post(f"/approvals/{pending['error']['data']['approval_id']}/approve")
     await client.post("/org/webhooks/dispatch")
     await client.post("/org/webhooks/dispatch")
@@ -278,7 +278,7 @@ async def test_redirect_is_not_followed(client, monkeypatch):
 async def test_granted_webhook_waits_for_quorum_and_is_not_duplicated(client, monkeypatch):
     created, seen = await _endpoint(client, monkeypatch, [(200, "")])
     calls, people, access, agent_id, _policy, _group = await _quorum_tool(client, monkeypatch)
-    pending = await _request(client, access, agent_id, {"amount": 5}, action="act_quorum")
+    pending = await _request(client, access, agent_id, {"amount": 5})
     approval_id = pending["error"]["data"]["approval_id"]
     first = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[0][1]))
     assert first.json()["status"] == "pending"
@@ -304,7 +304,7 @@ async def test_pending_and_resubmit_expiration(client, monkeypatch):
     capped = await client.patch("/org/approval-window", json={"pending_ttl_minutes": 10080, "resubmit_ttl_minutes": 60})
     assert capped.status_code == 200, capped.text
     calls, access, agent_id = await _deferred(client, monkeypatch, expires_minutes=60, resubmit_minutes=15)
-    early = await _request(client, access, agent_id, {"amount": 5}, action="act_early")
+    early = await _request(client, access, agent_id, {"amount": 5})
     early_id = early["error"]["data"]["approval_id"]
     early_row = await _load(client, early_id)
     created_at = _parse(early_row["created_at"])
@@ -323,22 +323,22 @@ async def test_pending_and_resubmit_expiration(client, monkeypatch):
     assert timedelta(minutes=14) < resubmit_at - resolved_at <= timedelta(minutes=15, seconds=5)
 
     _freeze(monkeypatch, resubmit_at - timedelta(seconds=2))
-    ran = await _request(client, access, agent_id, {"amount": 5}, action="act_early")
+    ran = await _request(client, access, agent_id, {"amount": 5}, run_id=early["error"]["data"]["saturnRunId"])
     assert "result" in ran
     assert calls["n"] == 1
     _thaw(monkeypatch)
-    again = await _request(client, access, agent_id, {"amount": 5}, action="act_early")
+    again = await _request(client, access, agent_id, {"amount": 5}, run_id=early["error"]["data"]["saturnRunId"])
     assert "result" in again
     assert calls["n"] == 1
 
-    mismatch = await _request(client, access, agent_id, {"amount": 8}, action="act_mismatch")
+    mismatch = await _request(client, access, agent_id, {"amount": 8})
     mismatch_id = mismatch["error"]["data"]["approval_id"]
     assert (await client.post(f"/approvals/{mismatch_id}/approve")).status_code == 200
-    mismatched = await _request(client, access, agent_id, {"amount": 9}, action="act_mismatch")
+    mismatched = await _request(client, access, agent_id, {"amount": 9}, run_id=mismatch["error"]["data"]["saturnRunId"])
     assert mismatched["error"]["code"] == -32004
     assert calls["n"] == 1
 
-    pending = await _request(client, access, agent_id, {"amount": 3}, action="act_pending_exp")
+    pending = await _request(client, access, agent_id, {"amount": 3})
     pending_id = pending["error"]["data"]["approval_id"]
     pending_row = await _load(client, pending_id)
     _freeze(monkeypatch, _parse(pending_row["expires_at"]))
@@ -347,18 +347,18 @@ async def test_pending_and_resubmit_expiration(client, monkeypatch):
     _thaw(monkeypatch)
     revived = await client.post(f"/approvals/{pending_id}/approve")
     assert revived.status_code == 409
-    expired_call = await _request(client, access, agent_id, {"amount": 3}, action="act_pending_exp")
+    expired_call = await _request(client, access, agent_id, {"amount": 3}, run_id=pending["error"]["data"]["saturnRunId"])
     assert expired_call["error"]["code"] == -32006
     assert expired_call["error"]["data"]["reason"] == "APPROVAL_EXPIRED"
     assert expired_call["error"]["data"]["phase"] == "pending"
     assert calls["n"] == 1
 
-    waiting = await _request(client, access, agent_id, {"amount": 4}, action="act_resubmit_exp")
+    waiting = await _request(client, access, agent_id, {"amount": 4})
     waiting_id = waiting["error"]["data"]["approval_id"]
     assert (await client.post(f"/approvals/{waiting_id}/approve")).status_code == 200
     waiting_row = await _load(client, waiting_id)
     _freeze(monkeypatch, _parse(waiting_row["resubmit_expires_at"]))
-    blocked = await _request(client, access, agent_id, {"amount": 4}, action="act_resubmit_exp")
+    blocked = await _request(client, access, agent_id, {"amount": 4}, run_id=waiting["error"]["data"]["saturnRunId"])
     assert blocked["error"]["code"] == -32006
     assert blocked["error"]["data"]["phase"] == "resubmit"
     assert calls["n"] == 1
@@ -372,22 +372,21 @@ async def test_pending_and_resubmit_expiration(client, monkeypatch):
         headers={
             "Authorization": f"Bearer {access}",
             "X-Saturn-Agent-Id": agent_id,
-            "X-Saturn-Action-Id": "act_missing",
         },
     )
     assert unknown.json()["error"]["code"] == -32003
-    rejected = await _request(client, access, agent_id, {"amount": 11}, action="act_reject")
+    rejected = await _request(client, access, agent_id, {"amount": 11})
     rejected_id = rejected["error"]["data"]["approval_id"]
     assert (await client.post(f"/approvals/{rejected_id}/reject")).status_code == 200
-    rejected_call = await _request(client, access, agent_id, {"amount": 11}, action="act_reject")
+    rejected_call = await _request(client, access, agent_id, {"amount": 11}, run_id=rejected["error"]["data"]["saturnRunId"])
     assert rejected_call["error"]["code"] == -32002
-    assert rejected_call["error"]["message"] == "approval_rejected"
+    assert rejected_call["error"]["message"].startswith("approval_rejected")
 
 
 async def test_expired_event_is_emitted_once(client, monkeypatch):
     created, seen = await _endpoint(client, monkeypatch, [(200, ""), (200, "")])
     _calls, access, agent_id = await _deferred(client, monkeypatch, expires_minutes=30)
-    pending = await _request(client, access, agent_id, {"amount": 2}, action="act_once")
+    pending = await _request(client, access, agent_id, {"amount": 2})
     approval_id = pending["error"]["data"]["approval_id"]
     row = await _load(client, approval_id)
     _freeze(monkeypatch, _parse(row["expires_at"]))
@@ -405,12 +404,12 @@ async def test_expired_event_is_emitted_once(client, monkeypatch):
 
 async def test_concurrent_resubmit_executes_once(client, monkeypatch):
     calls, access, agent_id = await _deferred(client, monkeypatch)
-    pending = await _request(client, access, agent_id, {"amount": 5}, action="act_race")
+    pending = await _request(client, access, agent_id, {"amount": 5})
     approval_id = pending["error"]["data"]["approval_id"]
     assert (await client.post(f"/approvals/{approval_id}/approve")).status_code == 200
 
     async def resubmit():
-        return await _request(client, access, agent_id, {"amount": 5}, action="act_race")
+        return await _request(client, access, agent_id, {"amount": 5}, run_id=pending["error"]["data"]["saturnRunId"])
 
     results = await asyncio.gather(resubmit(), resubmit(), return_exceptions=True)
     assert calls["n"] == 1

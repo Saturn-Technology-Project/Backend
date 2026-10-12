@@ -101,20 +101,21 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _request(client, access, agent_id, arguments, *, action="act_pay"):
+async def _request(client, access, agent_id, arguments, *, run_id=""):
+    payload = dict(arguments)
+    if run_id:
+        payload["saturnRunId"] = run_id
     held = await client.post(
         "/mcp",
         json={
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": {"name": "pay.send", "arguments": arguments},
+            "params": {"name": "pay.send", "arguments": payload},
         },
         headers={
             "Authorization": f"Bearer {access}",
             "X-Saturn-Agent-Id": agent_id,
-            "X-Saturn-Run-Id": "run_pay",
-            "X-Saturn-Action-Id": action,
         },
     )
     assert held.status_code == 200, held.text
@@ -124,7 +125,7 @@ async def _request(client, access, agent_id, arguments, *, action="act_pay"):
 async def test_two_distinct_approvals_execute_once(client, monkeypatch):
     calls, people, access, agent_id, _policy, _group = await _quorum_tool(client, monkeypatch)
     body = await _request(client, access, agent_id, {"amount": 900})
-    assert body["error"]["message"] == "approval_required"
+    assert body["error"]["message"].startswith("approval_required")
     approval_id = body["error"]["data"]["approval_id"]
     assert calls["n"] == 0
 
@@ -155,7 +156,7 @@ async def test_two_distinct_approvals_execute_once(client, monkeypatch):
     assert second.json()["status"] == "completed"
     assert calls["n"] == 1
 
-    resumed = await _request(client, access, agent_id, {"amount": 900})
+    resumed = await _request(client, access, agent_id, {"amount": 900}, run_id=body["error"]["data"]["saturnRunId"])
     assert resumed["result"]["tool"] == "pay.send"
     assert calls["n"] == 1
 
@@ -191,26 +192,26 @@ async def test_removed_member_vote_no_longer_counts(client, monkeypatch):
 
 async def test_reject_cancel_expiry_and_mismatch_do_not_execute(client, monkeypatch):
     calls, people, access, agent_id, policy_id, _group = await _quorum_tool(client, monkeypatch)
-    rejected_body = await _request(client, access, agent_id, {"amount": 1}, action="act_reject")
+    rejected_body = await _request(client, access, agent_id, {"amount": 1})
     rejected_id = rejected_body["error"]["data"]["approval_id"]
     denied = await client.post(f"/approvals/{rejected_id}/reject", headers=_auth(people[0][1]))
     assert denied.status_code == 200, denied.text
     later = await client.post(f"/approvals/{rejected_id}/approve", headers=_auth(people[1][1]))
     assert later.status_code == 409
 
-    cancelled_body = await _request(client, access, agent_id, {"amount": 2}, action="act_cancel")
+    cancelled_body = await _request(client, access, agent_id, {"amount": 2})
     cancelled_id = cancelled_body["error"]["data"]["approval_id"]
     cancelled = await client.post(f"/approvals/{cancelled_id}/cancel")
     assert cancelled.status_code == 200, cancelled.text
     assert (await client.post(f"/approvals/{cancelled_id}/approve", headers=_auth(people[0][1]))).status_code == 409
 
-    changed = await _request(client, access, agent_id, {"amount": 3}, action="act_change")
+    changed = await _request(client, access, agent_id, {"amount": 3})
     changed_id = changed["error"]["data"]["approval_id"]
-    mismatched = await _request(client, access, agent_id, {"amount": 4}, action="act_change")
+    mismatched = await _request(client, access, agent_id, {"amount": 4}, run_id=changed["error"]["data"]["saturnRunId"])
     assert mismatched["error"]["message"] == "approval_mismatch"
     assert (await client.post(f"/approvals/{changed_id}/approve", headers=_auth(people[0][1]))).status_code == 409
 
-    stale_body = await _request(client, access, agent_id, {"amount": 5}, action="act_stale")
+    stale_body = await _request(client, access, agent_id, {"amount": 5})
     stale_id = stale_body["error"]["data"]["approval_id"]
     recorded = await client.post(f"/approvals/{stale_id}/approve", headers=_auth(people[0][1]))
     assert recorded.json()["status"] == "pending"
@@ -225,7 +226,7 @@ async def test_expired_and_uncertain_upstream_do_not_retry(client, monkeypatch):
     calls, people, access, agent_id, _policy, _group = await _quorum_tool(
         client, monkeypatch, expires_minutes=30
     )
-    expired_body = await _request(client, access, agent_id, {"amount": 8}, action="act_exp")
+    expired_body = await _request(client, access, agent_id, {"amount": 8})
     expired_id = expired_body["error"]["data"]["approval_id"]
     from app.features.execution.approvals.services import approval_service as approval_module
 
@@ -240,13 +241,13 @@ async def test_expired_and_uncertain_upstream_do_not_retry(client, monkeypatch):
         raise TimeoutError("upstream timed out")
 
     monkeypatch.setattr("app.features.mcp.saturn.services.saturn_mcp.call_remote_tool", timeout)
-    uncertain_body = await _request(client, access, agent_id, {"amount": 9}, action="act_uncertain")
+    uncertain_body = await _request(client, access, agent_id, {"amount": 9})
     uncertain_id = uncertain_body["error"]["data"]["approval_id"]
     assert (await client.post(f"/approvals/{uncertain_id}/approve", headers=_auth(people[0][1]))).json()["status"] == "pending"
     failed = await client.post(f"/approvals/{uncertain_id}/approve", headers=_auth(people[1][1]))
     assert failed.status_code == 409, failed.text
     assert calls["n"] == 1
-    retry = await _request(client, access, agent_id, {"amount": 9}, action="act_uncertain")
+    retry = await _request(client, access, agent_id, {"amount": 9}, run_id=uncertain_body["error"]["data"]["saturnRunId"])
     assert retry["error"]["message"] == "execution_uncertain"
     assert calls["n"] == 1
 
@@ -387,8 +388,8 @@ async def test_payment_needs_finance_and_admin(client, monkeypatch):
     assert opened.status_code == 200, opened.text
     agent_id = next(item["id"] for item in (await client.get("/agents")).json() if item["name"] == "Pay Agent")
     assert (await client.patch(f"/agents/{agent_id}", json={"tool_set_id": created.json()["id"]})).status_code == 200
-    body = await _request(client, access, agent_id, {"amount": 900}, action="act_split")
-    assert body["error"]["message"] == "approval_required"
+    body = await _request(client, access, agent_id, {"amount": 900})
+    assert body["error"]["message"].startswith("approval_required")
     approval_id = body["error"]["data"]["approval_id"]
 
     finance_only = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[1][1]))
@@ -415,7 +416,7 @@ async def test_payment_needs_finance_and_admin(client, monkeypatch):
     assert second_finance.status_code == 200, second_finance.text
     assert second_finance.json()["status"] == "completed"
     assert calls["n"] == 1
-    resumed = await _request(client, access, agent_id, {"amount": 900}, action="act_split")
+    resumed = await _request(client, access, agent_id, {"amount": 900}, run_id=body["error"]["data"]["saturnRunId"])
     assert resumed["result"]["tool"] == "pay.send"
     assert calls["n"] == 1
 

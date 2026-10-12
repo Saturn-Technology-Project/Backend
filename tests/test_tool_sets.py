@@ -142,11 +142,13 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
     assert listed_tools.status_code == 200, listed_tools.text
     names = [item["name"] for item in listed_tools.json()["result"]["tools"]]
     assert names == ["repo.delete", "repo.read"]
+    delete_tool = next(item for item in listed_tools.json()["result"]["tools"] if item["name"] == "repo.delete")
+    assert "saturnRunId" in delete_tool["inputSchema"]["properties"]
 
     allowed = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "repo.read", "arguments": {"repo": "saturn"}}},
-        headers={**headers, "X-Saturn-Run-Id": "run_map_1", "X-Saturn-Action-Id": "act_map_read"},
+        headers=headers,
     )
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["result"]["echo"] == {"repo": "saturn"}
@@ -162,20 +164,27 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
     held = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "repo.delete", "arguments": {"repo": "saturn"}}},
-        headers={**headers, "X-Saturn-Run-Id": "run_map_2", "X-Saturn-Action-Id": "act_map_delete"},
+        headers=headers,
     )
     assert held.status_code == 200, held.text
     error = held.json()["error"]
-    assert error["message"] == "approval_required"
+    assert error["message"].startswith("approval_required")
+    assert "saturnRunId" in error["message"]
     approval_id = error["data"]["approval_id"]
+    run_id = error["data"]["saturnRunId"]
 
     decision = await client.post(f"/approvals/{approval_id}/approve")
     assert decision.status_code == 200, decision.text
 
     resumed = await client.post(
         "/mcp",
-        json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "repo.delete", "arguments": {"repo": "saturn"}}},
-        headers={**headers, "X-Saturn-Run-Id": "run_map_2", "X-Saturn-Action-Id": "act_map_delete"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "repo.delete", "arguments": {"repo": "saturn", "saturnRunId": run_id}},
+        },
+        headers=headers,
     )
     assert resumed.status_code == 200, resumed.text
     assert resumed.json()["result"]["tool"] == "repo.delete"
@@ -222,6 +231,92 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
     blocked = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "repo.read", "arguments": {"repo": "saturn"}}},
-        headers={**headers, "X-Saturn-Run-Id": "run_map_3", "X-Saturn-Action-Id": "act_map_denied"},
+        headers=headers,
     )
     assert blocked.json()["error"]["message"] == "policy_denied"
+
+
+async def test_agent_resubmits_by_saturn_run_id_argument(client, monkeypatch):
+    seen = {}
+
+    async def listed(endpoint, authorization=""):
+        return [{"name": "repo.delete", "description": "Delete", "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}}}}]
+
+    async def called(endpoint, name, arguments, authorization=""):
+        seen["arguments"] = arguments
+        return {"content": [{"type": "text", "text": "ok"}], "echo": arguments}
+
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.saturn.services.saturn_mcp.call_remote_tool", called)
+    connected = await client.post(
+        "/mcp-servers",
+        json={"name": "GitHub", "endpoint": "https://api.githubcopilot.com/mcp", "authorization": "token-1"},
+    )
+    tool_id = next(item["id"] for item in connected.json()["catalog"] if item["name"] == "repo.delete")
+    created = await client.post("/tool-sets", json={"name": "Deletes", "items": [{"tool_id": tool_id, "approval": True}]})
+    access = await oauth_access(client, "Argument Agent")
+    await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {access}"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    )
+    agent_id = next(item["id"] for item in (await client.get("/agents")).json() if item["name"] == "Argument Agent")
+    await client.patch(f"/agents/{agent_id}", json={"tool_set_id": created.json()["id"]})
+    headers = {"Authorization": f"Bearer {access}"}
+    first = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "repo.delete", "arguments": {"repo": "saturn"}}},
+        headers=headers,
+    )
+    error = first.json()["error"]
+    assert error["message"].startswith("approval_required")
+    run_id = error["data"]["saturnRunId"]
+    assert run_id
+    assert error["data"]["argument"] == "saturnRunId"
+    approval_id = error["data"]["approval_id"]
+    again = await client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "repo.delete", "arguments": {"repo": "saturn", "saturnRunId": run_id}},
+        },
+        headers=headers,
+    )
+    assert again.json()["error"]["data"]["approval_id"] == approval_id
+    assert (await client.post(f"/approvals/{approval_id}/approve")).status_code == 200
+    resumed = await client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "repo.delete", "arguments": {"repo": "saturn", "saturnRunId": run_id}},
+        },
+        headers=headers,
+    )
+    assert resumed.json()["result"]["echo"] == {"repo": "saturn"}
+    assert "saturnRunId" not in seen["arguments"]
+
+    rejected = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "repo.delete", "arguments": {"repo": "other"}}},
+        headers=headers,
+    )
+    rejected_error = rejected.json()["error"]
+    rejected_id = rejected_error["data"]["approval_id"]
+    rejected_run = rejected_error["data"]["saturnRunId"]
+    assert (await client.post(f"/approvals/{rejected_id}/reject")).status_code == 200
+    repeated = await client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {"name": "repo.delete", "arguments": {"repo": "other", "saturnRunId": rejected_run}},
+        },
+        headers=headers,
+    )
+    assert repeated.json()["error"]["message"].startswith("approval_rejected")
+    assert repeated.json()["error"]["data"]["approval_id"] == rejected_id

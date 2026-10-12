@@ -144,7 +144,7 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
     assert stolen.json()["error"]["message"] == "Unknown agent"
     allowed = await client.post(
         "/mcp",
-        headers={**agent_headers, "X-Saturn-Run-Id": "run_free_1", "X-Saturn-Action-Id": "act_free_read"},
+        headers=agent_headers,
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "repo.read", "arguments": {"repo": "saturn"}}},
     )
     assert allowed.status_code == 200, allowed.text
@@ -152,10 +152,10 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
 
     held = await client.post(
         "/mcp",
-        headers={**agent_headers, "X-Saturn-Run-Id": "run_free_2", "X-Saturn-Action-Id": "act_free_delete"},
+        headers=agent_headers,
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "repo.delete", "arguments": {"repo": "saturn"}}},
     )
-    assert held.json()["error"]["message"] == "approval_required"
+    assert held.json()["error"]["message"].startswith("approval_required")
 
     hidden = await client.post(
         "/mcp",

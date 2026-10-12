@@ -10,7 +10,7 @@ Webhooks are included with Pro, Team, and Enterprise. Saturn notifies an organiz
 | `approval.rejected` | A reviewer rejects the request. |
 | `approval.expired` | The pending request or the approved resubmission window has passed. `data.phase` is `pending` or `resubmit`. |
 
-The same transition is stored once per endpoint. Delivering it again does not approve, reject, or execute the tool. An agent that does not receive webhooks still resubmits the original tool call.
+The same transition is stored once per endpoint. Delivering it again does not approve, reject, or execute the tool. An agent that does not receive webhooks resubmits by calling the same tool with the same arguments and `saturnRunId` set to the `run_id` from the error. That field is on every tool schema Saturn exposes. Omitting it starts a new request. Saturn does not read a run id or an action id from request headers.
 
 Schema: `saturn.webhook.v1`.
 
@@ -62,7 +62,7 @@ Saturn does not follow redirects. Endpoints must be public HTTPS. Loopback, link
 
 Pending approval defaults to 24 hours from creation. After approval, a deferred tool call defaults to 24 hours from the approval time. Both can be set from 1 minute through 7 days on `PATCH /org/approval-window`. An approval policy can set a shorter `expires_minutes` or `resubmit_minutes`.
 
-An expired approval cannot be approved or executed. The agent receives Saturn error `-32006` with `data.reason` `APPROVAL_EXPIRED` and `data.phase` `pending` or `resubmit`. This code is Saturn-specific. It is not standard MCP. Rejection remains `-32002`.
+An expired approval cannot be approved or executed. The agent receives Saturn error `-32006` with `data.reason` `APPROVAL_EXPIRED` and `data.phase` `pending` or `resubmit`. This code is Saturn-specific. It is not standard MCP. A call waiting for approval is `-32001`, and the message tells the agent to repeat the tool with `saturnRunId`. Rejection is `-32002`. Retrying a rejected `saturnRunId` returns the same rejection; leaving the field out starts a separate request.
 
 ## Delivery
 

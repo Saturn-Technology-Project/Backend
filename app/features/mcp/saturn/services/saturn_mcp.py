@@ -34,16 +34,101 @@ def _status_text(value: Any) -> str:
     return value.value if hasattr(value, "value") else str(value or "")
 
 
-def _approval_expired(request_id: Any, approval: Approval, phase: str) -> dict[str, Any]:
-    return rpc_error(
+SATURN_RUN_ARGUMENT = "saturnRunId"
+
+
+def _with_run_argument(schema: dict[str, Any] | None) -> dict[str, Any]:
+    base = dict(schema) if isinstance(schema, dict) else {}
+    if base.get("type") not in {None, "object"}:
+        return base
+    properties = dict(base.get("properties") or {})
+    properties.setdefault(
+        SATURN_RUN_ARGUMENT,
+        {
+            "type": "string",
+            "description": (
+                "Leave this out on the first call. If Saturn returns approval_required, wait for approval, "
+                "then call this same tool again with the same arguments and set saturnRunId to the value in that error. "
+                "If Saturn returns approval_rejected for that id, leave saturnRunId out to start a separate request."
+            ),
+        },
+    )
+    base["type"] = "object"
+    base["properties"] = properties
+    return base
+
+
+def _take_run_argument(arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    clean = dict(arguments)
+    raw = clean.pop(SATURN_RUN_ARGUMENT, None)
+    return clean, raw.strip() if isinstance(raw, str) else ""
+
+
+def _approval_notice(
+    request_id: Any,
+    code: int,
+    message: str,
+    approval: Approval,
+    tool_name: str,
+    *,
+    status: str,
+    reason: str = "",
+    phase: str = "",
+) -> dict[str, Any]:
+    data = {
+        "approval_id": approval.id,
+        "run_id": approval.run_id,
+        "action_id": approval.action_id,
+        "tool": tool_name,
+        "status": status,
+        "saturnRunId": approval.run_id,
+        "argument": SATURN_RUN_ARGUMENT,
+    }
+    if reason:
+        data["reason"] = reason
+    if phase:
+        data["phase"] = phase
+    return rpc_error(request_id, code, message, data)
+
+
+def _approval_required_message(tool_name: str, run_id: str) -> str:
+    return (
+        "approval_required. A person must approve this before it runs. "
+        f"Do not start a new task. After it is approved, call {tool_name} again with the same arguments "
+        f'and set saturnRunId to "{run_id}". saturnRunId is a field on this tool. '
+        "Leaving it out starts a different request."
+    )
+
+
+def _approval_rejected_message(run_id: str) -> str:
+    return (
+        f'approval_rejected. A person rejected saturnRunId "{run_id}". '
+        "Do not call this tool again with that saturnRunId. "
+        "To ask again, call it once more and leave saturnRunId out."
+    )
+
+
+def _approval_expired(request_id: Any, approval: Approval, phase: str, tool_name: str = "") -> dict[str, Any]:
+    phase = phase or "pending"
+    if phase == "resubmit":
+        message = (
+            f'approval_expired. The resubmit window for saturnRunId "{approval.run_id}" has passed. '
+            "Leave saturnRunId out to start a separate request."
+        )
+    else:
+        message = (
+            f'approval_expired. saturnRunId "{approval.run_id}" expired before anyone approved it. '
+            "Leave saturnRunId out to start a separate request."
+        )
+    return _approval_notice(
         request_id,
         -32006,
-        "approval_expired",
-        {
-            "reason": "APPROVAL_EXPIRED",
-            "phase": phase or "pending",
-            "approval_id": approval.id,
-        },
+        message,
+        approval,
+        tool_name,
+        status="expired",
+        reason="APPROVAL_EXPIRED",
+        phase=phase,
     )
 
 
@@ -61,8 +146,6 @@ class SaturnMcp:
         user: User,
         *,
         agent_id: str,
-        run_id: str,
-        action_id: str,
         message: dict[str, Any],
         profile_id: str = "",
         client_name: str = "",
@@ -114,7 +197,7 @@ class SaturnMcp:
                         {
                             "name": tool.name,
                             "description": tool.description or tool.name,
-                            "inputSchema": tool.input_schema or {"type": "object", "properties": {}},
+                            "inputSchema": _with_run_argument(tool.input_schema),
                         }
                         for tool, _item in exposed
                     ]
@@ -128,8 +211,6 @@ class SaturnMcp:
                 request_id,
                 name=str(params.get("name") or ""),
                 arguments=params.get("arguments") if isinstance(params.get("arguments"), dict) else {},
-                run_id=run_id,
-                action_id=action_id,
                 message=message,
             )
         return rpc_error(request_id, -32601, "Method not found")
@@ -345,10 +426,10 @@ class SaturnMcp:
         *,
         name: str,
         arguments: dict[str, Any],
-        run_id: str,
-        action_id: str,
         message: dict[str, Any],
     ) -> dict[str, Any]:
+        arguments, run_id = _take_run_argument(arguments)
+        action_id = ""
         match = next(((tool, item) for tool, item in await self._exposed(session, agent) if tool.name == name), None)
         if match is None:
             audit_no = await self._next_audit_no(session, agent.organization_id)
@@ -432,7 +513,7 @@ class SaturnMcp:
         raw_response = await self._proxy(session, tool, arguments)
         raw_response, result = _split_remote(raw_response)
         reply = rpc_result(request_id, result)
-        # Agents send their own run and action ids. The audit columns are foreign keys, so only link rows Saturn owns.
+        # saturnRunId is the only caller-supplied run id. Link the audit row when that run belongs to this agent.
         run = await session.get(Run, run_id) if run_id else None
         action = await session.get(Action, action_id) if action_id else None
         await self._audit(
@@ -479,7 +560,7 @@ class SaturnMcp:
 
                 phase = await expire_if_due(session, approval, utcnow())
                 if phase:
-                    return _approval_expired(request_id, approval, phase)
+                    return _approval_expired(request_id, approval, phase, tool.name)
             if approval is not None and approval.status == ApprovalStatus.APPROVED.value:
                 stored = action.arguments if isinstance(action.arguments, dict) else {}
                 if stored != arguments:
@@ -510,7 +591,7 @@ class SaturnMcp:
                 if claimed.rowcount != 1:
                     await session.refresh(approval)
                     if _status_text(approval.status) == ApprovalStatus.EXPIRED.value:
-                        return _approval_expired(request_id, approval, approval.expired_phase or "resubmit")
+                        return _approval_expired(request_id, approval, approval.expired_phase or "resubmit", tool.name)
                     return rpc_error(request_id, -32005, "execution_in_progress")
                 approval.execution_state = "claimed"
                 fresh = await policy_engine.evaluate_named(
@@ -567,20 +648,57 @@ class SaturnMcp:
                         "approval_mismatch",
                         {"reason": "Approved parameters no longer match this call"},
                     )
-                return rpc_error(
+                return _approval_notice(
                     request_id,
                     -32001,
-                    "approval_required",
-                    {"approval_id": approval.id, "run_id": action.run_id, "action_id": action.id},
+                    _approval_required_message(tool.name, action.run_id),
+                    approval,
+                    tool.name,
+                    status="pending",
                 )
             if approval is not None and _status_text(approval.status) == ApprovalStatus.EXPIRED.value:
-                return _approval_expired(request_id, approval, approval.expired_phase or "pending")
+                return _approval_expired(request_id, approval, approval.expired_phase or "pending", tool.name)
             if approval is not None and approval.status in {
                 ApprovalStatus.REJECTED.value,
                 ApprovalStatus.CANCELLED.value,
                 ApprovalStatus.INVALIDATED.value,
             }:
-                return rpc_error(request_id, -32002, f"approval_{approval.status}")
+                closed = _status_text(approval.status)
+                text = (
+                    _approval_rejected_message(approval.run_id)
+                    if closed == ApprovalStatus.REJECTED.value
+                    else f"approval_{closed}. saturnRunId \"{approval.run_id}\" is closed. Leave saturnRunId out to start a separate request."
+                )
+                return _approval_notice(
+                    request_id,
+                    -32002,
+                    text,
+                    approval,
+                    tool.name,
+                    status=closed,
+                )
+
+        if not action_id and run_id:
+            owned = await session.get(Run, run_id)
+            if owned is not None and owned.organization_id == agent.organization_id and owned.agent_id == agent.id:
+                action = await session.scalar(
+                    select(Action)
+                    .where(Action.run_id == owned.id, Action.tool == tool.name)
+                    .order_by(Action.created_at.desc())
+                )
+                if action is not None:
+                    return await self._approval_call(
+                        session,
+                        user,
+                        agent,
+                        tool,
+                        request_id,
+                        arguments=arguments,
+                        run_id=run_id,
+                        action_id=action.id,
+                        audit_no=audit_no,
+                        decision=decision,
+                    )
 
         ident = run_id or new_id("run")
         run = await session.get(Run, ident)
@@ -654,11 +772,13 @@ class SaturnMcp:
                 "user_id": user.id,
             },
         )
-        return rpc_error(
+        return _approval_notice(
             request_id,
             -32001,
-            "approval_required",
-            {"approval_id": approval.id, "run_id": run.id, "action_id": action.id},
+            _approval_required_message(tool.name, run.id),
+            approval,
+            tool.name,
+            status="pending",
         )
 
     async def _proxy(self, session: AsyncSession, tool: Tool, arguments: dict[str, Any]) -> dict[str, Any]:

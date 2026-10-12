@@ -66,8 +66,6 @@ async def saturn_mcp_endpoint(request: Request, session: SessionDep) -> JSONResp
         session,
         user,
         agent_id=request.headers.get("x-saturn-agent-id", ""),
-        run_id=request.headers.get("x-saturn-run-id", ""),
-        action_id=request.headers.get("x-saturn-action-id", ""),
         profile_id=presented or expected,
         client_name=client_name,
         client_id=client_id,
