@@ -10,7 +10,7 @@ from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep,
 
 router = APIRouter(prefix="/org/payload-keys", tags=["payload-keys"])
 
-_SECRET_FIELDS = {"recovery_key", "private_key", "dek", "org_private_key", "member_private_key"}
+_SECRET_FIELDS = {"recovery_key", "private_key", "dek", "org_private_key", "member_private_key", "password"}
 
 
 class BackupBody(BaseModel):
@@ -47,6 +47,7 @@ class EnvelopeBody(BaseModel):
 
 
 class RotateStartBody(BaseModel):
+    needs_assist: bool = False
     model_config = ConfigDict(extra="forbid")
 
     public_key: str
@@ -156,8 +157,75 @@ async def create_envelope(body: EnvelopeBody, session: SessionDep, user: Current
         organization_id=user.organization_id,
         actor_user_id=user.id,
         user_id=body.user_id,
+    row = await keys.register_member_key(
+        session,
+        organization_id=user.organization_id,
+        user_id=user.id,
+        public_key=body.public_key,
+        backup=body.backup.model_dump() if body.backup is not None else None,
+        needs_assist=body.needs_assist,
+    )
+    return {"id": row.id, "public_key": row.public_key}
+
+
+@router.get("/member/assist")
+async def member_assist(session: SessionDep, user: CurrentUser):
+    return {
+        "requests": await keys.assist_requests(
+            session,
+            organization_id=user.organization_id,
+            actor_user_id=user.id,
+        )
+    }
+
+
+@router.get("/member/backup")
+async def member_backup(session: SessionDep, user: CurrentUser):
+    found = await keys.own_password_backup(session, organization_id=user.organization_id, user_id=user.id)
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Password backup not found")
+    key, backup = found
+    return {
+        "member_key_id": key.id,
+        "public_key": key.public_key,
+        "v": backup.format_version,
+        "kdf": backup.kdf,
+        "iterations": backup.iterations,
+        "salt": backup.salt,
+        "nonce": backup.nonce,
+        "ciphertext": backup.ciphertext,
+    }
+
+
+@router.get("/member/rewrap")
+async def member_rewrap_sources(member_key_id: str, session: SessionDep, user: CurrentUser):
+    records = await keys.wraps_missing_for(
+        session,
+        organization_id=user.organization_id,
+        actor_user_id=user.id,
+        member_key_id=member_key_id,
+    )
+    return {"records": records}
+
+
+class MemberRewrapBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    member_key_id: str
+    records: list[RewrapItem]
+
+
+@router.post("/member/rewrap")
+async def member_rewrap(body: MemberRewrapBody, session: SessionDep, user: CurrentUser):
+    _no_secrets(body)
+    changed = await keys.grant_recipient_wraps(
+        session,
+        organization_id=user.organization_id,
+        actor_user_id=user.id,
         member_key_id=body.member_key_id,
-        org_key_version=body.org_key_version,
+        records=[item.model_dump() for item in body.records],
+    )
+    return {"migrated": changed}
         wrapped_private_key=body.wrapped_private_key,
     )
     return {"id": row.id, "user_id": row.user_id}

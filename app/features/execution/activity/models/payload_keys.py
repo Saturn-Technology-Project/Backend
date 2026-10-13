@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.ids import utcnow
@@ -40,6 +40,22 @@ class OrgKeyBackup(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class MemberKeyBackup(Base):
+    __tablename__ = "member_key_backups"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    member_key_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    format_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    kdf: Mapped[str] = mapped_column(String(64), nullable=False)
+    iterations: Mapped[int] = mapped_column(Integer, nullable=False)
+    salt: Mapped[str] = mapped_column(String(128), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(64), nullable=False)
+    ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class MemberPayloadKey(Base):
     __tablename__ = "member_payload_keys"
 
@@ -48,6 +64,7 @@ class MemberPayloadKey(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     public_key: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    assist_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 

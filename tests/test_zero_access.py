@@ -6,13 +6,36 @@ from app.features.execution.activity.services.zero_access import (
     decrypt_payload,
     encrypt_payload,
     generate_x25519,
+    open_password_backup,
     open_recovery_backup,
+    password_backup,
     recovery_backup,
     unwrap_secret,
     wrap_secret,
     member_wrap_aad,
 )
 from tests.oauth_access import oauth_access
+
+
+def test_member_password_backup_and_recipient_wrap():
+    private, public = generate_x25519()
+    envelope = encrypt_payload(
+        recipient_public=public,
+        organization_id="org_a",
+        record_id="evt_1",
+        payload_type="audit",
+        key_version=1,
+        content={"arguments": {"note": "secret"}},
+        member_keys=[("user_1", "mpk_1", public)],
+    )
+    wrapped = bytes.fromhex(envelope["recipient_wraps"][0]["wrapped_dek"])
+    dek = unwrap_secret(private, wrapped, b"dek\norg_a\nmpk_1\nevt_1\naudit")
+    assert len(dek) == 32
+    backup = password_backup("correct horse", "user_1", private)
+    assert "correct horse" not in str(backup)
+    assert open_password_backup("correct horse", "user_1", backup) == private
+    with pytest.raises(Exception):
+        open_password_backup("wrong horse", "user_1", backup)
 
 
 def test_payload_envelope_rejects_tampering():

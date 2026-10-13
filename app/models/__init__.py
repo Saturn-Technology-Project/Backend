@@ -14,6 +14,7 @@ from app.shared.models.associations import (
 )
 from app.features.execution.activity.models.audit import AuditLog
 from app.features.execution.activity.models.payload_keys import (
+    MemberKeyBackup,
     MemberKeyEnvelope,
     MemberPayloadKey,
     OrgKeyBackup,

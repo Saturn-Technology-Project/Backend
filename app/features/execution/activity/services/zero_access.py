@@ -15,10 +15,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.features.execution.activity.models.payload_keys import OrgPayloadKey
+from app.features.execution.activity.models.payload_keys import MemberPayloadKey, OrgPayloadKey
 
 FORMAT_VERSION = 1
 WRAP_ALG = "X25519-HKDF-SHA256-AES-256-GCM"
@@ -80,17 +81,32 @@ def encrypt_payload(
     *,
     recipient_public: bytes,
     organization_id: str,
+    recipient_public: bytes | None,
+    organization_id: str,
     record_id: str,
     payload_type: str,
     key_version: int,
     content: Any,
+    member_keys: list[tuple[str, str, bytes]] | None = None,
 ) -> dict[str, Any]:
     dek = os.urandom(32)
     nonce = os.urandom(12)
     aad = aad_bytes(organization_id, record_id, payload_type, FORMAT_VERSION)
     ciphertext = AESGCM(dek).encrypt(nonce, canonical_json(content), aad)
-    wrap_aad = f"dek\n{organization_id}\n{key_version}\n{record_id}\n{payload_type}".encode()
-    wrapped = wrap_secret(recipient_public, dek, wrap_aad)
+    wrapped = ""
+    if recipient_public:
+        wrap_aad = f"dek\n{organization_id}\n{key_version}\n{record_id}\n{payload_type}".encode()
+        wrapped = wrap_secret(recipient_public, dek, wrap_aad).hex()
+    recipient_wraps = []
+    for user_id, key_id, public in member_keys or []:
+        member_aad = f"dek\n{organization_id}\n{key_id}\n{record_id}\n{payload_type}".encode()
+        recipient_wraps.append(
+            {
+                "user_id": user_id,
+                "member_key_id": key_id,
+                "wrapped_dek": wrap_secret(public, dek, member_aad).hex(),
+            }
+        )
     del dek
     return {
         "v": FORMAT_VERSION,
@@ -99,9 +115,8 @@ def encrypt_payload(
         "org_key_version": key_version,
         "nonce": nonce.hex(),
         "ciphertext": ciphertext.hex(),
-        "wrapped_dek": wrapped.hex(),
-        "content_sha256": content_hash(content),
-    }
+        "wrapped_dek": wrapped,
+        "recipient_wraps": recipient_wraps,
 
 
 def decrypt_payload(private_key: bytes, organization_id: str, record_id: str, payload_type: str, envelope: dict[str, Any]) -> Any:
@@ -148,6 +163,42 @@ def open_recovery_backup(recovery_key: bytes, organization_id: str, backup: dict
 
 def member_wrap_aad(organization_id: str, user_id: str, key_version: int) -> bytes:
     return f"member\n{organization_id}\n{user_id}\n{key_version}".encode()
+def password_backup(password: str, user_id: str, private_key: bytes) -> dict[str, str | int]:
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    kek = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=PASSWORD_ITERATIONS,
+    ).derive(password.encode())
+    ciphertext = AESGCM(kek).encrypt(nonce, private_key, f"password\n{user_id}".encode())
+    return {
+        "v": FORMAT_VERSION,
+        "kdf": PASSWORD_KDF,
+        "iterations": PASSWORD_ITERATIONS,
+        "salt": salt.hex(),
+        "nonce": nonce.hex(),
+        "ciphertext": ciphertext.hex(),
+    }
+
+
+def open_password_backup(password: str, user_id: str, backup: dict[str, Any]) -> bytes:
+    if backup.get("kdf") != PASSWORD_KDF or int(backup.get("iterations") or 0) != PASSWORD_ITERATIONS:
+        raise ValueError("unsupported password backup")
+    kek = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=bytes.fromhex(str(backup["salt"])),
+        iterations=PASSWORD_ITERATIONS,
+    ).derive(password.encode())
+    return AESGCM(kek).decrypt(
+        bytes.fromhex(str(backup["nonce"])),
+        bytes.fromhex(str(backup["ciphertext"])),
+        f"password\n{user_id}".encode(),
+    )
+
+
 
 
 def is_zero_access(stored: Any) -> bool:
@@ -180,15 +231,24 @@ async def protect_mapping(
     key = await active_org_key(session, organization_id)
     if key is None:
         return None
+    members = list(
+        await session.scalars(
+            select(MemberPayloadKey).where(
+                MemberPayloadKey.organization_id == organization_id,
+                MemberPayloadKey.status == "active",
+            )
+        )
+    )
+    if key is None and not members:
+        return None
     return encrypt_payload(
-        recipient_public=bytes.fromhex(key.public_key),
+        recipient_public=bytes.fromhex(key.public_key) if key is not None else None,
         organization_id=organization_id,
         record_id=record_id,
         payload_type=payload_type,
-        key_version=key.version,
+        key_version=key.version if key is not None else 0,
         content=content,
-    )
-
+        member_keys=[(item.user_id, item.id, bytes.fromhex(item.public_key)) for item in members],
 
 def public_audit_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
