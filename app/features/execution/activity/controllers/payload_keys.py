@@ -31,10 +31,23 @@ class CreateOrgKeyBody(BaseModel):
     backup: BackupBody
 
 
+class PasswordBackupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    v: int
+    kdf: str
+    iterations: int
+    salt: str
+    nonce: str
+    ciphertext: str
+
+
 class MemberKeyBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     public_key: str
+    backup: PasswordBackupBody | None = None
+    needs_assist: bool = False
 
 
 class EnvelopeBody(BaseModel):
@@ -47,7 +60,6 @@ class EnvelopeBody(BaseModel):
 
 
 class RotateStartBody(BaseModel):
-    needs_assist: bool = False
     model_config = ConfigDict(extra="forbid")
 
     public_key: str
@@ -145,7 +157,14 @@ async def create_payload_key(body: CreateOrgKeyBody, session: SessionDep, user: 
 @router.post("/member")
 async def register_member(body: MemberKeyBody, session: SessionDep, user: CurrentUser):
     _no_secrets(body)
-    row = await keys.register_member_key(session, organization_id=user.organization_id, user_id=user.id, public_key=body.public_key)
+    row = await keys.register_member_key(
+        session,
+        organization_id=user.organization_id,
+        user_id=user.id,
+        public_key=body.public_key,
+        backup=body.backup.model_dump() if body.backup is not None else None,
+        needs_assist=body.needs_assist,
+    )
     return {"id": row.id, "public_key": row.public_key}
 
 
@@ -157,15 +176,11 @@ async def create_envelope(body: EnvelopeBody, session: SessionDep, user: Current
         organization_id=user.organization_id,
         actor_user_id=user.id,
         user_id=body.user_id,
-    row = await keys.register_member_key(
-        session,
-        organization_id=user.organization_id,
-        user_id=user.id,
-        public_key=body.public_key,
-        backup=body.backup.model_dump() if body.backup is not None else None,
-        needs_assist=body.needs_assist,
+        member_key_id=body.member_key_id,
+        org_key_version=body.org_key_version,
+        wrapped_private_key=body.wrapped_private_key,
     )
-    return {"id": row.id, "public_key": row.public_key}
+    return {"id": row.id, "user_id": row.user_id}
 
 
 @router.get("/member/assist")
@@ -226,9 +241,6 @@ async def member_rewrap(body: MemberRewrapBody, session: SessionDep, user: Curre
         records=[item.model_dump() for item in body.records],
     )
     return {"migrated": changed}
-        wrapped_private_key=body.wrapped_private_key,
-    )
-    return {"id": row.id, "user_id": row.user_id}
 
 
 @router.get("/envelopes/{user_id}")

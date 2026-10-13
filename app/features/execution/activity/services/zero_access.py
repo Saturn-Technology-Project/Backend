@@ -25,6 +25,8 @@ FORMAT_VERSION = 1
 WRAP_ALG = "X25519-HKDF-SHA256-AES-256-GCM"
 PAYLOAD_ALG = "AES-256-GCM"
 RECOVERY_KDF = "HKDF-SHA256"
+PASSWORD_KDF = "PBKDF2-HMAC-SHA256"
+PASSWORD_ITERATIONS = 600_000
 _WRAP_INFO = b"saturn-payload-wrap-v1"
 _RECOVERY_INFO = b"saturn-recovery-v1"
 CONTENT_KEYS = ("arguments", "raw_request", "raw_response", "server_result", "agent_result")
@@ -79,8 +81,6 @@ def unwrap_secret(recipient_private: bytes, wrapped: bytes, aad: bytes) -> bytes
 
 def encrypt_payload(
     *,
-    recipient_public: bytes,
-    organization_id: str,
     recipient_public: bytes | None,
     organization_id: str,
     record_id: str,
@@ -117,6 +117,8 @@ def encrypt_payload(
         "ciphertext": ciphertext.hex(),
         "wrapped_dek": wrapped,
         "recipient_wraps": recipient_wraps,
+        "content_sha256": content_hash(content),
+    }
 
 
 def decrypt_payload(private_key: bytes, organization_id: str, record_id: str, payload_type: str, envelope: dict[str, Any]) -> Any:
@@ -229,8 +231,6 @@ async def protect_mapping(
     if not organization_id or content in (None, {}, []):
         return None
     key = await active_org_key(session, organization_id)
-    if key is None:
-        return None
     members = list(
         await session.scalars(
             select(MemberPayloadKey).where(
@@ -249,6 +249,7 @@ async def protect_mapping(
         key_version=key.version if key is not None else 0,
         content=content,
         member_keys=[(item.user_id, item.id, bytes.fromhex(item.public_key)) for item in members],
+    )
 
 def public_audit_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
