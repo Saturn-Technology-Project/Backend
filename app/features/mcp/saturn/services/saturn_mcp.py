@@ -12,6 +12,8 @@ from app.core.ids import new_id, utcnow
 from app.models import Action, Agent, Approval, AuditLog, Run, Tool, ToolSet, ToolSetItem, User
 from app.core.enums import ActionStatus, ActorType, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
 from app.features.execution.activity.services.audit_service import audit_service
+from app.features.execution.activity.services.zero_access import action_digest, is_zero_access
+from app.features.execution.activity.services.content_seal import plain_arguments, policy_fields
 from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 from app.features.mcp.servers.services.mcp_remote import call_remote_tool
 from app.features.policy.policies.services.policy_engine import policy_engine
@@ -464,7 +466,7 @@ class SaturnMcp:
             organization_id=agent.organization_id,
             tool=tool.name,
             result="requested",
-            payload={**stamp, "arguments": arguments, "raw_request": message},
+            payload={**stamp, "arguments": arguments, "raw_request": message, "policy_fields": []},
         )
         decision = await policy_engine.evaluate_named(
             session,
@@ -488,6 +490,7 @@ class SaturnMcp:
                 "matched_rule_id": decision.matched_rule_id,
                 "reason": decision.reason,
                 "arguments": arguments,
+                "policy_fields": policy_fields(decision.matched_rule),
                 "agent_id": agent.id,
                 "run_id": run_id,
                 "action_id": action_id,
@@ -562,14 +565,24 @@ class SaturnMcp:
                 if phase:
                     return _approval_expired(request_id, approval, phase, tool.name)
             if approval is not None and approval.status == ApprovalStatus.APPROVED.value:
-                stored = action.arguments if isinstance(action.arguments, dict) else {}
-                if stored != arguments:
-                    return rpc_error(
-                        request_id,
-                        -32004,
-                        "approval_mismatch",
-                        {"reason": "Approved parameters no longer match this call"},
-                    )
+                digest = action_digest(action.arguments) or (approval.parameter_digest or "")
+                if digest:
+                    if digest != parameter_digest(arguments):
+                        return rpc_error(
+                            request_id,
+                            -32004,
+                            "approval_mismatch",
+                            {"reason": "Approved parameters no longer match this call"},
+                        )
+                else:
+                    stored = plain_arguments(agent.organization_id, action.arguments)
+                    if stored != arguments:
+                        return rpc_error(
+                            request_id,
+                            -32004,
+                            "approval_mismatch",
+                            {"reason": "Approved parameters no longer match this call"},
+                        )
                 if approval.execution_state == "executed":
                     cached = action.result if isinstance(action.result, dict) else {}
                     return rpc_result(request_id, cached)
@@ -722,12 +735,25 @@ class SaturnMcp:
             taken = await session.get(Action, action_ident)
             if taken is not None:
                 action_ident = new_id("act")
+            from app.features.execution.activity.services.zero_access import protect_mapping
+            from app.features.execution.approvals.services.approval_service import parameter_digest as digest_of
+
+            envelope = await protect_mapping(session, agent.organization_id, action_ident, "action", arguments)
+            stored_arguments: dict[str, Any] = {"digest": digest_of(arguments)}
+            if envelope is None:
+                stored_arguments["encryption"] = "unavailable"
+            else:
+                stored_arguments["envelope"] = envelope
+                stored_arguments["encryption"] = "org-x25519-v1"
             action = Action(
                 id=action_ident,
                 run_id=run.id,
                 tool=tool.name,
-                arguments=arguments,
+                arguments=stored_arguments,
                 policy_decision="approval_required",
+                policy_id=getattr(decision, "policy_id", None) if decision is not None else None,
+                policy_version=getattr(decision, "policy_version", None) if decision is not None else None,
+                policy_rule_id=getattr(decision, "matched_rule_id", None) if decision is not None else None,
                 policy_reason="saturn_mcp",
                 status=ActionStatus.WAITING_APPROVAL.value,
             )
@@ -769,6 +795,7 @@ class SaturnMcp:
                 "server_name": tool.mcp_server.name if tool.mcp_server is not None else "",
                 "approval_id": approval.id,
                 "arguments": arguments,
+                "policy_fields": policy_fields(getattr(decision, "matched_rule", None)),
                 "user_id": user.id,
             },
         )

@@ -67,3 +67,4 @@ class AuditEvent(str, Enum):
     RUN_FAILED = "run_failed"
     PROMPT_UPDATED = "prompt_updated"
     CREDENTIAL_ACCESSED = "credential_accessed"
+    CONTENT_REVEALED = "content_revealed"

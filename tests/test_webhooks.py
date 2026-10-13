@@ -284,7 +284,11 @@ async def test_granted_webhook_waits_for_quorum_and_is_not_duplicated(client, mo
     assert first.json()["status"] == "pending"
     await client.post("/org/webhooks/dispatch")
     assert seen == []
-    second = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[1][1]))
+    second = await client.post(
+        f"/approvals/{approval_id}/approve",
+        headers=_auth(people[1][1]),
+        json={"arguments": {"amount": 5}},
+    )
     assert second.status_code == 200, second.text
     await client.post("/org/webhooks/dispatch")
     await client.post("/org/webhooks/dispatch")

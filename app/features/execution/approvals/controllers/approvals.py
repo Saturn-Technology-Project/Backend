@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+import json
+
+from fastapi import APIRouter, Request
 
 from app.features.identity.auth.controllers.deps import ActorDep, ApprovalsRead, ApprovalsWrite, CurrentUser, SessionDep
 from app.schemas import ApprovalDecisionRead, ApprovalRead, ApprovalRequirementProgress
@@ -56,10 +58,25 @@ async def get_approval(
 
 @router.post("/{approval_id}/approve", response_model=ApprovalDecisionRead)
 async def approve(
-    approval_id: str, session: SessionDep, actor_id: ActorDep, user: CurrentUser, _access: ApprovalsWrite
+    approval_id: str,
+    request: Request,
+    session: SessionDep,
+    actor_id: ActorDep,
+    user: CurrentUser,
+    _access: ApprovalsWrite,
 ):
+    execution_arguments = None
+    raw = await request.body()
+    if raw:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and isinstance(parsed.get("arguments"), dict):
+            execution_arguments = parsed["arguments"]
     _run, action, outcome, detail = await approval_service.approve(
-        session, approval_id, actor_id, organization_id=user.organization_id
+        session,
+        approval_id,
+        actor_id,
+        organization_id=user.organization_id,
+        execution_arguments=execution_arguments,
     )
     return ApprovalDecisionRead(
         status=outcome,

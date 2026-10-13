@@ -323,12 +323,7 @@ async def _group_names(session: AsyncSession, approval: Approval | None) -> dict
 
 
 def _approval_lines(entry: AuditLog, approval: Approval | None, names: dict[str, str]) -> tuple[str, ...]:
-    payload = entry.payload if isinstance(entry.payload, dict) else {}
-    arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
     lines = ["Status · Pending"]
-    shown = _public_params(arguments)
-    if shown:
-        lines.append(f"Parameters · {shown}")
     if approval is not None:
         raw = approval.group_requirements if isinstance(approval.group_requirements, list) else []
         parts = []
@@ -447,32 +442,6 @@ def _localized_lines(lines: tuple[str, ...], locale: str | None) -> tuple[str, .
         label, _, value = line.partition(" · ")
         translated.append(f"{labels.get(label, label)} · {values.get(value, value)}")
     return tuple(translated)
-
-
-def _public_params(arguments: dict) -> str:
-    parts: list[str] = []
-    for key, value in list(arguments.items())[:6]:
-        name = str(key)
-        if _SECRET.search(name):
-            parts.append(f"{name}: ••••")
-            continue
-        shown = _public_text(_flat(value), 40)
-        parts.append(f"{name}: {shown or '••••'}")
-    return ", ".join(parts)
-
-
-def _flat(value: object) -> str:
-    if isinstance(value, dict):
-        chunks = []
-        for key, item in list(value.items())[:4]:
-            if _SECRET.search(str(key)):
-                chunks.append(f"{key}=••••")
-            else:
-                chunks.append(f"{key}={_flat(item)}")
-        return " ".join(chunks)
-    if isinstance(value, list):
-        return " ".join(_flat(item) for item in value[:3])
-    return str(value)
 
 
 def _public_text(value: str, limit: int) -> str:

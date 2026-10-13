@@ -10,6 +10,9 @@ from sqlalchemy import select
 from app.core.ids import utcnow
 from app.features.identity.auth.controllers.deps import AgentsRead, CurrentUser, ProPlan, SessionDep
 from app.features.organization.org.services.plans import AUDIT_SEARCH, allows_pro, audit_retention_days
+from app.features.execution.activity.services.audit_service import audit_service
+from app.features.execution.activity.services.zero_access import public_audit_payload
+from app.core.enums import ActorType, AuditEvent
 from app.models import AuditLog, Organization
 from app.schemas import ActivityEventRead
 
@@ -41,7 +44,7 @@ def _read(item: AuditLog, *, full: bool) -> ActivityEventRead:
         action_id=item.action_id,
         tool=item.tool,
         result=item.result,
-        payload=payload if full else _basic_payload(payload),
+        payload=public_audit_payload(payload) if full else _basic_payload(public_audit_payload(payload)),
         created_at=item.created_at,
     )
 
@@ -140,3 +143,32 @@ async def export_activity(
         media_type="application/json",
         headers={"Content-Disposition": 'attachment; filename="activity.json"'},
     )
+
+
+@router.post("/{event_id}/reveal")
+async def reveal_activity(
+    event_id: str,
+    session: SessionDep,
+    user: CurrentUser,
+    _access: AgentsRead,
+):
+    entry = await session.get(AuditLog, event_id)
+    if entry is None or entry.organization_id != user.organization_id or not recorded_by_saturn_mcp(entry):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Record not found")
+    payload = entry.payload if isinstance(entry.payload, dict) else {}
+    envelope = payload.get("envelope") if isinstance(payload.get("envelope"), dict) else None
+    if envelope is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Record content is not encrypted")
+    await audit_service.log(
+        session,
+        event=AuditEvent.CONTENT_REVEALED,
+        actor_type=ActorType.USER,
+        actor_id=user.id,
+        organization_id=user.organization_id,
+        run_id=entry.run_id,
+        action_id=entry.action_id,
+        tool=entry.tool,
+        result="ciphertext",
+        payload={"event_id": entry.id, "source": "saturn_mcp", "org_key_version": envelope.get("org_key_version")},
+    )
+    return {"envelope": envelope, "decrypt": "client"}

@@ -11,7 +11,7 @@ from app.core.ids import utcnow
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.execution.approvals.models.approval import Approval, ApprovalPolicy, ApprovalWindow
 from app.features.webhooks.services.webhook_service import publish_approval
-from app.models import Action, Run
+from app.models import Action, AuditLog, Run
 
 DEFAULT_TTL_MINUTES = 24 * 60
 MAX_TTL_MINUTES = 7 * 24 * 60
@@ -193,9 +193,30 @@ async def expire_due(
     return changed
 
 
+async def drop_expired_content(session: AsyncSession, now: datetime | None = None) -> int:
+    moment = now or utcnow()
+    rows = list(
+        await session.scalars(
+            select(AuditLog)
+            .where(AuditLog.content_until.is_not(None), AuditLog.content_until <= moment)
+            .limit(100)
+        )
+    )
+    for row in rows:
+        payload = dict(row.payload or {})
+        payload.pop("sealed", None)
+        payload.pop("shown", None)
+        payload["content_expired"] = True
+        row.payload = payload
+        row.content_until = None
+    return len(rows)
+
+
 async def _record_expiry(session: AsyncSession, approval: Approval, phase: str, now: datetime) -> None:
     action = await session.get(Action, approval.action_id)
     run = await session.get(Run, approval.run_id)
+    if action is not None and isinstance(action.arguments, dict) and "sealed" in action.arguments:
+        action.arguments = {}
     if action is not None and _text(action.status) == "waiting_approval":
         action.status = "denied"
     if run is not None and _text(run.status) in {"waiting_approval", "running", "queued"}:

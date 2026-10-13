@@ -151,7 +151,11 @@ async def test_two_distinct_approvals_execute_once(client, monkeypatch):
     assert listed.json()["required_count"] == 2
     assert listed.json()["execution_state"] == "none"
 
-    second = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[1][1]))
+    second = await client.post(
+        f"/approvals/{approval_id}/approve",
+        headers=_auth(people[1][1]),
+        json={"arguments": {"amount": 900}},
+    )
     assert second.status_code == 200, second.text
     assert second.json()["status"] == "completed"
     assert calls["n"] == 1
@@ -184,7 +188,11 @@ async def test_removed_member_vote_no_longer_counts(client, monkeypatch):
     assert second.json()["status"] == "pending"
     assert second.json()["result"] == "1/2"
     assert calls["n"] == 0
-    third = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[2][1]))
+    third = await client.post(
+        f"/approvals/{approval_id}/approve",
+        headers=_auth(people[2][1]),
+        json={"arguments": {"amount": 10}},
+    )
     assert third.status_code == 200, third.text
     assert third.json()["status"] == "completed"
     assert calls["n"] == 1
@@ -244,7 +252,11 @@ async def test_expired_and_uncertain_upstream_do_not_retry(client, monkeypatch):
     uncertain_body = await _request(client, access, agent_id, {"amount": 9})
     uncertain_id = uncertain_body["error"]["data"]["approval_id"]
     assert (await client.post(f"/approvals/{uncertain_id}/approve", headers=_auth(people[0][1]))).json()["status"] == "pending"
-    failed = await client.post(f"/approvals/{uncertain_id}/approve", headers=_auth(people[1][1]))
+    failed = await client.post(
+        f"/approvals/{uncertain_id}/approve",
+        headers=_auth(people[1][1]),
+        json={"arguments": {"amount": 9}},
+    )
     assert failed.status_code == 409, failed.text
     assert calls["n"] == 1
     retry = await _request(client, access, agent_id, {"amount": 9}, run_id=uncertain_body["error"]["data"]["saturnRunId"])
@@ -412,7 +424,11 @@ async def test_payment_needs_finance_and_admin(client, monkeypatch):
     outsider = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[3][1]))
     assert outsider.status_code == 403, outsider.text
 
-    second_finance = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[2][1]))
+    second_finance = await client.post(
+        f"/approvals/{approval_id}/approve",
+        headers=_auth(people[2][1]),
+        json={"arguments": {"amount": 900}},
+    )
     assert second_finance.status_code == 200, second_finance.text
     assert second_finance.json()["status"] == "completed"
     assert calls["n"] == 1

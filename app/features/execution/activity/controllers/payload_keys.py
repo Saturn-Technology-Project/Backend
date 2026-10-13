@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, ConfigDict
+
+from app.features.execution.activity.services import payload_key_service as keys
+from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep, TeamWrite
+
+router = APIRouter(prefix="/org/payload-keys", tags=["payload-keys"])
+
+_SECRET_FIELDS = {"recovery_key", "private_key", "dek", "org_private_key", "member_private_key"}
+
+
+class BackupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    v: int
+    kdf: str
+    salt: str
+    nonce: str
+    ciphertext: str
+    org_key_version: int
+
+
+class CreateOrgKeyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    public_key: str
+    backup: BackupBody
+
+
+class MemberKeyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    public_key: str
+
+
+class EnvelopeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    member_key_id: str
+    org_key_version: int
+    wrapped_private_key: str
+
+
+class RotateStartBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    public_key: str
+
+
+class RewrapItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: str
+    wrapped_dek: str
+    content_sha256: str
+
+
+class RewrapBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int
+    records: list[RewrapItem]
+
+
+class ActivateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backup: BackupBody
+
+
+class TransferBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+
+
+def _no_secrets(body: BaseModel) -> None:
+    leaked = _SECRET_FIELDS.intersection(getattr(body, "model_fields_set", set()))
+    if leaked:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Private key material is not accepted")
+
+
+@router.get("/backup")
+async def latest_backup(session: SessionDep, user: CurrentUser):
+    from sqlalchemy import select
+
+    from app.features.execution.activity.models.payload_keys import OrgKeyBackup
+
+    row = await session.scalar(
+        select(OrgKeyBackup)
+        .where(OrgKeyBackup.organization_id == user.organization_id)
+        .order_by(OrgKeyBackup.created_at.desc())
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Recovery backup not found")
+    return {
+        "v": row.format_version,
+        "kdf": row.kdf,
+        "salt": row.salt,
+        "nonce": row.nonce,
+        "ciphertext": row.ciphertext,
+        "org_key_version": row.key_version,
+    }
+
+
+@router.get("")
+async def payload_key_status(session: SessionDep, user: CurrentUser):
+    key = await keys.active_key(session, user.organization_id)
+    envelope = await keys.own_envelope(session, organization_id=user.organization_id, user_id=user.id)
+    member = await keys._member(session, user.id, user.organization_id) if key else None
+    return {
+        "active_version": key.version if key else None,
+        "public_key": key.public_key if key else None,
+        "algorithm": key.algorithm if key else None,
+        "owner_user_id": key.owner_user_id if key else None,
+        "encryption_status": "active" if key else "unavailable",
+        "member_envelope": envelope.wrapped_private_key if envelope and envelope.user_id == user.id else None,
+        "member_key_id": envelope.member_key_id if envelope else None,
+        "recovery_uploaded": key is not None,
+        "historical_note": "A member who already exported the organization private key keeps that copy after revocation.",
+        "role": member.role if member else None,
+    }
+
+
+@router.post("")
+async def create_payload_key(body: CreateOrgKeyBody, session: SessionDep, user: CurrentUser, _team: TeamWrite):
+    _no_secrets(body)
+    row = await keys.create_org_key(
+        session,
+        organization_id=user.organization_id,
+        owner_user_id=user.id,
+        public_key=body.public_key,
+        backup=body.backup.model_dump(),
+    )
+    return {"version": row.version, "public_key": row.public_key, "status": row.status}
+
+
+@router.post("/member")
+async def register_member(body: MemberKeyBody, session: SessionDep, user: CurrentUser):
+    _no_secrets(body)
+    row = await keys.register_member_key(session, organization_id=user.organization_id, user_id=user.id, public_key=body.public_key)
+    return {"id": row.id, "public_key": row.public_key}
+
+
+@router.post("/envelopes")
+async def create_envelope(body: EnvelopeBody, session: SessionDep, user: CurrentUser, _team: TeamWrite):
+    _no_secrets(body)
+    row = await keys.add_envelope(
+        session,
+        organization_id=user.organization_id,
+        actor_user_id=user.id,
+        user_id=body.user_id,
+        member_key_id=body.member_key_id,
+        org_key_version=body.org_key_version,
+        wrapped_private_key=body.wrapped_private_key,
+    )
+    return {"id": row.id, "user_id": row.user_id}
+
+
+@router.get("/envelopes/{user_id}")
+async def read_envelope(user_id: str, session: SessionDep, user: CurrentUser):
+    if user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Envelope not found")
+    row = await keys.own_envelope(session, organization_id=user.organization_id, user_id=user.id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Envelope not found")
+    return {
+        "id": row.id,
+        "member_key_id": row.member_key_id,
+        "org_key_version": row.org_key_version,
+        "wrapped_private_key": row.wrapped_private_key,
+    }
+
+
+@router.post("/members/{user_id}/revoke")
+async def revoke_member(user_id: str, session: SessionDep, user: CurrentUser, _team: TeamWrite):
+    return await keys.revoke_member(session, organization_id=user.organization_id, actor_user_id=user.id, user_id=user_id)
+
+
+@router.post("/rotate")
+async def start_rotation(body: RotateStartBody, session: SessionDep, user: CurrentUser, _team: TeamWrite):
+    job = await keys.start_rotation(session, organization_id=user.organization_id, actor_user_id=user.id, public_key=body.public_key)
+    return {"id": job.id, "from_version": job.from_version, "to_version": job.to_version, "status": job.status}
+
+
+@router.get("/rotate/pending")
+async def rotation_pending(version: int, session: SessionDep, user: CurrentUser, _team: TeamWrite):
+    return {"records": await keys.pending_wraps(session, user.organization_id, version)}
+
+
+@router.post("/rotate/batch")
+async def rotate_batch(body: RewrapBody, session: SessionDep, user: CurrentUser, _team: TeamWrite):
+    changed = await keys.rewrap_batch(session, organization_id=user.organization_id, version=body.version, records=[item.model_dump() for item in body.records])
+    return {"migrated": changed}
+
+
+@router.post("/rotate/activate")
+async def activate_rotation(body: ActivateBody, session: SessionDep, user: CurrentUser, _team: TeamWrite):
+    row = await keys.activate_rotation(session, organization_id=user.organization_id, actor_user_id=user.id, backup=body.backup.model_dump())
+    return {"version": row.version, "status": row.status}
+
+
+@router.post("/transfer")
+async def transfer_owner(body: TransferBody, session: SessionDep, user: CurrentUser, _team: TeamWrite):
+    key = await keys.active_key(session, user.organization_id)
+    if key is None or key.owner_user_id != user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the payload owner can transfer ownership")
+    envelope = await keys.own_envelope(session, organization_id=user.organization_id, user_id=body.user_id)
+    if envelope is None or envelope.org_key_version != key.version:
+        raise HTTPException(status.HTTP_409_CONFLICT, "The new owner has no envelope for the active key")
+    await keys._member(session, body.user_id, user.organization_id)
+    key.owner_user_id = body.user_id
+    await session.flush()
+    return {"owner_user_id": key.owner_user_id, "version": key.version}

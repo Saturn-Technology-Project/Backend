@@ -25,6 +25,7 @@ class AuditLog(Base):
     tool: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     result: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    content_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False, index=True
     )

@@ -7,6 +7,7 @@ from app.features.identity.auth.controllers.deps import PlatformAdmin, SessionDe
 from app.features.mcp.servers.controllers.mcp_servers import serialize_mcp_server
 from app.features.organization.org.controllers.org import serialize_member
 from app.models import AuditLog, User
+from app.features.execution.activity.services.zero_access import admin_audit_payload
 from app.schemas import (
     AdminConnectionChannel,
     AdminEventRead,
@@ -52,7 +53,7 @@ def serialize_event(item: AuditLog) -> AdminEventRead:
         organization_id=item.organization_id,
         organization_name=org.name if org is not None else None,
         result=item.result,
-        payload=item.payload,
+        payload=admin_audit_payload(item.payload),
         created_at=item.created_at,
     )
 

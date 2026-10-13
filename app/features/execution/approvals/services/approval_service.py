@@ -13,6 +13,8 @@ from app.core.config import get_settings
 from app.core.ids import new_id, utcnow
 from app.features.execution.approvals.models.approval import ApprovalDecision, ApprovalPolicy, ApprovalRequirement
 from app.features.organization.org.models.group import Group, GroupMember
+from app.features.execution.activity.services.content_seal import plain_arguments
+from app.features.execution.activity.services.zero_access import action_digest, is_zero_access
 from app.models import Action, Agent, Approval, Employee, Run
 from app.core.enums import (
     ActionStatus,
@@ -70,12 +72,15 @@ class ApprovalService:
         actor_id: str,
         *,
         organization_id: str,
+        execution_arguments: dict | None = None,
     ) -> tuple[Run, Action, str, str | None]:
         approval, action, run, agent = await self._load_pending(
             session, approval_id, actor_id, organization_id=organization_id
         )
         if int(approval.required_count or 1) > 1:
-            return await self._approve_quorum(session, approval, action, run, agent, actor_id)
+            return await self._approve_quorum(
+                session, approval, action, run, agent, actor_id, execution_arguments=execution_arguments
+            )
         mapped = action.policy_reason in {"tool_set_approval", "saturn_mcp"}
 
         _tool, decision = await run_service.evaluate_action_policy(
@@ -334,6 +339,7 @@ class ApprovalService:
         run: Run,
         agent: Agent,
         actor_id: str,
+        execution_arguments: dict | None = None,
     ) -> tuple[Run, Action, str, str | None]:
         await self._ensure_open(session, approval)
         employee = await self._employee(session, actor_id, run.organization_id)
@@ -437,7 +443,9 @@ class ApprovalService:
         )
         await notify_transition(session, run.organization_id, "approval.granted", approval, action.tool)
         try:
-            await self._execute_claimed(session, approval, action, run, agent, actor_id)
+            await self._execute_claimed(
+                session, approval, action, run, agent, actor_id, execution_arguments=execution_arguments
+            )
         except HTTPException as exc:
             if approval.execution_state == "claimed":
                 approval.execution_state = "uncertain" if _uncertain(exc) else "failed"
@@ -452,13 +460,20 @@ class ApprovalService:
         run: Run,
         agent: Agent,
         actor_id: str,
+        execution_arguments: dict | None = None,
     ) -> None:
         tool = await run_service.get_tool(session, agent.organization_id, action.tool)
         gateway = bool(getattr(tool, "mcp_server_id", None) or getattr(tool, "mcp_endpoint", None))
         if gateway or not settings.in_process_runtime:
             from app.features.mcp.saturn.services.saturn_mcp import saturn_mcp
 
-            arguments = action.arguments if isinstance(action.arguments, dict) else {}
+            arguments = execution_arguments if is_zero_access(action.arguments) else plain_arguments(agent.organization_id, action.arguments)
+            if is_zero_access(action.arguments):
+                if not isinstance(execution_arguments, dict):
+                    raise HTTPException(status.HTTP_409_CONFLICT, "Encrypted arguments are required to execute this approval")
+                if action_digest(action.arguments) != parameter_digest(execution_arguments):
+                    raise HTTPException(status.HTTP_409_CONFLICT, "Approved parameters no longer match this call")
+                arguments = execution_arguments
             try:
                 raw_response = await saturn_mcp._proxy(session, tool, arguments)
             except Exception as exc:
@@ -536,8 +551,8 @@ class ApprovalService:
         action: Action,
         agent: Agent,
     ) -> None:
-        arguments = action.arguments if isinstance(action.arguments, dict) else {}
-        if approval.parameter_digest and approval.parameter_digest != parameter_digest(arguments):
+        arguments = None if action_digest(action.arguments) else plain_arguments(agent.organization_id, action.arguments)
+        if arguments is not None and approval.parameter_digest and approval.parameter_digest != parameter_digest(arguments):
             await self._invalidate(session, approval, action, "parameters changed")
         _tool, fresh = await run_service.evaluate_action_policy(session, action, agent=agent)
         if fresh.decision == PolicyDecision.DENY:

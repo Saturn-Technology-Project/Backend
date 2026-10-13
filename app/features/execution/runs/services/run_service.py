@@ -20,9 +20,10 @@ from app.core.enums import (
     RunStatus,
 )
 from app.features.execution.activity.services.audit_service import audit_service
+from app.features.execution.activity.services.content_seal import plain_arguments, policy_fields
 from app.features.organization.org.services.mapping_service import mapping_service
 from app.features.mcp.servers.services.mcp_executor import MCPExecutionError, mcp_executor
-from app.features.policy.policies.services.policy_engine import policy_engine
+from app.features.policy.policies.services.policy_engine import EvaluationResult, policy_engine
 from app.features.execution.runs.services.simulator import agent_simulator
 
 settings = get_settings()
@@ -152,14 +153,33 @@ class RunService:
         action: Action,
         *,
         agent: Agent,
+        arguments: dict | None = None,
     ):
         tool = await self.get_tool(session, agent.organization_id, action.tool)
+        from app.features.execution.activity.services.zero_access import action_digest, is_zero_access
+        from app.models import Policy
+
+        if arguments is None and (is_zero_access(action.arguments) or action_digest(action.arguments)):
+            current_version = action.policy_version
+            if action.policy_id:
+                policy = await session.get(Policy, action.policy_id)
+                if policy is not None:
+                    current_version = policy.version
+            decision = EvaluationResult(
+                decision=PolicyDecision(action.policy_decision) if action.policy_decision in PolicyDecision._value2member_map_ else PolicyDecision.APPROVAL_REQUIRED,
+                policy_id=action.policy_id,
+                policy_version=current_version,
+                matched_rule_id=action.policy_rule_id,
+                reason=action.policy_reason,
+            )
+            return tool, decision
+        resolved = arguments if arguments is not None else plain_arguments(agent.organization_id, action.arguments)
         decision = await policy_engine.evaluate(
             session,
             organization_id=agent.organization_id,
             agent=agent,
             tool=tool,
-            arguments=action.arguments,
+            arguments=resolved,
         )
         action.policy_decision = decision.decision.value
         action.policy_id = decision.policy_id
@@ -183,7 +203,8 @@ class RunService:
                 "policy_version": decision.policy_version,
                 "matched_rule_id": decision.matched_rule_id,
                 "reason": decision.reason,
-                "arguments": action.arguments,
+                "arguments": resolved,
+                "policy_fields": policy_fields(decision.matched_rule),
             },
         )
         return tool, decision
@@ -213,7 +234,7 @@ class RunService:
                     run_id=action.run_id,
                     action_id=action.id,
                     status=ApprovalStatus.PENDING,
-                    requested_amount=_requested_amount(action.arguments),
+                    requested_amount=_requested_amount(plain_arguments(agent.organization_id, action.arguments)),
                 )
                 session.add(approval)
                 action.status = ActionStatus.WAITING_APPROVAL
@@ -225,7 +246,7 @@ class RunService:
                     approval,
                     organization_id=agent.organization_id,
                     decision=decision,
-                    arguments=action.arguments if isinstance(action.arguments, dict) else {},
+                    arguments=plain_arguments(agent.organization_id, action.arguments),
                     requester_user_id=None,
                 )
                 await audit_service.log(
@@ -238,7 +259,7 @@ class RunService:
                     action_id=action.id,
                     tool=action.tool,
                     result="pending",
-                    payload={"approval_id": approval.id, "arguments": action.arguments},
+                    payload={"approval_id": approval.id, "arguments": plain_arguments(agent.organization_id, action.arguments)},
                 )
                 return action
 
@@ -264,7 +285,7 @@ class RunService:
         try:
             if not settings.in_process_runtime:
                 raise MCPExecutionError("In-process MCP runtime is disabled")
-            result = await mcp_executor.execute(tool.name, action.arguments)
+            result = await mcp_executor.execute(tool.name, plain_arguments(agent.organization_id, action.arguments))
         except MCPExecutionError as exc:
             action.status = ActionStatus.FAILED
             action.result = {"status": "error", "error": str(exc)}
@@ -319,7 +340,7 @@ class RunService:
                 run_id=run.id,
                 action_id=action.id,
                 tool=action.tool,
-                payload={"arguments": action.arguments},
+                payload={"arguments": plain_arguments(agent.organization_id, action.arguments)},
             )
             await self.execute_action(
                 session,

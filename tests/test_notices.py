@@ -137,13 +137,14 @@ async def test_email_delivery_failure_leaves_the_run_and_its_audit(client, monke
 
 
 def test_task_notice_does_not_include_secrets():
-    from app.features.identity.auth.services.mailer import _notice_message
-    from app.features.identity.auth.services.notices import _public_params, _public_text
+    from types import SimpleNamespace
 
-    hidden = _public_params({"api_key": "sk_live_secret", "amount": 50, "note": "ordinary"})
-    assert "sk_live_secret" not in hidden
-    assert "••••" in hidden
-    assert "50" in hidden
+    from app.features.identity.auth.services.mailer import _notice_message
+    from app.features.identity.auth.services.notices import _approval_lines, _public_text
+
+    lines = _approval_lines(SimpleNamespace(payload={"arguments": {"api_key": "sk_live_secret", "amount": 50}}), None, {})
+    assert lines == ("Status · Pending",)
+    assert "sk_live_secret" not in " ".join(lines)
     assert _public_text("Bearer sk_live_secret", 80) == ""
     _subject, text, html = _notice_message(
         "completed",
@@ -151,8 +152,8 @@ def test_task_notice_does_not_include_secrets():
         "Acme Ops",
         "https://dashboard.saturn-core.com/activity?event=run_1",
         "en-US",
-        lines=("Tools · 3",),
-        detail=hidden,
+        lines=lines,
+        detail="",
     )
     assert "sk_live_secret" not in text
     assert "sk_live_secret" not in html

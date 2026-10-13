@@ -8,10 +8,12 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import get_settings
+from app.core.http_security import HttpSecurityMiddleware
 from app.features.agent.agents.routes import router as agents_router
 from app.features.billing.payments.routes import router as payments_router
 from app.features.credentials.vault.routes import router as credentials_router
 from app.features.execution.activity.routes import router as activity_router
+from app.features.execution.activity.controllers.payload_keys import router as payload_keys_router
 from app.features.execution.approvals.controllers.approval_policies import router as approval_policies_router
 from app.features.execution.approvals.routes import router as approvals_router
 from app.features.execution.runs.routes import router as runs_router
@@ -89,6 +91,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(HttpSecurityMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -116,6 +119,7 @@ app.include_router(policies_router)
 app.include_router(approvals_router)
 app.include_router(payments_router)
 app.include_router(activity_router)
+app.include_router(payload_keys_router)
 
 
 @app.get("/")
