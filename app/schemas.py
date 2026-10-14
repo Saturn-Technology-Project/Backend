@@ -332,12 +332,12 @@ class ActivityEventRead(ORMModel):
 
 class EntitlementsRead(BaseModel):
     gateway: bool = True
-    tool_set_limit: int | None = 1
+    tool_set_limit: int | None = None
     policies: bool = False
     webhooks: bool = False
     groups: bool = False
-    audit: str = "basic"
-    audit_days: int = 7
+    audit: str = "full"
+    audit_days: int | None = None
 
 
 class OrganizationRead(ORMModel):

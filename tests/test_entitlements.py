@@ -14,13 +14,15 @@ def test_unknown_plan_keeps_the_gateway_and_denies_pro():
     assert allows_pro("starter") is True
     assert allows_pro("enterprise") is True
     free = entitlements("free")
-    assert free["tool_set_limit"] == 1
+    assert free["tool_set_limit"] is None
     assert free["policies"] is False
     assert free["webhooks"] is False
-    assert free["audit"] == "basic"
+    assert free["audit"] == "full"
+    assert free["audit_days"] is None
     assert entitlements(None)["policies"] is False
     assert entitlements("enterprise")["tool_set_limit"] is None
     assert entitlements("enterprise")["audit"] == "full"
+    assert entitlements("enterprise")["audit_days"] is None
 
 
 async def _onboard(client, *, name: str, email: str, plan: str) -> str:
@@ -92,8 +94,7 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
         headers=headers,
         json={"name": "Another", "items": [{"tool_id": catalog["repo.read"], "approval": False}]},
     )
-    assert second.status_code == 403
-    assert second.json()["detail"] == "Free includes one Tool Set"
+    assert second.status_code == 201, second.text
 
     updated = await client.patch(
         f"/tool-sets/{tool_set_id}",
@@ -183,11 +184,11 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
     assert all(item.get("tool") or item.get("event") for item in activity.json())
 
     searched = await client.get("/activity", headers=headers, params={"q": "repo"})
-    assert searched.status_code == 403
-    assert searched.json()["detail"] == "Audit search requires Pro"
+    assert searched.status_code == 200
+    assert searched.json()
     exported = await client.get("/activity/export", headers=headers)
-    assert exported.status_code == 403
-    assert exported.json()["detail"] == "This feature requires Pro"
+    assert exported.status_code == 200, exported.text
+    assert exported.headers["content-disposition"].startswith("attachment;")
 
     monkeypatch.setattr(
         "app.features.execution.activity.controllers.activity.audit_retention_days",
@@ -198,7 +199,7 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
     assert hidden_rows.json() == []
     monkeypatch.setattr(
         "app.features.execution.activity.controllers.activity.audit_retention_days",
-        lambda _plan: 7,
+        lambda _plan: None,
     )
     restored = await client.get("/activity", headers=headers)
     assert restored.status_code == 200

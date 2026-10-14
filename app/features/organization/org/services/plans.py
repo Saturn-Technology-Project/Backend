@@ -19,12 +19,8 @@ def kind_for_plan(plan: str) -> str:
     return "organization" if canonical_plan(plan) in {"team", "enterprise"} else "personal"
 
 
-FREE_AUDIT_DAYS = 7
-PRO_AUDIT_DAYS = 90
 PRO_REQUIRED = "This feature requires Pro"
 GROUPS_REQUIRED = "Groups and multi-member approval require Team"
-FREE_TOOL_SET = "Free includes one Tool Set"
-AUDIT_SEARCH = "Audit search requires Pro"
 
 
 def allows_pro(plan: str | None) -> bool:
@@ -42,15 +38,13 @@ def allows_saturn_cloud(plan: str | None) -> bool:
 
 
 def tool_set_limit(plan: str | None) -> int | None:
-    if allows_pro(plan):
-        return None
-    return 1
+    """Tool sets are unlimited on every plan."""
+    return None
 
 
-def audit_retention_days(plan: str | None) -> int:
-    if allows_pro(plan):
-        return PRO_AUDIT_DAYS
-    return FREE_AUDIT_DAYS
+def audit_retention_days(plan: str | None) -> int | None:
+    """Audit history is unlimited on every plan. None means no day cutoff."""
+    return None
 
 
 def entitlements(plan: str | None) -> dict:
@@ -61,7 +55,7 @@ def entitlements(plan: str | None) -> dict:
         "policies": pro,
         "webhooks": pro,
         "groups": allows_groups(plan),
-        "audit": "full" if pro else "basic",
+        "audit": "full",
         "audit_days": audit_retention_days(plan),
     }
 

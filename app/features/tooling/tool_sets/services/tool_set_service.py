@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.core.ids import new_id, utcnow
 from app.models import Agent, Employee, Organization, Tool, ToolSet, ToolSetItem, User
 from app.features.organization.org.services.access import allows, may_edit_agent
-from app.features.organization.org.services.plans import FREE_TOOL_SET, profile_identity, tool_set_limit
+from app.features.organization.org.services.plans import profile_identity, tool_set_limit
 
 
 class ToolSetService:
@@ -40,7 +40,7 @@ class ToolSetService:
                 select(func.count()).select_from(ToolSet).where(ToolSet.organization_id == user.organization_id)
             )
             if int(count or 0) >= limit:
-                raise HTTPException(status.HTTP_403_FORBIDDEN, FREE_TOOL_SET)
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Tool set limit reached")
         existing = await session.scalar(
             select(ToolSet).where(
                 ToolSet.organization_id == user.organization_id,
