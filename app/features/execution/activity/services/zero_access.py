@@ -1,6 +1,6 @@
 """Organization payload encryption.
 
-The server encrypts with the organization's public key and then discards the data key.
+The server encapsulates a data key to each ML-KEM-1024 public key, then discards it.
 It never stores or accepts an organization private key, a member private key, or a recovery key.
 """
 
@@ -11,8 +11,8 @@ import json
 import os
 from typing import Any
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM1024PrivateKey, MLKEM1024PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -22,12 +22,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.features.execution.activity.models.payload_keys import MemberPayloadKey, OrgPayloadKey
 
 FORMAT_VERSION = 1
-WRAP_ALG = "X25519-HKDF-SHA256-AES-256-GCM"
+WRAP_ALG = "ML-KEM-1024-HKDF-SHA384-AES-256-GCM"
+PAYLOAD_ENCRYPTION = "org-mlkem1024-v1"
 PAYLOAD_ALG = "AES-256-GCM"
 RECOVERY_KDF = "HKDF-SHA256"
 PASSWORD_KDF = "PBKDF2-HMAC-SHA256"
 PASSWORD_ITERATIONS = 600_000
-_WRAP_INFO = b"saturn-payload-wrap-v1"
+PUBLIC_KEY_BYTES = 1568
+PRIVATE_KEY_BYTES = 64  # FIPS 203 seed. The browser expands this into the decapsulation key.
+KEM_CIPHERTEXT_BYTES = 1568
+_WRAP_VERSION = 2
+_WRAP_INFO = b"saturn-payload-mlkem1024-v1"
 _RECOVERY_INFO = b"saturn-recovery-v1"
 CONTENT_KEYS = ("arguments", "raw_request", "raw_response", "server_result", "agent_result")
 
@@ -44,39 +49,47 @@ def aad_bytes(organization_id: str, record_id: str, payload_type: str, version: 
     return f"{organization_id}\n{record_id}\n{payload_type}\n{version}".encode()
 
 
-def _hkdf(shared: bytes, info: bytes) -> bytes:
-    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(shared)
+def _wrap_key(shared: bytes) -> bytes:
+    return HKDF(algorithm=hashes.SHA384(), length=32, salt=None, info=_WRAP_INFO).derive(shared)
 
 
-def _public_bytes(key: X25519PublicKey) -> bytes:
-    return key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+def _public_bytes(key: MLKEM1024PublicKey) -> bytes:
+    return key.public_bytes_raw()
 
 
-def _private_bytes(key: X25519PrivateKey) -> bytes:
-    return key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+def _private_bytes(key: MLKEM1024PrivateKey) -> bytes:
+    return key.private_bytes_raw()
 
 
-def generate_x25519() -> tuple[bytes, bytes]:
-    private = X25519PrivateKey.generate()
-    return _private_bytes(private), _public_bytes(private.public_key())
+def generate_mlkem() -> tuple[bytes, bytes]:
+    private = MLKEM1024PrivateKey.generate()
+    secret = _private_bytes(private)
+    public = _public_bytes(private.public_key())
+    if len(secret) != PRIVATE_KEY_BYTES or len(public) != PUBLIC_KEY_BYTES:
+        raise RuntimeError("unexpected ML-KEM-1024 key size")
+    return secret, public
 
 
 def wrap_secret(recipient_public: bytes, secret: bytes, aad: bytes) -> bytes:
-    ephemeral = X25519PrivateKey.generate()
-    shared = ephemeral.exchange(X25519PublicKey.from_public_bytes(recipient_public))
+    if len(recipient_public) != PUBLIC_KEY_BYTES:
+        raise ValueError("invalid ML-KEM public key")
+    shared, kem_ciphertext = MLKEM1024PublicKey.from_public_bytes(recipient_public).encapsulate()
+    if len(kem_ciphertext) != KEM_CIPHERTEXT_BYTES:
+        raise RuntimeError("unexpected ML-KEM-1024 ciphertext size")
     nonce = os.urandom(12)
-    ciphertext = AESGCM(_hkdf(shared, _WRAP_INFO)).encrypt(nonce, secret, aad)
-    return b"\x01" + _public_bytes(ephemeral.public_key()) + nonce + ciphertext
+    ciphertext = AESGCM(_wrap_key(shared)).encrypt(nonce, secret, aad)
+    return bytes((_WRAP_VERSION,)) + kem_ciphertext + nonce + ciphertext
 
 
 def unwrap_secret(recipient_private: bytes, wrapped: bytes, aad: bytes) -> bytes:
-    if len(wrapped) < 1 + 32 + 12 + 16 or wrapped[0] != 1:
+    kem_end = 1 + KEM_CIPHERTEXT_BYTES
+    nonce_end = kem_end + 12
+    if len(recipient_private) != PRIVATE_KEY_BYTES or len(wrapped) < nonce_end + 16 or wrapped[0] != _WRAP_VERSION:
         raise ValueError("invalid key envelope")
-    ephemeral = X25519PublicKey.from_public_bytes(wrapped[1:33])
-    nonce, ciphertext = wrapped[33:45], wrapped[45:]
-    private = X25519PrivateKey.from_private_bytes(recipient_private)
-    shared = private.exchange(ephemeral)
-    return AESGCM(_hkdf(shared, _WRAP_INFO)).decrypt(nonce, ciphertext, aad)
+    kem_ciphertext = wrapped[1:kem_end]
+    nonce, ciphertext = wrapped[kem_end:nonce_end], wrapped[nonce_end:]
+    shared = MLKEM1024PrivateKey.from_seed_bytes(recipient_private).decapsulate(kem_ciphertext)
+    return AESGCM(_wrap_key(shared)).decrypt(nonce, ciphertext, aad)
 
 
 def encrypt_payload(
@@ -213,6 +226,16 @@ def action_digest(stored: Any) -> str:
     return ""
 
 
+def _encapsulation_key(value: str) -> bytes | None:
+    try:
+        raw = bytes.fromhex(value)
+    except ValueError:
+        return None
+    if len(raw) != PUBLIC_KEY_BYTES:
+        return None
+    return raw
+
+
 async def active_org_key(session: AsyncSession, organization_id: str) -> OrgPayloadKey | None:
     return await session.scalar(
         select(OrgPayloadKey)
@@ -239,16 +262,22 @@ async def protect_mapping(
             )
         )
     )
-    if key is None and not members:
+    recipient = _encapsulation_key(key.public_key) if key is not None else None
+    member_keys = []
+    for item in members:
+        public = _encapsulation_key(item.public_key)
+        if public is not None:
+            member_keys.append((item.user_id, item.id, public))
+    if recipient is None and not member_keys:
         return None
     return encrypt_payload(
-        recipient_public=bytes.fromhex(key.public_key) if key is not None else None,
+        recipient_public=recipient,
         organization_id=organization_id,
         record_id=record_id,
         payload_type=payload_type,
-        key_version=key.version if key is not None else 0,
+        key_version=key.version if key is not None and recipient is not None else 0,
         content=content,
-        member_keys=[(item.user_id, item.id, bytes.fromhex(item.public_key)) for item in members],
+        member_keys=member_keys,
     )
 
 def public_audit_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -5,7 +5,7 @@ import pytest
 from app.features.execution.activity.services.zero_access import (
     decrypt_payload,
     encrypt_payload,
-    generate_x25519,
+    generate_mlkem,
     open_password_backup,
     open_recovery_backup,
     password_backup,
@@ -18,7 +18,7 @@ from tests.oauth_access import oauth_access
 
 
 def test_member_password_backup_and_recipient_wrap():
-    private, public = generate_x25519()
+    private, public = generate_mlkem()
     envelope = encrypt_payload(
         recipient_public=public,
         organization_id="org_a",
@@ -39,7 +39,7 @@ def test_member_password_backup_and_recipient_wrap():
 
 
 def test_payload_envelope_rejects_tampering():
-    private, public = generate_x25519()
+    private, public = generate_mlkem()
     envelope = encrypt_payload(
         recipient_public=public,
         organization_id="org_a",
@@ -50,7 +50,7 @@ def test_payload_envelope_rejects_tampering():
     )
     opened = decrypt_payload(private, "org_a", "evt_1", "audit", envelope)
     assert opened["arguments"]["note"] == "secret"
-    other, _public = generate_x25519()
+    other, _public = generate_mlkem()
     with pytest.raises(Exception):
         decrypt_payload(other, "org_a", "evt_1", "audit", envelope)
     broken = {**envelope, "ciphertext": ("00" + envelope["ciphertext"][2:])}
@@ -64,7 +64,7 @@ def test_payload_envelope_rejects_tampering():
 
 
 def test_recovery_key_restores_the_private_key_locally():
-    private, _public = generate_x25519()
+    private, _public = generate_mlkem()
     recovery = os.urandom(32)
     backup = recovery_backup(recovery, "org_a", 1, private)
     assert open_recovery_backup(recovery, "org_a", backup) == private
@@ -74,8 +74,8 @@ def test_recovery_key_restores_the_private_key_locally():
 
 
 def test_member_envelope_is_bound_to_the_member():
-    org_private, org_public = generate_x25519()
-    member_private, member_public = generate_x25519()
+    org_private, org_public = generate_mlkem()
+    member_private, member_public = generate_mlkem()
     aad = member_wrap_aad("org_a", "user_a", 1)
     wrapped = wrap_secret(member_public, org_private, aad)
     assert unwrap_secret(member_private, wrapped, aad) == org_private
@@ -85,7 +85,7 @@ def test_member_envelope_is_bound_to_the_member():
 
 
 async def test_gateway_stores_ciphertext_and_admin_cannot_read_it(client, monkeypatch):
-    org_private, org_public = generate_x25519()
+    org_private, org_public = generate_mlkem()
     recovery = os.urandom(32)
     created = await client.post(
         "/org/payload-keys",
@@ -140,8 +140,8 @@ async def test_gateway_stores_ciphertext_and_admin_cannot_read_it(client, monkey
 
 
 async def test_rotation_rewraps_the_dek_and_leaves_ciphertext_unchanged(client, monkeypatch):
-    old_private, old_public = generate_x25519()
-    new_private, new_public = generate_x25519()
+    old_private, old_public = generate_mlkem()
+    new_private, new_public = generate_mlkem()
     recovery = os.urandom(32)
     created = await client.post(
         "/org/payload-keys",
@@ -219,7 +219,7 @@ async def test_rotation_rewraps_the_dek_and_leaves_ciphertext_unchanged(client, 
 
 
 async def test_member_cannot_read_another_members_envelope(client):
-    _private, public = generate_x25519()
+    _private, public = generate_mlkem()
     registered = await client.post("/org/payload-keys/member", json={"public_key": public.hex()})
     assert registered.status_code == 200, registered.text
     missing = await client.get("/org/payload-keys/envelopes/user_other")

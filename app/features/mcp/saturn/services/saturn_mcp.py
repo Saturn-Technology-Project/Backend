@@ -12,7 +12,7 @@ from app.core.ids import new_id, utcnow
 from app.models import Action, Agent, Approval, AuditLog, Run, Tool, ToolSet, ToolSetItem, User
 from app.core.enums import ActionStatus, ActorType, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
 from app.features.execution.activity.services.audit_service import audit_service
-from app.features.execution.activity.services.zero_access import action_digest, is_zero_access
+from app.features.execution.activity.services.zero_access import PAYLOAD_ENCRYPTION, action_digest, is_zero_access
 from app.features.execution.activity.services.content_seal import plain_arguments, policy_fields
 from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 from app.features.mcp.servers.services.mcp_remote import call_remote_tool
@@ -744,7 +744,7 @@ class SaturnMcp:
                 stored_arguments["encryption"] = "unavailable"
             else:
                 stored_arguments["envelope"] = envelope
-                stored_arguments["encryption"] = "org-x25519-v1"
+                stored_arguments["encryption"] = PAYLOAD_ENCRYPTION
             action = Action(
                 id=action_ident,
                 run_id=run.id,

@@ -13,17 +13,24 @@ from app.features.execution.activity.models.payload_keys import (
     OrgPayloadKey,
     PayloadRotation,
 )
-from app.features.execution.activity.services.zero_access import FORMAT_VERSION, PASSWORD_ITERATIONS, PASSWORD_KDF, RECOVERY_KDF, WRAP_ALG
+from app.features.execution.activity.services.zero_access import (
+    FORMAT_VERSION,
+    PASSWORD_ITERATIONS,
+    PASSWORD_KDF,
+    PUBLIC_KEY_BYTES,
+    RECOVERY_KDF,
+    WRAP_ALG,
+)
 from app.models import Action, AuditLog, Employee, User
 
 
-def _hex32(value: str, label: str) -> str:
+def _encapsulation_key(value: str, label: str) -> str:
     try:
         raw = bytes.fromhex(value)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{label} is not hex") from exc
-    if len(raw) != 32:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{label} must be 32 bytes")
+    if len(raw) != PUBLIC_KEY_BYTES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{label} must be an ML-KEM-1024 public key")
     return raw.hex()
 
 
@@ -60,7 +67,7 @@ async def create_org_key(
         id=new_id("opk"),
         organization_id=organization_id,
         version=version,
-        public_key=_hex32(public_key, "public_key"),
+        public_key=_encapsulation_key(public_key, "public_key"),
         algorithm=WRAP_ALG,
         status="active",
         owner_user_id=owner_user_id,
@@ -117,7 +124,7 @@ async def register_member_key(
         id=new_id("mpk"),
         organization_id=organization_id,
         user_id=user_id,
-        public_key=_hex32(public_key, "public_key"),
+        public_key=_encapsulation_key(public_key, "public_key"),
         status="active",
         assist_requested=bool(needs_assist and replaced),
         created_at=utcnow(),
@@ -410,7 +417,7 @@ async def start_rotation(session: AsyncSession, *, organization_id: str, actor_u
             id=new_id("opk"),
             organization_id=organization_id,
             version=version,
-            public_key=_hex32(public_key, "public_key"),
+            public_key=_encapsulation_key(public_key, "public_key"),
             algorithm=WRAP_ALG,
             status="pending",
             owner_user_id=actor.user_id,
