@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import ActorType
+from app.core.rate_limit import registration_allowed
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.identity.auth.controllers.deps import SessionDep
 from app.features.identity.auth.services.auth_service import auth_service
@@ -281,6 +282,8 @@ async def authorization_server_metadata(request: Request) -> dict:
 
 @router.post("/oauth/register", status_code=201)
 async def register_client(request: Request, session: SessionDep) -> dict:
+    if not registration_allowed(request):
+        raise HTTPException(status_code=429, detail="Too many registrations", headers={"Retry-After": "600"})
     try:
         body = await request.json()
     except Exception:

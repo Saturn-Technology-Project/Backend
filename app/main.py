@@ -127,7 +127,7 @@ app.include_router(payload_keys_router)
 
 @app.get("/")
 async def root():
-    return {"name": "Saturn Backend", "version": "0.1.0"}
+    return {"status": "ok"}
 
 
 @app.get("/health")

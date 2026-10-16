@@ -25,6 +25,15 @@ from tests.catalog import seed_test_catalog
 
 
 @pytest.fixture(autouse=True)
+def reset_rate_limits():
+    from app.core.rate_limit import reset
+
+    reset()
+    yield
+    reset()
+
+
+@pytest.fixture(autouse=True)
 def public_mcp_dns(monkeypatch):
     monkeypatch.setattr(
         "app.features.mcp.servers.services.mcp_endpoint.addresses_for",
