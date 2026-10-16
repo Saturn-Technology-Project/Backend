@@ -711,6 +711,8 @@ class LoginRequest(BaseModel):
     email: str
     password: str
     locale: str | None = None
+    legacy_password: str | None = None
+    legacy_v1: str | None = None
 
 
 class SignupCodeRequest(BaseModel):

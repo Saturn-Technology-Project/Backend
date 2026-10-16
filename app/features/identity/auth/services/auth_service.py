@@ -5,6 +5,8 @@ import hmac
 import secrets
 from datetime import timedelta, timezone
 
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +23,7 @@ PBKDF2_ROUNDS = 210_000
 RECENT_AUTH = timedelta(minutes=10)
 _LOGIN_PREFIX = "v1."
 _LOGIN_LABEL = b"saturn-login-v1\n"
+_hasher = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1, hash_len=32, salt_len=16)
 
 
 def login_secret(password: str) -> str:
@@ -31,31 +34,77 @@ def login_secret(password: str) -> str:
     return hashlib.sha256(_LOGIN_LABEL + password.encode("utf-8")).hexdigest()
 
 
+_V2_PREFIX = "v2."
+
+
+def verifier_material(password: str) -> str:
+    """What the password hash covers. A v2 verifier is already a key; anything else is the v1 digest."""
+    body = password[len(_V2_PREFIX) :]
+    if password.startswith(_V2_PREFIX) and len(body) == 64 and all(char in "0123456789abcdef" for char in body):
+        return body
+    return login_secret(password)
+
+
 def hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        login_secret(password).encode("utf-8"),
-        bytes.fromhex(salt),
-        PBKDF2_ROUNDS,
-    )
-    return f"pbkdf2_sha256${PBKDF2_ROUNDS}${salt}${digest.hex()}"
+    return _hasher.hash(verifier_material(password))
 
 
-def verify_password(password: str, stored: str) -> bool:
+def _pbkdf2_parts(stored: str) -> tuple[str, str, str] | None:
     try:
         algo, rounds, salt, digest = stored.split("$", 3)
     except ValueError:
-        return False
+        return None
     if algo != "pbkdf2_sha256":
+        return None
+    return rounds, salt, digest
+
+
+def _pbkdf2_ok(material: str, stored: str) -> bool:
+    parts = _pbkdf2_parts(stored)
+    if parts is None:
         return False
-    check = hashlib.pbkdf2_hmac(
-        "sha256",
-        login_secret(password).encode("utf-8"),
-        bytes.fromhex(salt),
-        int(rounds),
-    )
+    rounds, salt, digest = parts
+    check = hashlib.pbkdf2_hmac("sha256", material.encode("utf-8"), bytes.fromhex(salt), int(rounds))
     return hmac.compare_digest(check.hex(), digest)
+
+
+def verify_password(password: str, stored: str) -> bool:
+    secret = verifier_material(password)
+    if stored.startswith("$argon2"):
+        try:
+            _hasher.verify(stored, secret)
+            return True
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return False
+    if _pbkdf2_ok(secret, stored):
+        return True
+    if password != secret and _pbkdf2_ok(password, stored):
+        return True
+    return False
+
+
+def _stores_verifier(stored: str, password: str) -> bool:
+    if not stored.startswith("$argon2id$"):
+        return False
+    try:
+        _hasher.verify(stored, verifier_material(password))
+        return not _hasher.check_needs_rehash(stored)
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        return False
+
+
+def needs_legacy_migration(stored: str) -> bool:
+    return _pbkdf2_parts(stored) is not None
+
+
+def migration_stage(stored: str, *, legacy_v1: str | None, legacy_password: str | None) -> str | None:
+    if not needs_legacy_migration(stored):
+        return None
+    if not legacy_v1 and not legacy_password:
+        return "v1"
+    if not legacy_password:
+        return "password"
+    return None
 
 
 def hash_token(token: str) -> str:
@@ -63,7 +112,14 @@ def hash_token(token: str) -> str:
 
 
 class AuthService:
-    async def authenticate(self, session: AsyncSession, email: str, password: str) -> User:
+    async def authenticate(
+        self,
+        session: AsyncSession,
+        email: str,
+        password: str,
+        legacy_password: str | None = None,
+        legacy_v1: str | None = None,
+    ) -> User:
         normalized = email.strip().lower()
         result = await session.execute(
             select(User)
@@ -71,12 +127,26 @@ class AuthService:
             .where(User.email == normalized)
         )
         user = result.scalar_one_or_none()
-        if (
-            user is None
-            or user.status != "active"
-            or not verify_password(password, user.password_hash)
-        ):
+        stored = user.password_hash if user is not None else ""
+        active = user is not None and user.status == "active"
+        ok = active and verify_password(password, stored)
+        if not ok and active and legacy_v1 and verify_password(legacy_v1, stored):
+            ok = True
+        if not ok and active and legacy_password and _pbkdf2_ok(legacy_password, stored):
+            ok = True
+        if not ok or user is None:
+            stage = migration_stage(stored, legacy_v1=legacy_v1, legacy_password=legacy_password) if active else None
+            if stage:
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED,
+                    {"message": "Invalid email or password", "migration": stage},
+                )
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+        # Only a v2 verifier replaces the stored hash. A v1 sign-in keeps the old hash so the
+        # browser can still prove it and move the account onto the split key.
+        if password.startswith(_V2_PREFIX) and not _stores_verifier(user.password_hash, password):
+            user.password_hash = hash_password(password)
+            await session.flush()
         return user
 
     async def login(self, session: AsyncSession, email: str, password: str) -> tuple[str, User]:

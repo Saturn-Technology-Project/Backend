@@ -34,9 +34,12 @@ def test_reset_code_hash_fits_column():
     from app.features.identity.auth.models.password_reset import PasswordReset
     from app.features.identity.auth.services.auth_service import hash_password
 
-    stored = hash_password("123456")
+    first = hash_password("123456")
+    second = hash_password("123456")
     limit = PasswordReset.__table__.c.code_hash.type.length
-    assert len(stored) <= limit
+    assert first.startswith("$argon2id$")
+    assert first != second
+    assert len(first) <= limit
 
 
 async def test_login_and_me(client):
@@ -54,6 +57,88 @@ async def test_login_and_me(client):
     assert updated.status_code == 200
     assert updated.json()["locale"] == "en-US"
     assert (await client.get("/auth/me")).json()["locale"] == "en-US"
+
+
+async def test_legacy_password_is_rewritten_as_argon2id(client):
+    import hashlib
+    import secrets
+
+    from app.db.database import get_session
+    from app.main import app
+    from app.models import User
+
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", b"correct horse", bytes.fromhex(salt), 210_000)
+    session_gen = app.dependency_overrides[get_session]()
+    session = await session_gen.__anext__()
+    try:
+        user = await session.get(User, "user_operator")
+        user.password_hash = f"pbkdf2_sha256$210000${salt}${digest.hex()}"
+        await session.commit()
+    finally:
+        await session_gen.aclose()
+
+    verifier = "v2." + ("ab" * 32)
+    legacy_v1 = "v1." + hashlib.sha256(b"saturn-login-v1\ncorrect horse").hexdigest()
+    first = await client.post("/auth/login", json={"email": "rick@saturn.ai", "password": verifier})
+    assert first.status_code == 401
+    assert first.json()["detail"]["migration"] == "v1"
+    hinted = await client.post(
+        "/auth/login",
+        json={"email": "rick@saturn.ai", "password": verifier, "legacy_v1": legacy_v1},
+    )
+    assert hinted.status_code == 401
+    assert hinted.json()["detail"]["migration"] == "password"
+    second = await client.post(
+        "/auth/login",
+        json={"email": "rick@saturn.ai", "password": verifier, "legacy_password": "correct horse"},
+    )
+    assert second.status_code == 200, second.text
+    again = await client.post("/auth/login", json={"email": "rick@saturn.ai", "password": verifier})
+    assert again.status_code == 200, again.text
+
+    session_gen = app.dependency_overrides[get_session]()
+    session = await session_gen.__anext__()
+    try:
+        user = await session.get(User, "user_operator")
+        assert user.password_hash.startswith("$argon2id$")
+        assert "$" + salt + "$" not in user.password_hash
+    finally:
+        await session_gen.aclose()
+
+
+async def test_v1_verifier_migrates_without_the_raw_password(client):
+    import hashlib
+    import secrets
+
+    from app.db.database import get_session
+    from app.main import app
+    from app.models import User
+
+    material = hashlib.sha256(b"saturn-login-v1\ncorrect horse").hexdigest()
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", material.encode(), bytes.fromhex(salt), 210_000)
+    session_gen = app.dependency_overrides[get_session]()
+    session = await session_gen.__anext__()
+    try:
+        user = await session.get(User, "user_operator")
+        user.password_hash = f"pbkdf2_sha256$210000${salt}${digest.hex()}"
+        await session.commit()
+    finally:
+        await session_gen.aclose()
+
+    verifier = "v2." + ("cd" * 32)
+    legacy_v1 = "v1." + material
+    first = await client.post("/auth/login", json={"email": "rick@saturn.ai", "password": verifier})
+    assert first.status_code == 401
+    assert first.json()["detail"]["migration"] == "v1"
+    second = await client.post(
+        "/auth/login",
+        json={"email": "rick@saturn.ai", "password": verifier, "legacy_v1": legacy_v1},
+    )
+    assert second.status_code == 200, second.text
+    again = await client.post("/auth/login", json={"email": "rick@saturn.ai", "password": verifier})
+    assert again.status_code == 200, again.text
 
 
 async def test_login_rejects_bad_password(client):

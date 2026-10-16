@@ -332,17 +332,62 @@ async def authorize(request: Request, session: SessionDep):
               {_hidden(fields)}
               <label>電子郵件 Email<input name="email" type="email" autocomplete="username" required></label>
               <label>密碼 Password<input name="password" type="password" autocomplete="current-password" required></label>
+              <input type="hidden" name="legacy_v1" value="">
+              <input type="hidden" name="legacy_password" value="">
               <div class="row"><button type="submit">登入 Sign in</button></div>
             </form>
             <script>
               document.querySelector('form[action="/oauth/login"]').addEventListener('submit', async (event) => {{
                 const form = event.currentTarget;
                 const input = form.querySelector('input[name="password"]');
+                const legacyV1 = form.querySelector('input[name="legacy_v1"]');
+                const legacyPassword = form.querySelector('input[name="legacy_password"]');
                 if (!input || input.dataset.sealed === '1') return;
                 event.preventDefault();
-                const bytes = new TextEncoder().encode('saturn-login-v1\\n' + input.value);
-                const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-                input.value = 'v1.' + [...digest].map((item) => item.toString(16).padStart(2, '0')).join('');
+                const raw = input.value;
+                const email = String(form.querySelector('input[name="email"]').value || '').trim().toLowerCase();
+                const hex = (bytes) => [...bytes].map((item) => item.toString(16).padStart(2, '0')).join('');
+                const v1Bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('saturn-login-v1\\n' + raw)));
+                const v1 = 'v1.' + hex(v1Bytes);
+                let verifier = v1;
+                try {{
+                  const {{argon2id}} = await import('https://esm.sh/hash-wasm@4.12.0');
+                  const salt = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('saturn-argon2-salt-v1\\n' + email)));
+                  const master = new Uint8Array(await argon2id({{
+                    password: raw,
+                    salt,
+                    parallelism: 1,
+                    iterations: 2,
+                    memorySize: 19456,
+                    hashLength: 64,
+                    outputType: 'binary',
+                  }}));
+                  const key = await crypto.subtle.importKey('raw', master, 'HKDF', false, ['deriveBits']);
+                  const bits = new Uint8Array(await crypto.subtle.deriveBits({{
+                    name: 'HKDF',
+                    hash: 'SHA-256',
+                    salt: new Uint8Array(32),
+                    info: new TextEncoder().encode('saturn-login-v2'),
+                  }}, key, 256));
+                  verifier = 'v2.' + hex(bits);
+                }} catch (_) {{
+                  verifier = v1;
+                }}
+                const probe = async (extra) => {{
+                  const response = await fetch('/auth/login/migration', {{
+                    method: 'POST',
+                    headers: {{'content-type': 'application/json'}},
+                    body: JSON.stringify({{email, password: verifier, ...extra}}),
+                  }});
+                  return response.ok ? response.json() : {{}};
+                }};
+                let body = await probe({{}});
+                if (body.migration === 'v1' && verifier !== v1) {{
+                  if (legacyV1) legacyV1.value = v1;
+                  body = await probe({{legacy_v1: v1}});
+                }}
+                if ((body.migration === 'password' || body.migration === true) && legacyPassword) legacyPassword.value = raw;
+                input.value = verifier;
                 input.dataset.sealed = '1';
                 form.submit();
               }});
@@ -367,7 +412,13 @@ async def oauth_login(request: Request, session: SessionDep):
     form = await _posted(request)
     fields = {key: form.get(key, "") for key in ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type")}
     try:
-        user = await auth_service.authenticate(session, form.get("email", ""), form.get("password", ""))
+        user = await auth_service.authenticate(
+            session,
+            form.get("email", ""),
+            form.get("password", ""),
+            legacy_password=form.get("legacy_password") or None,
+            legacy_v1=form.get("legacy_v1") or None,
+        )
     except HTTPException:
         return _page("Connect Agents", "<h1>登入失敗</h1><p>Email or password is incorrect.</p>", 401)
     try:
