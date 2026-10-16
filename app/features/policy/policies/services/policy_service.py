@@ -499,13 +499,13 @@ class PolicyService:
         definition = policy.definition if isinstance(policy.definition, dict) else None
         if definition and definition.get("nodes"):
             if not tool_rules:
-                result = EvaluationResult(decision=PolicyDecision.ALLOW, reason="This policy has no rule for this tool")
+                result = EvaluationResult(decision=PolicyDecision.DENY, reason="No policy rule")
             else:
                 result = evaluate_graph_rules(tool_rules, arguments, agent_id)
         elif tool_rules:
             result = evaluate_rules(tool_rules, arguments)
         else:
-            result = EvaluationResult(decision=PolicyDecision.ALLOW, reason="This policy has no rule for this tool")
+            result = EvaluationResult(decision=PolicyDecision.DENY, reason="No policy rule")
         return {
             "decision": result.decision.value,
             "reason": result.reason,

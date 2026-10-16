@@ -75,7 +75,7 @@ async def test_claude_reconnect_reuses_the_client_and_the_agent(client):
     assert saved.status_code == 200, saved.text
     from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 
-    record = mcp_sessions.get(session_id, (await client.get("/auth/me")).json()["id"], phone[2])
+    record = await mcp_sessions.get(session_id, (await client.get("/auth/me")).json()["id"], phone[2])
     assert record is not None
     queued = record.queue.get_nowait()
     assert queued == {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}

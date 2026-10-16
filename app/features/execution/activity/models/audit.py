@@ -10,6 +10,14 @@ from app.core.ids import utcnow
 from app.db.database import Base
 
 
+class AuditCounter(Base):
+    __tablename__ = "audit_counters"
+
+    organization_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[int] = mapped_column(nullable=False)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

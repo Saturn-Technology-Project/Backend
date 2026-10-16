@@ -4,12 +4,12 @@ import hashlib
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.ids import new_id, utcnow
-from app.models import Action, Agent, Approval, AuditLog, Run, Tool, ToolSet, ToolSetItem, User
+from app.models import Action, Agent, Approval, Run, Tool, ToolSet, ToolSetItem, User
 from app.core.enums import ActionStatus, ActorType, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.execution.activity.services.zero_access import PAYLOAD_ENCRYPTION, action_digest, is_zero_access
@@ -176,7 +176,7 @@ class SaturnMcp:
             agent.last_seen_at = utcnow()
             await session.flush()
         if mcp_session_id and agent is not None and self._owns(agent, user, client_id):
-            mcp_sessions.open(mcp_session_id, user.id, agent.id, client_id)
+            await mcp_sessions.open(mcp_session_id, user.id, agent.id, client_id)
         if method == "initialize":
             return rpc_result(
                 request_id,
@@ -404,15 +404,25 @@ class SaturnMcp:
         return rows
 
     async def _next_audit_no(self, session: AsyncSession, organization_id: str) -> int:
-        count = await session.scalar(
-            select(func.count())
-            .select_from(AuditLog)
-            .where(
-                AuditLog.organization_id == organization_id,
-                AuditLog.event == AuditEvent.TOOL_REQUESTED.value,
-            )
+        event = AuditEvent.TOOL_REQUESTED.value
+        value = await session.scalar(
+            text(
+                """
+                INSERT INTO audit_counters (organization_id, event, value)
+                VALUES (
+                    :org,
+                    :event,
+                    (SELECT COALESCE(COUNT(*), 0) + 1 FROM audit_logs
+                     WHERE organization_id = :org AND event = :event)
+                )
+                ON CONFLICT (organization_id, event)
+                DO UPDATE SET value = audit_counters.value + 1
+                RETURNING value
+                """
+            ),
+            {"org": organization_id, "event": event},
         )
-        return int(count or 0) + 1
+        return int(value or 1)
 
     async def _audit(self, session: AsyncSession, **kwargs: Any) -> None:
         payload = kwargs.get("payload") if isinstance(kwargs.get("payload"), dict) else {}

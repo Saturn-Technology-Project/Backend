@@ -5,6 +5,7 @@ from sqlalchemy import select
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.features.agent.agents.controllers.agents import serialize_agent
+from app.core.rate_limit import migration_allowed
 from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep
 from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME, clear_session_cookie, set_session_cookie
 from app.features.mcp.servers.controllers.mcp_servers import serialize_mcp_server
@@ -217,7 +218,13 @@ async def register(body: RegisterRequest, request: Request, response: Response, 
 
 
 @router.post("/login/migration")
-async def login_migration(body: LoginRequest, session: SessionDep):
+async def login_migration(body: LoginRequest, request: Request, session: SessionDep):
+    if not migration_allowed(request):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many attempts",
+            headers={"Retry-After": "600"},
+        )
     normalized = body.email.strip().lower()
     user = await session.scalar(select(User).where(User.email == normalized))
     if user is None or user.status != "active":

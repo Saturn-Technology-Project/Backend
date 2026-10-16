@@ -53,29 +53,33 @@ async def lifespan(_app: FastAPI):
     from app.features.credentials.vault.services.pq_crypto import require_root
 
     require_root()
-    if not settings.skip_db_bootstrap:
-        # Postgres schema is owned by Alembic (`alembic upgrade head` in Docker).
-        # create_all races with those migrations and crashes on existing tables.
-        if _sqlite():
-            from app.db.database import Base
+    from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 
-            async with engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
-        async with SessionLocal() as session:
-            await seed_if_empty(session)
-            await session.commit()
+    await mcp_sessions.start()
     worker = None
-    if not settings.skip_db_bootstrap:
-        from app.features.webhooks.services.worker import run_webhook_worker
-
-        worker = asyncio.create_task(run_webhook_worker())
     try:
+        if not settings.skip_db_bootstrap:
+            # Postgres schema is owned by Alembic (`alembic upgrade head` in Docker).
+            # create_all races with those migrations and crashes on existing tables.
+            if _sqlite():
+                from app.db.database import Base
+
+                async with engine.begin() as connection:
+                    await connection.run_sync(Base.metadata.create_all)
+            async with SessionLocal() as session:
+                await seed_if_empty(session)
+                await session.commit()
+        if settings.saturn_embed_worker and not settings.skip_db_bootstrap:
+            from app.features.webhooks.services.worker import run_webhook_worker
+
+            worker = asyncio.create_task(run_webhook_worker())
         yield
     finally:
         if worker is not None:
             worker.cancel()
             with suppress(asyncio.CancelledError):
                 await worker
+        await mcp_sessions.stop()
         await engine.dispose()
 
 

@@ -12,7 +12,7 @@ from app.shared.models.associations import (
     employee_agents,
     employee_mcp_servers,
 )
-from app.features.execution.activity.models.audit import AuditLog
+from app.features.execution.activity.models.audit import AuditCounter, AuditLog
 from app.features.execution.activity.models.payload_keys import (
     MemberKeyBackup,
     MemberKeyEnvelope,
@@ -49,6 +49,7 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalPolicy",
     "ApprovalRequirement",
+    "AuditCounter",
     "AuditLog",
     "AuthSession",
     "AuthThrottle",

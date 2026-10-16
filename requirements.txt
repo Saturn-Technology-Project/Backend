@@ -17,3 +17,4 @@ argon2-cffi==23.1.0
 webauthn==3.0.1
 google-cloud-secret-manager==2.31.0
 google-cloud-kms==3.5.1
+redis==5.2.1

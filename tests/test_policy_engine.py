@@ -71,9 +71,10 @@ def test_structured_conditions():
     assert result.reason == "Refund amount exceeds $100"
 
 
-def test_ungated_tool_allows_by_default():
+def test_ungated_tool_denies_by_default():
     result = evaluate_rules([], {"customer_id": "cus_001"})
-    assert result.decision == PolicyDecision.ALLOW
+    assert result.decision == PolicyDecision.DENY
+    assert result.reason == "No policy rule"
 
 
 def test_gated_tool_denies_when_no_rule_matches():

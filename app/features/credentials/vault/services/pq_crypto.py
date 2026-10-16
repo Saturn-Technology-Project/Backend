@@ -9,12 +9,15 @@ another tenant's ciphertext, and a copy of this process does not contain the roo
 from __future__ import annotations
 
 import base64
+import logging
 import os
 
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM1024PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+logger = logging.getLogger(__name__)
 
 _PREFIX = "pq2."
 _INFO_AES = b"saturn-credential-aes-256-gcm-v1"
@@ -102,5 +105,6 @@ def open_secret(token: str, organization_id: str, user_id: str = "") -> str:
         shared = _private(organization_id, user_id).decapsulate(kem_ciphertext)
         key = _hkdf(shared, _INFO_AES, 32)
         return AESGCM(key).decrypt(nonce, encrypted, None).decode()
-    except Exception:
+    except Exception as exc:
+        logger.warning("credential open failed: %s", type(exc).__name__)
         return ""

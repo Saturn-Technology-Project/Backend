@@ -34,5 +34,9 @@ def registration_allowed(request: Request) -> bool:
     return allow(f"oauth-register:{client_ip(request)}")
 
 
+def migration_allowed(request: Request) -> bool:
+    return allow(f"login-migration:{client_ip(request)}", limit=8)
+
+
 def reset() -> None:
     _hits.clear()

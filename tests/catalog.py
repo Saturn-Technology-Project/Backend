@@ -185,6 +185,39 @@ async def seed_test_catalog(session: AsyncSession) -> None:
                 )
             )
 
+    loaded = await session.execute(
+        select(Policy).options(selectinload(Policy.agents)).where(Policy.id == "policy_lookup")
+    )
+    lookup = loaded.scalar_one_or_none()
+    if lookup is None and billing is not None:
+        lookup = Policy(
+            id="policy_lookup",
+            organization_id=settings.default_org_id,
+            name="Lookup",
+            description="Allow the customer and payment reads a refund task performs",
+            status="active",
+            version=1,
+            environment="production",
+        )
+        session.add(lookup)
+        await session.flush()
+        loaded = await session.execute(
+            select(Policy).options(selectinload(Policy.agents)).where(Policy.id == "policy_lookup")
+        )
+        lookup = loaded.scalar_one()
+        lookup.agents.append(billing)
+        for position, tool in enumerate(("crm.get_customer", "billing.get_payment")):
+            session.add(
+                PolicyRule(
+                    id=new_id("rule"),
+                    policy_id=lookup.id,
+                    tool=tool,
+                    condition="true",
+                    decision="allow",
+                    position=position,
+                )
+            )
+
     await session.flush()
     user = await session.get(User, settings.default_actor_id)
     if user is None:

@@ -6,6 +6,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 # Two years, the usual HSTS lifetime. Preload is omitted because it is hard to undo.
 HSTS = "max-age=63072000; includeSubDomains"
 API_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+OAUTH_CSP = (
+    "default-src 'none'; "
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+    "style-src 'unsafe-inline'; "
+    "connect-src 'self'; "
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+)
 # Swagger and ReDoc load scripts from a CDN and an inline bootstrap. Only used when docs are open.
 DOCS_CSP = (
     "default-src 'none'; "
@@ -48,7 +55,10 @@ def apply_security_headers(headers: MutableHeaders, scope: Scope, path: str) -> 
     headers["X-Frame-Options"] = "DENY"
     headers["Referrer-Policy"] = "no-referrer"
     headers["Permissions-Policy"] = PERMISSIONS_POLICY
-    headers["Content-Security-Policy"] = DOCS_CSP if is_api_doc(path) and not api_docs_closed() else API_CSP
+    if path.startswith("/oauth"):
+        headers["Content-Security-Policy"] = OAUTH_CSP
+    else:
+        headers["Content-Security-Policy"] = DOCS_CSP if is_api_doc(path) and not api_docs_closed() else API_CSP
     if _https(scope):
         headers["Strict-Transport-Security"] = HSTS
 

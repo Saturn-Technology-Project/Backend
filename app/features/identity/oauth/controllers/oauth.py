@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import secrets
 from html import escape
+from pathlib import Path
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -23,6 +24,7 @@ from app.models import Agent, Policy, ToolSet, ToolSetItem
 
 router = APIRouter(tags=["oauth"])
 COOKIE = "saturn_oauth"
+_ARGON2 = Path(__file__).resolve().parents[1] / "static" / "argon2.umd.min.js"
 
 
 def origin_of(request: Request) -> str:
@@ -316,6 +318,15 @@ async def register_client(request: Request, session: SessionDep) -> dict:
     }
 
 
+@router.get("/oauth/argon2.js")
+async def argon2_script() -> FileResponse:
+    return FileResponse(
+        _ARGON2,
+        media_type="text/javascript",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @router.get("/oauth/authorize")
 async def authorize(request: Request, session: SessionDep):
     fields = _fields(request)
@@ -339,6 +350,7 @@ async def authorize(request: Request, session: SessionDep):
               <input type="hidden" name="legacy_password" value="">
               <div class="row"><button type="submit">登入 Sign in</button></div>
             </form>
+            <script src="/oauth/argon2.js"></script>
             <script>
               document.querySelector('form[action="/oauth/login"]').addEventListener('submit', async (event) => {{
                 const form = event.currentTarget;
@@ -352,11 +364,11 @@ async def authorize(request: Request, session: SessionDep):
                 const hex = (bytes) => [...bytes].map((item) => item.toString(16).padStart(2, '0')).join('');
                 const v1Bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('saturn-login-v1\\n' + raw)));
                 const v1 = 'v1.' + hex(v1Bytes);
-                let verifier = v1;
+                let verifier = '';
                 try {{
-                  const {{argon2id}} = await import('https://esm.sh/hash-wasm@4.12.0');
+                  if (!window.hashwasm || typeof window.hashwasm.argon2id !== 'function') throw new Error('argon2');
                   const salt = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('saturn-argon2-salt-v1\\n' + email)));
-                  const master = new Uint8Array(await argon2id({{
+                  const master = new Uint8Array(await window.hashwasm.argon2id({{
                     password: raw,
                     salt,
                     parallelism: 1,
@@ -374,7 +386,8 @@ async def authorize(request: Request, session: SessionDep):
                   }}, key, 256));
                   verifier = 'v2.' + hex(bits);
                 }} catch (_) {{
-                  verifier = v1;
+                  event.preventDefault();
+                  return;
                 }}
                 const probe = async (extra) => {{
                   const response = await fetch('/auth/login/migration', {{

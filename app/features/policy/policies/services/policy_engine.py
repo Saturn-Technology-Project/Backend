@@ -288,7 +288,7 @@ def evaluate_rules(
     arguments: dict[str, Any],
 ) -> EvaluationResult:
     if not rules:
-        return EvaluationResult(decision=PolicyDecision.ALLOW)
+        return EvaluationResult(decision=PolicyDecision.DENY, reason="No policy rule")
 
     for rule in sorted(rules, key=lambda item: item.position):
         if match_rule(rule, arguments):
@@ -310,7 +310,7 @@ def evaluate_graph_rules(
 ) -> EvaluationResult:
     """Most restrictive matching decision. A tool with rules but no match is denied."""
     if not rules:
-        return EvaluationResult(decision=PolicyDecision.ALLOW)
+        return EvaluationResult(decision=PolicyDecision.DENY, reason="No policy rule")
     matched = [rule for rule in rules if match_rule(rule, arguments, agent_id)]
     if not matched:
         return EvaluationResult(decision=PolicyDecision.DENY, reason="No matching policy rule")
@@ -386,6 +386,8 @@ class PolicyEngine:
                 legacy.extend(tool_rules)
         if legacy:
             opinions.append(evaluate_rules(legacy, arguments))
+        if not opinions and applicable:
+            opinions.append(EvaluationResult(decision=PolicyDecision.DENY, reason="No policy rule"))
         result = merge_results(opinions)
         if result.policy_id and result.policy_id in applicable and result.policy_name is None:
             policy = applicable[result.policy_id]

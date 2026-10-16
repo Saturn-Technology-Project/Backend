@@ -167,3 +167,24 @@ async def test_logout_revokes_session(client):
     assert logout.status_code == 204
     denied = await client.get("/auth/me")
     assert denied.status_code == 401
+
+
+async def test_login_migration_hides_unknown_accounts_and_is_rate_limited(client, monkeypatch):
+    missing = await client.post(
+        "/auth/login/migration",
+        json={"email": "nobody@example.com", "password": "v2.00"},
+    )
+    assert missing.status_code == 200
+    assert missing.json() == {}
+
+    monkeypatch.setattr(
+        "app.features.identity.auth.controllers.auth.migration_allowed",
+        lambda _request: False,
+    )
+    limited = await client.post(
+        "/auth/login/migration",
+        json={"email": "nobody@example.com", "password": "v2.00"},
+    )
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"] == "600"
+    assert limited.json()["detail"] == "Too many attempts"

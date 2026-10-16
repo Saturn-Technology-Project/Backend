@@ -77,8 +77,14 @@ jobs:
               "CORS_ORIGINS": os.environ["CORS_ORIGINS"],
               "PUBLIC_WS_URL": os.environ["PUBLIC_WS_URL"],
               "SATURN_KMS_KEY": "projects/project-5ae7d09e-f273-4da2-891/locations/asia-east1/keyRings/saturn/cryptoKeys/kem-root/cryptoKeyVersions/1",
+              "SATURN_EMBED_WORKER": "false",
           }
           Path("cloud-run.env.yaml").write_text(
+              "".join(f'{key}: "{value}"\n' for key, value in values.items()),
+              encoding="utf-8",
+          )
+          values["SATURN_EMBED_WORKER"] = "true"
+          Path("cloud-run.worker.env.yaml").write_text(
               "".join(f'{key}: "{value}"\n' for key, value in values.items()),
               encoding="utf-8",
           )
@@ -93,11 +99,34 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --port 8000 \
-            --timeout 3600 \
+            --timeout 300 \
             --no-session-affinity \
             --cpu 1 \
             --memory 512Mi \
             --env-vars-file cloud-run.env.yaml \
+            --set-secrets DATABASE_URL=DATABASE_URL:latest,REDIS_URL=REDIS_URL:latest,SEED_USER_EMAIL=SEED_USER_EMAIL:latest,SEED_USER_PASSWORD=SEED_USER_PASSWORD:latest,SATURN_GITHUB_OAUTH_CLIENT_ID=SATURN_GITHUB_OAUTH_CLIENT_ID:latest,SATURN_GITHUB_OAUTH_CLIENT_SECRET=SATURN_GITHUB_OAUTH_CLIENT_SECRET:latest,SATURN_GOOGLE_OAUTH_CLIENT_ID=SATURN_GOOGLE_OAUTH_CLIENT_ID:latest,SATURN_GOOGLE_OAUTH_CLIENT_SECRET=SATURN_GOOGLE_OAUTH_CLIENT_SECRET:latest,RESEND_API_KEY=RESEND_API_KEY:latest,RESEND_FROM=RESEND_FROM:latest,POLICY_LLM_BASE_URL=POLICY_LLM_BASE_URL:latest,POLICY_LLM_API_KEY=POLICY_LLM_API_KEY:latest,POLICY_LLM_MODEL=POLICY_LLM_MODEL:latest \
+            --add-cloudsql-instances "${{ vars.CLOUD_SQL_INSTANCE_CONNECTION_NAME }}" \
+            --vpc-connector "${{ vars.SERVERLESS_VPC_CONNECTOR }}" \
+            --vpc-egress private-ranges-only \
+            --startup-probe=timeoutSeconds=10,periodSeconds=10,failureThreshold=36,tcpSocket.port=8000
+
+      - name: Deploy webhook worker
+        run: |
+          gcloud run deploy saturn-worker \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --image "${{ steps.image.outputs.uri }}@${{ steps.build.outputs.digest }}" \
+            --platform managed \
+            --no-allow-unauthenticated \
+            --ingress internal \
+            --port 8000 \
+            --timeout 300 \
+            --min-instances 1 \
+            --max-instances 1 \
+            --no-cpu-throttling \
+            --cpu 1 \
+            --memory 512Mi \
+            --env-vars-file cloud-run.worker.env.yaml \
             --set-secrets DATABASE_URL=DATABASE_URL:latest,REDIS_URL=REDIS_URL:latest,SEED_USER_EMAIL=SEED_USER_EMAIL:latest,SEED_USER_PASSWORD=SEED_USER_PASSWORD:latest,SATURN_GITHUB_OAUTH_CLIENT_ID=SATURN_GITHUB_OAUTH_CLIENT_ID:latest,SATURN_GITHUB_OAUTH_CLIENT_SECRET=SATURN_GITHUB_OAUTH_CLIENT_SECRET:latest,SATURN_GOOGLE_OAUTH_CLIENT_ID=SATURN_GOOGLE_OAUTH_CLIENT_ID:latest,SATURN_GOOGLE_OAUTH_CLIENT_SECRET=SATURN_GOOGLE_OAUTH_CLIENT_SECRET:latest,RESEND_API_KEY=RESEND_API_KEY:latest,RESEND_FROM=RESEND_FROM:latest,POLICY_LLM_BASE_URL=POLICY_LLM_BASE_URL:latest,POLICY_LLM_API_KEY=POLICY_LLM_API_KEY:latest,POLICY_LLM_MODEL=POLICY_LLM_MODEL:latest \
             --add-cloudsql-instances "${{ vars.CLOUD_SQL_INSTANCE_CONNECTION_NAME }}" \
             --vpc-connector "${{ vars.SERVERLESS_VPC_CONNECTOR }}" \

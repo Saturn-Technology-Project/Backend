@@ -80,7 +80,7 @@ async def saturn_mcp_endpoint(request: Request, session: SessionDep) -> JSONResp
 async def saturn_mcp_listen(request: Request, session: SessionDep) -> StreamingResponse:
     user, _client_name, client_id = await _caller(request, session)
     session_id = (request.headers.get("mcp-session-id") or "").strip()
-    record = mcp_sessions.get(session_id, user.id, client_id)
+    record = await mcp_sessions.get(session_id, user.id, client_id)
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "MCP session not found")
 
@@ -96,7 +96,7 @@ async def saturn_mcp_listen(request: Request, session: SessionDep) -> StreamingR
                     return
                 yield f"event: message\ndata: {json.dumps(note, separators=(',', ':'))}\n\n"
         finally:
-            mcp_sessions.close(session_id)
+            await mcp_sessions.close(session_id)
 
     return StreamingResponse(
         events(),
