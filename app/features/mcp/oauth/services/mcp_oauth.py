@@ -269,9 +269,9 @@ class McpOAuth:
                 name=name,
                 endpoint=endpoint,
                 nonce=nonce,
-                verifier_ciphertext=seal(verifier),
+                verifier_ciphertext=seal(verifier, user.organization_id, user.id),
                 client_id=registered["client_id"],
-                client_secret_ciphertext=seal(registered["client_secret"]) if registered["client_secret"] else "",
+                client_secret_ciphertext=seal(registered["client_secret"], user.organization_id, user.id) if registered["client_secret"] else "",
                 token_endpoint=found.token_endpoint,
                 resource=found.resource,
                 scope=found.scope,
@@ -349,8 +349,8 @@ class McpOAuth:
             await session.delete(pending)
             await session.flush()
             return _page(False, nonce, "The MCP provider did not return an authorization code.")
-        verifier = open_secret(pending.verifier_ciphertext)
-        secret = open_secret(pending.client_secret_ciphertext)
+        verifier = open_secret(pending.verifier_ciphertext, pending.organization_id, pending.user_id)
+        secret = open_secret(pending.client_secret_ciphertext, pending.organization_id, pending.user_id)
         try:
             token = await self._exchange(pending, code=code, verifier=verifier, client_secret=secret)
             from app.features.mcp.servers.services.mcp_connect import mcp_connect_service

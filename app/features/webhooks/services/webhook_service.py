@@ -114,7 +114,7 @@ async def create_endpoint(
     secret = secrets.token_urlsafe(32)
     endpoint_id = new_id("wh")
     secret_id = f"whsec_{endpoint_id}"
-    await put_secret(session, secret_id, secret)
+    await put_secret(session, secret_id, secret, organization_id)
     row = WebhookEndpoint(
         id=endpoint_id,
         organization_id=organization_id,
@@ -153,7 +153,7 @@ async def update_endpoint(
 
 async def reveal_secret(session: AsyncSession, organization_id: str, endpoint_id: str) -> str:
     row = await _endpoint(session, organization_id, endpoint_id)
-    secret = await get_secret(session, row.secret_id)
+    secret = await get_secret(session, row.secret_id, organization_id)
     if not secret:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Signing secret is not available")
     return secret
@@ -164,7 +164,7 @@ async def rotate_secret(session: AsyncSession, organization_id: str, endpoint_id
 
     row = await _endpoint(session, organization_id, endpoint_id)
     secret = secrets.token_urlsafe(32)
-    await put_secret(session, row.secret_id, secret)
+    await put_secret(session, row.secret_id, secret, organization_id)
     row.updated_at = utcnow()
     await session.flush()
     return secret
@@ -378,7 +378,7 @@ async def deliver_one(session: AsyncSession, row: WebhookDelivery, now: datetime
     secret = ""
     try:
         require_webhook_url(endpoint.url)
-        secret = await get_secret(session, endpoint.secret_id)
+        secret = await get_secret(session, endpoint.secret_id, row.organization_id)
     except HTTPException:
         await _finish(session, row, now, None, "destination not allowed", secret, dead=True)
         return

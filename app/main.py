@@ -50,9 +50,9 @@ def _sqlite() -> bool:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    from app.features.credentials.vault.services.pq_crypto import require_seed
+    from app.features.credentials.vault.services.pq_crypto import require_root
 
-    require_seed()
+    require_root()
     if not settings.skip_db_bootstrap:
         # Postgres schema is owned by Alembic (`alembic upgrade head` in Docker).
         # create_all races with those migrations and crashes on existing tables.

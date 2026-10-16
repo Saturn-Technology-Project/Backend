@@ -6,39 +6,43 @@ from app.features.credentials.vault.services.credential_service import open_secr
 
 
 def test_credentials_use_mlkem_1024_and_hide_the_plaintext():
-    token = seal("gho-example-token")
-    assert token.startswith("pq1.")
+    token = seal("gho-example-token", "org_acme")
+    assert token.startswith("pq2.")
     assert "gho-example-token" not in token
-    assert open_secret(token) == "gho-example-token"
-    raw = base64.b64decode(token.removeprefix("pq1."))
+    assert open_secret(token, "org_acme") == "gho-example-token"
+    assert open_secret(token, "org_other") == ""
+    assert open_secret(token, "org_acme", "user_other") == ""
+    raw = base64.b64decode(token.removeprefix("pq2."))
     assert len(raw) > 1568
 
 
 def test_tampered_ciphertext_does_not_open():
-    token = seal("gho-example-token")
-    raw = bytearray(base64.b64decode(token.removeprefix("pq1.")))
+    token = seal("gho-example-token", "org_acme")
+    raw = bytearray(base64.b64decode(token.removeprefix("pq2.")))
     raw[-1] ^= 1
-    broken = "pq1." + base64.b64encode(bytes(raw)).decode()
-    assert open_secret(broken) == ""
+    broken = "pq2." + base64.b64encode(bytes(raw)).decode()
+    assert open_secret(broken, "org_acme") == ""
 
 
-def test_gateway_seed_comes_from_the_installed_key():
+def test_tenants_do_not_share_a_credential_key():
     from app.features.credentials.vault.services import pq_crypto
 
-    assert pq_crypto.require_seed() == b"\x11" * 64
+    assert pq_crypto.mlkem_seed("org_acme") != pq_crypto.mlkem_seed("org_other")
+    assert pq_crypto.mlkem_seed("org_acme", "user_a") != pq_crypto.mlkem_seed("org_acme", "user_b")
+    assert pq_crypto.content_key("org_acme") != pq_crypto.content_key("org_other")
 
 
-def test_missing_kem_seed_refuses_to_start(monkeypatch):
+def test_missing_kms_key_refuses_to_start(monkeypatch):
     from app.features.credentials.vault.services import pq_crypto
 
-    monkeypatch.setattr(pq_crypto, "_seed_bytes", None)
-    monkeypatch.setattr(pq_crypto, "_private", None)
-    monkeypatch.delenv("SATURN_KEM_SEED", raising=False)
+    monkeypatch.setattr(pq_crypto, "_root", None)
+    monkeypatch.setattr(pq_crypto, "_keys", {})
+    monkeypatch.delenv("SATURN_KMS_KEY", raising=False)
     try:
-        with pytest.raises(RuntimeError, match="SATURN_KEM_SEED"):
-            pq_crypto.require_seed()
+        with pytest.raises(RuntimeError, match="SATURN_KMS_KEY"):
+            pq_crypto.require_root()
     finally:
-        pq_crypto.install_seed(b"\x11" * 64)
+        pq_crypto.install_root(b"\x11" * 32)
 
 
 @pytest.mark.asyncio
@@ -67,7 +71,7 @@ async def test_connected_mcp_keeps_the_token_out_of_the_server_row(client, monke
         server = await session.get(McpServer, body["id"])
         assert server.credential_id.startswith("mcp-")
         vault = await session.get(SecretVault, server.credential_id)
-        assert vault.ciphertext.startswith("pq1.")
+        assert vault.ciphertext.startswith("pq2.")
         assert "access-1" not in vault.ciphertext
     finally:
         await session_gen.aclose()

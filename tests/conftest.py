@@ -7,9 +7,9 @@ os.environ["SEED_USER_EMAIL"] = "rick@saturn.ai"
 os.environ["SEED_USER_PASSWORD"] = "saturn"
 os.environ["SEED_USER_NAME"] = "Rick"
 
-from app.features.credentials.vault.services.pq_crypto import install_seed
+from app.features.credentials.vault.services.pq_crypto import install_root
 
-install_seed(b"\x11" * 64)
+install_root(b"\x11" * 32)
 
 import pytest
 from httpx import ASGITransport, AsyncClient

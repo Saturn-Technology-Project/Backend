@@ -10,7 +10,7 @@ from app.db.database import Base
 
 
 class SecretVault(Base):
-    """Post-quantum ciphertext only. The ML-KEM private seed is not stored here."""
+    """Post-quantum ciphertext only. The root key stays in Cloud KMS."""
 
     __tablename__ = "secret_vault"
 

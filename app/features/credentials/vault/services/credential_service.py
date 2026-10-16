@@ -15,18 +15,18 @@ _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _KINDS = {"model", "key"}
 
 
-def seal(plain: str) -> str:
+def seal(plain: str, organization_id: str, user_id: str = "") -> str:
     from app.features.credentials.vault.services.pq_crypto import seal as pq_seal
 
-    return pq_seal(plain)
+    return pq_seal(plain, organization_id, user_id)
 
 
-def open_secret(token: str) -> str:
+def open_secret(token: str, organization_id: str, user_id: str = "") -> str:
     from app.features.credentials.vault.services.pq_crypto import open_secret as pq_open
 
-    if not token or not token.startswith("pq1."):
+    if not token or not token.startswith("pq2."):
         return ""
-    return pq_open(token)
+    return pq_open(token, organization_id, user_id)
 
 
 def _clip(value: str, limit: int) -> str:
@@ -81,7 +81,7 @@ class CredentialService:
 
             vault_id = f"org-{current.id}"
             if body.secret:
-                await put_secret(session, vault_id, body.secret)
+                await put_secret(session, vault_id, body.secret, user.organization_id)
                 current.vault_id = vault_id
             else:
                 await delete_secret(session, current.vault_id or vault_id)

@@ -19,7 +19,7 @@ def _empty() -> dict[str, str]:
 async def read_grant(session: AsyncSession, server: McpServer) -> dict[str, str]:
     if not server.credential_id:
         return _empty()
-    raw = await get_secret(session, server.credential_id)
+    raw = await get_secret(session, server.credential_id, server.organization_id)
     return _parse(raw)
 
 
@@ -31,7 +31,7 @@ async def write_grant(session: AsyncSession, server: McpServer, grant: dict[str,
         await delete_secret(session, secret_id)
         server.credential_id = ""
         return
-    await put_secret(session, secret_id, json.dumps(body))
+    await put_secret(session, secret_id, json.dumps(body), server.organization_id)
     server.credential_id = secret_id
 
 

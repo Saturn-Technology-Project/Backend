@@ -1,7 +1,7 @@
 """Seal tool arguments and upstream bodies so a database copy is not readable.
 
-The running gateway can still open an organization's content. The key is derived
-per organization from the vault seed, separate from the credential seal. Platform
+The running gateway can still open an organization's content. The key is a
+KMS MAC of that organization id, separate from the credential seal. Platform
 admin responses never receive the opened content.
 """
 
@@ -15,11 +15,11 @@ from typing import Any
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.core.ids import utcnow
-from app.features.credentials.vault.services.pq_crypto import _hkdf, _seed
+from app.features.credentials.vault.services.pq_crypto import content_key
 
 CONTENT_KEYS = ("arguments", "raw_request", "raw_response", "server_result", "agent_result")
 CONTENT_TTL = timedelta(days=7)
-_INFO = b"saturn-org-content-v1"
+_PREFIX = "s2."
 
 
 def policy_fields(rule: Any) -> list[str]:
@@ -46,18 +46,20 @@ def policy_fields(rule: Any) -> list[str]:
 
 
 def _key(organization_id: str) -> bytes:
-    return _hkdf(_seed(), _INFO + b":" + organization_id.encode(), 32)
+    return content_key(organization_id)
 
 
 def seal_json(organization_id: str, value: Any) -> str:
     nonce = os.urandom(12)
     body = json.dumps(value, separators=(",", ":"), sort_keys=True, default=str).encode()
     encrypted = AESGCM(_key(organization_id)).encrypt(nonce, body, None)
-    return (nonce + encrypted).hex()
+    return _PREFIX + (nonce + encrypted).hex()
 
 
 def open_json(organization_id: str, token: str) -> Any:
-    raw = bytes.fromhex(token)
+    if not isinstance(token, str) or not token.startswith(_PREFIX):
+        return None
+    raw = bytes.fromhex(token[len(_PREFIX) :])
     nonce, encrypted = raw[:12], raw[12:]
     body = AESGCM(_key(organization_id)).decrypt(nonce, encrypted, None)
     return json.loads(body.decode())

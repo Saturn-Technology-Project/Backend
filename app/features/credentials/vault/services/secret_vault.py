@@ -23,13 +23,19 @@ def _gcp_name(secret_id: str) -> str:
     return f"sat-{cleaned}"[:255]
 
 
-async def put_secret(session: AsyncSession, secret_id: str, plaintext: str) -> None:
+async def put_secret(
+    session: AsyncSession,
+    secret_id: str,
+    plaintext: str,
+    organization_id: str,
+    user_id: str = "",
+) -> None:
     if not secret_id:
         return
     if not plaintext:
         await delete_secret(session, secret_id)
         return
-    blob = seal(plaintext)
+    blob = seal(plaintext, organization_id, user_id)
     project = _project()
     if project:
         await asyncio.to_thread(_gcp_put, project, secret_id, blob)
@@ -44,8 +50,8 @@ async def put_secret(session: AsyncSession, secret_id: str, plaintext: str) -> N
     await session.flush()
 
 
-async def get_secret(session: AsyncSession, secret_id: str) -> str:
-    if not secret_id:
+async def get_secret(session: AsyncSession, secret_id: str, organization_id: str, user_id: str = "") -> str:
+    if not secret_id or not organization_id:
         return ""
     project = _project()
     if project:
@@ -53,7 +59,7 @@ async def get_secret(session: AsyncSession, secret_id: str) -> str:
     else:
         row = await session.get(SecretVault, secret_id)
         blob = row.ciphertext if row is not None else ""
-    return open_secret(blob)
+    return open_secret(blob, organization_id, user_id)
 
 
 async def delete_secret(session: AsyncSession, secret_id: str) -> None:
