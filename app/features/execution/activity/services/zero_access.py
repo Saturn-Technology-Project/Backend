@@ -178,6 +178,10 @@ def open_recovery_backup(recovery_key: bytes, organization_id: str, backup: dict
 
 def member_wrap_aad(organization_id: str, user_id: str, key_version: int) -> bytes:
     return f"member\n{organization_id}\n{user_id}\n{key_version}".encode()
+def _member_wrap_material(password: str) -> bytes:
+    return hashlib.sha256(b"saturn-member-wrap-v1\n" + password.encode()).digest()
+
+
 def password_backup(password: str, user_id: str, private_key: bytes) -> dict[str, str | int]:
     salt = os.urandom(16)
     nonce = os.urandom(12)
@@ -186,7 +190,7 @@ def password_backup(password: str, user_id: str, private_key: bytes) -> dict[str
         length=32,
         salt=salt,
         iterations=PASSWORD_ITERATIONS,
-    ).derive(password.encode())
+    ).derive(_member_wrap_material(password))
     ciphertext = AESGCM(kek).encrypt(nonce, private_key, f"password\n{user_id}".encode())
     return {
         "v": FORMAT_VERSION,
@@ -206,7 +210,7 @@ def open_password_backup(password: str, user_id: str, backup: dict[str, Any]) ->
         length=32,
         salt=bytes.fromhex(str(backup["salt"])),
         iterations=PASSWORD_ITERATIONS,
-    ).derive(password.encode())
+    ).derive(_member_wrap_material(password))
     return AESGCM(kek).decrypt(
         bytes.fromhex(str(backup["nonce"])),
         bytes.fromhex(str(backup["ciphertext"])),

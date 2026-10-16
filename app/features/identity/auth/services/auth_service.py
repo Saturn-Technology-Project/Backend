@@ -19,13 +19,23 @@ from app.features.identity.auth.services.throttle import consume
 settings = get_settings()
 PBKDF2_ROUNDS = 210_000
 RECENT_AUTH = timedelta(minutes=10)
+_LOGIN_PREFIX = "v1."
+_LOGIN_LABEL = b"saturn-login-v1\n"
+
+
+def login_secret(password: str) -> str:
+    """The first hash. A browser sends this; a raw password is hashed here."""
+    body = password[len(_LOGIN_PREFIX) :]
+    if password.startswith(_LOGIN_PREFIX) and len(body) == 64 and all(char in "0123456789abcdef" for char in body):
+        return body
+    return hashlib.sha256(_LOGIN_LABEL + password.encode("utf-8")).hexdigest()
 
 
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac(
         "sha256",
-        password.encode("utf-8"),
+        login_secret(password).encode("utf-8"),
         bytes.fromhex(salt),
         PBKDF2_ROUNDS,
     )
@@ -41,7 +51,7 @@ def verify_password(password: str, stored: str) -> bool:
         return False
     check = hashlib.pbkdf2_hmac(
         "sha256",
-        password.encode("utf-8"),
+        login_secret(password).encode("utf-8"),
         bytes.fromhex(salt),
         int(rounds),
     )

@@ -17,6 +17,16 @@ from app.features.execution.activity.services.zero_access import (
 from tests.oauth_access import oauth_access
 
 
+def test_login_verifier_cannot_open_the_member_key():
+    from app.features.identity.auth.services.auth_service import login_secret
+
+    private, public = generate_mlkem()
+    backup = password_backup("correct horse", "user_1", private)
+    assert open_password_backup("correct horse", "user_1", backup) == private
+    with pytest.raises(Exception):
+        open_password_backup(login_secret("correct horse"), "user_1", backup)
+
+
 def test_member_password_backup_and_recipient_wrap():
     private, public = generate_mlkem()
     envelope = encrypt_payload(

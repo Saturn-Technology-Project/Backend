@@ -333,7 +333,20 @@ async def authorize(request: Request, session: SessionDep):
               <label>電子郵件 Email<input name="email" type="email" autocomplete="username" required></label>
               <label>密碼 Password<input name="password" type="password" autocomplete="current-password" required></label>
               <div class="row"><button type="submit">登入 Sign in</button></div>
-            </form>""",
+            </form>
+            <script>
+              document.querySelector('form[action="/oauth/login"]').addEventListener('submit', async (event) => {{
+                const form = event.currentTarget;
+                const input = form.querySelector('input[name="password"]');
+                if (!input || input.dataset.sealed === '1') return;
+                event.preventDefault();
+                const bytes = new TextEncoder().encode('saturn-login-v1\\n' + input.value);
+                const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+                input.value = 'v1.' + [...digest].map((item) => item.toString(16).padStart(2, '0')).join('');
+                input.dataset.sealed = '1';
+                form.submit();
+              }});
+            </script>""",
         )
     identity = profile_identity(user.id, user.organization_id, user.organization.kind, user.organization.plan)
     csrf = secrets.token_urlsafe(18)
