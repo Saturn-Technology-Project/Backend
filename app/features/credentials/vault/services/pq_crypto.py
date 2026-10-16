@@ -10,7 +10,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 _PREFIX = "pq1."
 _INFO_AES = b"saturn-credential-aes-256-gcm-v1"
-_FALLBACK_SEED = base64.b64decode("noH34+h4eNdeKTOYslHcTbs8cbYaAvbXGeXps41eUYwyu9Tny4rA5UjXV+DksUokHvYY+96z1yZQKjLZ7JE2+g==")
+_SEED_ENV = "SATURN_KEM_SEED"
+_seed_bytes: bytes | None = None
 _private: MLKEM1024PrivateKey | None = None
 
 
@@ -18,8 +19,36 @@ def _hkdf(material: bytes, info: bytes, length: int) -> bytes:
     return HKDF(algorithm=hashes.SHA384(), length=length, salt=None, info=info).derive(material)
 
 
+def install_seed(seed: bytes) -> None:
+    global _seed_bytes, _private
+    if len(seed) != 64:
+        raise RuntimeError("ML-KEM seed must be 64 bytes")
+    _seed_bytes = seed
+    _private = None
+
+
+def _seed_from_env() -> bytes:
+    raw = os.environ.get(_SEED_ENV, "").strip()
+    if not raw:
+        raise RuntimeError(f"{_SEED_ENV} is required")
+    try:
+        seed = base64.b64decode(raw, validate=True)
+    except Exception as exc:
+        raise RuntimeError(f"{_SEED_ENV} is not valid base64") from exc
+    if len(seed) != 64:
+        raise RuntimeError(f"{_SEED_ENV} must be 64 bytes")
+    return seed
+
+
+def require_seed() -> bytes:
+    global _seed_bytes
+    if _seed_bytes is None:
+        _seed_bytes = _seed_from_env()
+    return _seed_bytes
+
+
 def _seed() -> bytes:
-    return _FALLBACK_SEED
+    return require_seed()
 
 
 def private_key() -> MLKEM1024PrivateKey:

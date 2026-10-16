@@ -7,6 +7,10 @@ os.environ["SEED_USER_EMAIL"] = "rick@saturn.ai"
 os.environ["SEED_USER_PASSWORD"] = "saturn"
 os.environ["SEED_USER_NAME"] = "Rick"
 
+from app.features.credentials.vault.services.pq_crypto import install_seed
+
+install_seed(b"\x11" * 64)
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event

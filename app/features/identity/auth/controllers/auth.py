@@ -41,7 +41,13 @@ from app.schemas import (
 from app.features.organization.org.services.access import allows, empty_permissions, normalize_permissions
 from app.features.organization.org.services.organization_service import serialize_organization
 from app.features.platform.admin.services.admin_service import admin_service
-from app.features.identity.auth.services.auth_service import auth_service, hash_token, verify_password
+from app.features.identity.auth.services.auth_service import (
+    _pbkdf2_ok,
+    auth_service,
+    hash_token,
+    migration_stage,
+    verify_password,
+)
 from app.features.identity.auth.services.mfa import mfa_service
 from app.features.identity.auth.services.passkeys import passkey_service
 from app.features.identity.auth.services.photo import clean_photo
@@ -210,9 +216,34 @@ async def register(body: RegisterRequest, request: Request, response: Response, 
     return await _issue_login(session, request, response, user)
 
 
+@router.post("/login/migration")
+async def login_migration(body: LoginRequest, session: SessionDep):
+    normalized = body.email.strip().lower()
+    user = await session.scalar(select(User).where(User.email == normalized))
+    if user is None or user.status != "active":
+        return {}
+    stored = user.password_hash
+    if verify_password(body.password, stored):
+        return {}
+    if body.legacy_v1 and verify_password(body.legacy_v1, stored):
+        return {}
+    if body.legacy_password and _pbkdf2_ok(body.legacy_password, stored):
+        return {}
+    stage = migration_stage(stored, legacy_v1=body.legacy_v1, legacy_password=body.legacy_password)
+    if stage:
+        return {"migration": stage}
+    return {}
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest, request: Request, response: Response, session: SessionDep):
-    user = await auth_service.authenticate(session, body.email, body.password)
+    user = await auth_service.authenticate(
+        session,
+        body.email,
+        body.password,
+        legacy_password=body.legacy_password,
+        legacy_v1=body.legacy_v1,
+    )
     pending = await _begin_mfa(session, user, body.locale)
     if pending is not None:
         return pending
