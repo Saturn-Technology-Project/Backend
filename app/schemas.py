@@ -95,28 +95,6 @@ class McpOAuthStart(BaseModel):
     server: McpServerRead | None = None
 
 
-class AppMcpToolRead(BaseModel):
-    tool_id: str
-    description: str = ""
-
-
-class AppMcpServerRead(BaseModel):
-    id: str
-    name: str
-    url: str
-    tools: list[AppMcpToolRead] = Field(default_factory=list)
-
-
-class AppMcpRead(BaseModel):
-    servers: list[AppMcpServerRead] = Field(default_factory=list)
-    attachments: dict[str, list[str]] = Field(default_factory=dict)
-
-
-class AppMcpWrite(BaseModel):
-    servers: list[AppMcpServerRead] = Field(default_factory=list)
-    attachments: dict[str, list[str]] = Field(default_factory=dict)
-
-
 class ToolSetItemWrite(BaseModel):
     tool_id: str
     approval: bool = False
@@ -404,7 +382,6 @@ class UserRead(ORMModel):
     employee: EmployeeRead | None = None
     agents: list[AgentRead] = Field(default_factory=list)
     mcp_servers: list[McpServerRead] = Field(default_factory=list)
-    app_mcp: AppMcpRead = Field(default_factory=AppMcpRead)
     tool_sets: list[ToolSetRead] = Field(default_factory=list)
     users: list[OrgUserRead] = Field(default_factory=list)
     assigned_agent_ids: list[str] = Field(default_factory=list)
