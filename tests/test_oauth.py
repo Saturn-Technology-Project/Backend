@@ -115,3 +115,24 @@ async def test_agent_registers_with_oauth_and_binds_its_profile(client):
     cursor = next(item for item in listed if item["name"] == "Cursor")
     assert cursor["origin"] == "saturn_mcp"
     assert cursor["profile_id"] == "org_saturn:user_operator"
+
+
+@pytest.mark.asyncio
+async def test_root_does_not_advertise_the_build(client):
+    response = await client.get("/")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_register_is_rate_limited(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.features.identity.oauth.controllers.oauth.registration_allowed",
+        lambda _request: False,
+    )
+    response = await client.post(
+        "/oauth/register",
+        json={"redirect_uris": ["http://127.0.0.1:8765/callback"]},
+    )
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "600"

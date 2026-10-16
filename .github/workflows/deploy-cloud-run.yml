@@ -93,7 +93,7 @@ jobs:
             --allow-unauthenticated \
             --port 8000 \
             --timeout 3600 \
-            --session-affinity \
+            --no-session-affinity \
             --cpu 1 \
             --memory 512Mi \
             --env-vars-file cloud-run.env.yaml \
