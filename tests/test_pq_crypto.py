@@ -3,7 +3,6 @@ import base64
 import pytest
 
 from app.features.credentials.vault.services.credential_service import open_secret, seal
-from app.features.credentials.vault.services.pq_crypto import reset_key
 
 
 def test_credentials_use_mlkem_1024_and_hide_the_plaintext():
@@ -23,15 +22,34 @@ def test_tampered_ciphertext_does_not_open():
     assert open_secret(broken) == ""
 
 
-def test_a_different_kem_seed_cannot_open_the_ciphertext(monkeypatch):
-    token = seal("gho-example-token")
-    monkeypatch.setenv("SATURN_KEM_SEED", base64.b64encode(b"\x07" * 64).decode())
-    reset_key()
+def test_gateway_seed_is_the_fixed_key():
+    from app.features.credentials.vault.services import pq_crypto
+
+    assert len(pq_crypto._FALLBACK_SEED) == 64
+    assert pq_crypto._seed() == pq_crypto._FALLBACK_SEED
+
+
+@pytest.mark.asyncio
+async def test_unreadable_vault_ciphertext_is_removed(client):
+    from app.core.ids import utcnow
+    from app.db.database import get_session
+    from app.features.credentials.vault.models.secret_vault import SecretVault
+    from app.features.credentials.vault.services.secret_vault import drop_unreadable_secrets
+    from app.main import app
+
+    session_gen = app.dependency_overrides[get_session]()
+    session = await session_gen.__anext__()
     try:
-        assert open_secret(token) == ""
+        session.add(SecretVault(id="legacy", ciphertext="pq1.not-this-key", updated_at=utcnow()))
+        session.add(SecretVault(id="current", ciphertext=seal("still-here"), updated_at=utcnow()))
+        await session.flush()
+        await drop_unreadable_secrets(session)
+        assert await session.get(SecretVault, "legacy") is None
+        kept = await session.get(SecretVault, "current")
+        assert kept is not None
+        assert open_secret(kept.ciphertext) == "still-here"
     finally:
-        monkeypatch.setenv("SATURN_KEM_SEED", base64.b64encode(b"\x42" * 64).decode())
-        reset_key()
+        await session_gen.aclose()
 
 
 @pytest.mark.asyncio

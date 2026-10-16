@@ -8,11 +8,9 @@ from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM1024PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from app.core.config import get_settings
-
 _PREFIX = "pq1."
 _INFO_AES = b"saturn-credential-aes-256-gcm-v1"
-_INFO_SEED = b"saturn-mlkem-1024-seed-v1"
+_FALLBACK_SEED = base64.b64decode("noH34+h4eNdeKTOYslHcTbs8cbYaAvbXGeXps41eUYwyu9Tny4rA5UjXV+DksUokHvYY+96z1yZQKjLZ7JE2+g==")
 _private: MLKEM1024PrivateKey | None = None
 
 
@@ -21,14 +19,7 @@ def _hkdf(material: bytes, info: bytes, length: int) -> bytes:
 
 
 def _seed() -> bytes:
-    configured = os.environ.get("SATURN_KEM_SEED", "").strip()
-    if configured:
-        seed = base64.b64decode(configured)
-        if len(seed) != 64:
-            raise RuntimeError("SATURN_KEM_SEED must be 64 bytes, base64-encoded")
-        return seed
-    material = os.environ.get("SATURN_CREDENTIAL_KEY") or get_settings().database_url
-    return _hkdf(material.encode(), _INFO_SEED, 64)
+    return _FALLBACK_SEED
 
 
 def private_key() -> MLKEM1024PrivateKey:

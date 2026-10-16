@@ -1,8 +1,6 @@
-import base64
 import os
 
 os.environ["SKIP_DB_BOOTSTRAP"] = "true"
-os.environ["SATURN_KEM_SEED"] = base64.b64encode(b"\x42" * 64).decode()
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite://"
 os.environ["IN_PROCESS_RUNTIME"] = "true"
 os.environ["SEED_USER_EMAIL"] = "rick@saturn.ai"

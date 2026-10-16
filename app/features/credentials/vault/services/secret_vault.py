@@ -8,8 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.ids import utcnow
+from app.features.credentials.vault.models.credential import OrgCredential
 from app.features.credentials.vault.models.secret_vault import SecretVault
 from app.features.credentials.vault.services.pq_crypto import open_secret, seal
+from app.features.mcp.oauth.models.mcp_oauth import McpOAuthPending
 
 _SECRET_ID = re.compile(r"[^A-Za-z0-9_-]+")
 
@@ -54,6 +56,29 @@ async def get_secret(session: AsyncSession, secret_id: str) -> str:
         row = await session.get(SecretVault, secret_id)
         blob = row.ciphertext if row is not None else ""
     return open_secret(blob)
+
+
+async def drop_unreadable_secrets(session: AsyncSession) -> None:
+    removed: set[str] = set()
+    for row in list(await session.scalars(select(SecretVault))):
+        if row.ciphertext and open_secret(row.ciphertext):
+            continue
+        removed.add(row.id)
+        await session.delete(row)
+    if removed:
+        linked = await session.scalars(select(OrgCredential).where(OrgCredential.vault_id.in_(removed)))
+        for credential in linked:
+            credential.vault_id = ""
+    for credential in await session.scalars(select(OrgCredential)):
+        if credential.secret_ciphertext and not open_secret(credential.secret_ciphertext):
+            credential.secret_ciphertext = ""
+    for pending in list(await session.scalars(select(McpOAuthPending))):
+        if pending.verifier_ciphertext and not open_secret(pending.verifier_ciphertext):
+            await session.delete(pending)
+            continue
+        if pending.client_secret_ciphertext and not open_secret(pending.client_secret_ciphertext):
+            pending.client_secret_ciphertext = ""
+    await session.flush()
 
 
 async def delete_secret(session: AsyncSession, secret_id: str) -> None:

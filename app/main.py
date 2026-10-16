@@ -59,6 +59,9 @@ async def lifespan(_app: FastAPI):
             async with engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
         async with SessionLocal() as session:
+            from app.features.credentials.vault.services.secret_vault import drop_unreadable_secrets
+
+            await drop_unreadable_secrets(session)
             await seed_if_empty(session)
             await session.commit()
     worker = None
