@@ -433,6 +433,10 @@ async def authorize(request: Request, session: SessionDep):
 
 @router.post("/oauth/login")
 async def oauth_login(request: Request, session: SessionDep):
+    from app.core.rate_limit import login_allowed
+
+    if not login_allowed(request):
+        return _page("Connect Agents", "<h1>請稍後再試</h1><p>Too many sign-in attempts.</p>", 429)
     form = await _posted(request)
     fields = {key: form.get(key, "") for key in ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type")}
     try:

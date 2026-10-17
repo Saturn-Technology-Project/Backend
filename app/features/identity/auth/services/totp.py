@@ -11,10 +11,11 @@ import time
 from urllib.parse import quote
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ids import new_id, utcnow
+from app.core.rate_limit import _redis_client, _use_redis
 from app.features.credentials.vault.services.credential_service import open_secret, seal
 from app.features.identity.auth.models.mfa import TotpBackupCode
 from app.features.identity.auth.models.user import User
@@ -22,6 +23,14 @@ from app.features.identity.auth.models.user import User
 _STEP = 30
 _DIGITS = 6
 _BACKUP_COUNT = 8
+_WINDOW_SECONDS = 90
+MAX_ATTEMPTS = 5
+
+_used_steps: dict[str, int] = {}
+
+
+def reset() -> None:
+    _used_steps.clear()
 
 
 def _hotp(secret: bytes, counter: int) -> str:
@@ -36,16 +45,52 @@ def current_code(secret_b32: str, now: float | None = None) -> str:
     return _hotp(_decode(secret_b32), int(moment // _STEP))
 
 
-def verify_code(secret_b32: str, code: str, now: float | None = None) -> bool:
+def _matched_step(secret_b32: str, code: str, now: float | None = None) -> int | None:
     presented = code.strip()
     if len(presented) != _DIGITS or not presented.isdigit():
-        return False
+        return None
     moment = time.time() if now is None else now
     counter = int(moment // _STEP)
-    matched = False
+    secret = _decode(secret_b32)
+    matched_step: int | None = None
     for offset in (-1, 0, 1):
-        matched |= hmac.compare_digest(_hotp(_decode(secret_b32), counter + offset), presented)
-    return matched
+        step = counter + offset
+        if hmac.compare_digest(_hotp(secret, step), presented):
+            matched_step = step
+    return matched_step
+
+
+def _claim_step(secret_b32: str, step: int) -> bool:
+    fp = hashlib.sha256(secret_b32.strip().upper().encode()).hexdigest()
+    last = _used_steps.get(fp, 0)
+    if step <= last:
+        return False
+    if _use_redis():
+        try:
+            client = _redis_client()
+            prev = client.get(f"saturn:totp:last:{fp}")
+            if prev is not None and step <= int(prev):
+                return False
+            if not client.set(f"saturn:totp:used:{fp}:{step}", "1", nx=True, ex=_WINDOW_SECONDS):
+                return False
+            client.set(f"saturn:totp:last:{fp}", str(step), ex=_WINDOW_SECONDS)
+        except Exception:
+            return False
+    _used_steps[fp] = step
+    return True
+
+
+def verify_code(
+    secret_b32: str,
+    code: str,
+    now: float | None = None,
+    *,
+    last_step: int = 0,
+) -> bool:
+    step = _matched_step(secret_b32, code, now)
+    if step is None or step <= last_step:
+        return False
+    return _claim_step(secret_b32, step)
 
 
 def hash_backup_code(code: str) -> str:
@@ -73,6 +118,8 @@ async def begin_setup(session: AsyncSession, user: User) -> dict[str, object]:
     secret_b32 = base64.b32encode(raw).decode().rstrip("=")
     user.totp_secret = seal(secret_b32, user.organization_id, user.id)
     user.totp_enabled = False
+    user.totp_attempts = 0
+    user.totp_last_step = 0
     await session.execute(delete(TotpBackupCode).where(TotpBackupCode.user_id == user.id))
     codes = [secrets.token_hex(4) for _ in range(_BACKUP_COUNT)]
     for code in codes:
@@ -88,16 +135,82 @@ async def begin_setup(session: AsyncSession, user: User) -> dict[str, object]:
     return {"secret": secret_b32, "otpauth_url": _otpauth(user.email, secret_b32), "backup_codes": codes}
 
 
-async def confirm_setup(session: AsyncSession, user: User, code: str) -> None:
+async def confirm_setup(
+    session: AsyncSession,
+    user: User,
+    code: str,
+    *,
+    now: float | None = None,
+) -> None:
     if user.totp_enabled:
-        return
+        raise HTTPException(status.HTTP_409_CONFLICT, "MFA is already enabled")
     if not user.totp_secret:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Start MFA setup first")
+    if (user.totp_attempts or 0) >= MAX_ATTEMPTS:
+        user.totp_secret = ""
+        await session.flush()
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
     try:
         secret_b32 = open_secret(user.totp_secret, user.organization_id, user.id)
     except Exception as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, "MFA setup needs to be started again") from exc
-    if not secret_b32 or not verify_code(secret_b32, code):
+    last_step = int(user.totp_last_step or 0)
+    step = _matched_step(secret_b32, code, now) if secret_b32 else None
+    if step is None or step <= last_step or not _claim_step(secret_b32, step):
+        user.totp_attempts = int(user.totp_attempts or 0) + 1
+        if user.totp_attempts >= MAX_ATTEMPTS:
+            user.totp_secret = ""
+            await session.flush()
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
+        await session.flush()
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That code did not match")
+    user.totp_last_step = step
+    user.totp_attempts = 0
     user.totp_enabled = True
     await session.flush()
+
+
+async def verify_user_totp(
+    session: AsyncSession,
+    user: User,
+    code: str,
+    *,
+    now: float | None = None,
+) -> None:
+    if not user.totp_enabled or not user.totp_secret:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MFA is not enabled")
+    if int(user.totp_attempts or 0) >= MAX_ATTEMPTS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
+    try:
+        secret_b32 = open_secret(user.totp_secret, user.organization_id, user.id)
+    except Exception as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, "MFA needs to be set up again") from exc
+    last_step = int(user.totp_last_step or 0)
+    step = _matched_step(secret_b32, code, now) if secret_b32 else None
+    if step is not None and step > last_step and _claim_step(secret_b32, step):
+        user.totp_last_step = step
+        user.totp_attempts = 0
+        await session.flush()
+        return
+    digest = hash_backup_code(code.strip())
+    backups = list(
+        (
+            await session.scalars(
+                select(TotpBackupCode).where(
+                    TotpBackupCode.user_id == user.id,
+                    TotpBackupCode.used_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    for row in backups:
+        if hmac.compare_digest(row.code_hash, digest):
+            row.used_at = utcnow()
+            user.totp_attempts = 0
+            await session.flush()
+            return
+    user.totp_attempts = int(user.totp_attempts or 0) + 1
+    await session.flush()
+    if user.totp_attempts >= MAX_ATTEMPTS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, "That code did not match")

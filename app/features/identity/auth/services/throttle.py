@@ -18,6 +18,9 @@ _WAIT = "Wait a minute before requesting another code"
 
 
 def client_ip(request: Request) -> str:
+    cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+    if cf_ip:
+        return cf_ip
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded.strip():
         return forwarded.split(",")[0].strip() or "unknown"

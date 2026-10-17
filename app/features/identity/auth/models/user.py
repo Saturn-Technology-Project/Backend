@@ -4,7 +4,7 @@ from datetime import datetime
 
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.ids import utcnow
@@ -31,6 +31,8 @@ class User(Base):
     is_platform_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     totp_secret: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    totp_last_step: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    totp_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False

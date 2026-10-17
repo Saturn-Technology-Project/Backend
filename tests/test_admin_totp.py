@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.features.identity.auth.services.totp import current_code, hash_backup_code
+from app.features.identity.auth.services.totp import current_code, hash_backup_code, verify_code
 
 
 async def _session():
@@ -56,9 +56,54 @@ async def test_admin_without_totp_is_blocked_until_setup(client):
     finally:
         await generator.aclose()
 
-    confirmed = await client.post("/auth/totp/confirm", json={"code": current_code(body["secret"])})
+    code = current_code(body["secret"])
+    confirmed = await client.post("/auth/totp/confirm", json={"code": code})
     assert confirmed.status_code == 204, confirmed.text
     allowed = await client.get("/admin/orgs")
     assert allowed.status_code == 200, allowed.text
     finished = await client.get("/auth/me")
     assert finished.json()["mfa_setup_required"] is False
+
+    # Replaying the same code within the 90-second window is rejected.
+    replayed = await client.post("/auth/totp/verify", json={"code": code})
+    assert replayed.status_code == 400
+
+
+def test_totp_code_cannot_be_reused_within_90_seconds():
+    secret = "JBSWY3DPEHPK3PXP"
+    code = current_code(secret, now=1_800_000.0)
+    assert verify_code(secret, code, now=1_800_000.0) is True
+    assert verify_code(secret, code, now=1_800_000.0) is False
+    assert verify_code(secret, code, now=1_800_029.0) is False
+    assert verify_code(secret, code, now=1_800_035.0) is False
+    next_code = current_code(secret, now=1_800_030.0)
+    assert verify_code(secret, next_code, now=1_800_030.0) is True
+
+
+async def test_totp_confirm_locks_out_after_five_failed_attempts(client):
+    from app.models import User
+
+    session, generator = await _session()
+    try:
+        user = await session.get(User, get_settings().default_actor_id)
+        user.totp_enabled = False
+        user.totp_secret = ""
+        user.totp_attempts = 0
+        await session.commit()
+    finally:
+        await generator.aclose()
+
+    setup = await client.post("/auth/totp/setup")
+    assert setup.status_code == 200
+    secret = setup.json()["secret"]
+
+    for _ in range(4):
+        bad = await client.post("/auth/totp/confirm", json={"code": "000000"})
+        assert bad.status_code == 400
+
+    fifth = await client.post("/auth/totp/confirm", json={"code": "000000"})
+    assert fifth.status_code == 429
+
+    # Even a valid code is rejected once locked out until setup is restarted.
+    late = await client.post("/auth/totp/confirm", json={"code": current_code(secret)})
+    assert late.status_code in {400, 429}

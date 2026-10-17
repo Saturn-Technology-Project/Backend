@@ -13,6 +13,9 @@ _redis = None
 
 
 def client_ip(request: Request) -> str:
+    cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+    if cf_ip:
+        return cf_ip
     forwarded = request.headers.get("x-forwarded-for", "")
     parts = [part.strip() for part in forwarded.split(",") if part.strip()]
     if parts:
@@ -60,12 +63,18 @@ def allow(key: str, *, limit: int = MAX_HITS, window: int = WINDOW_SECONDS) -> b
         try:
             return _redis_allow(key, limit=limit, window=window)
         except Exception:
-            return _memory_allow(key, limit=limit, window=window)
+            return False
+    if not get_settings().in_process_runtime:
+        return False
     return _memory_allow(key, limit=limit, window=window)
 
 
 def registration_allowed(request: Request) -> bool:
     return allow(f"oauth-register:{client_ip(request)}")
+
+
+def login_allowed(request: Request) -> bool:
+    return allow(f"login:{client_ip(request)}")
 
 
 def migration_allowed(request: Request) -> bool:

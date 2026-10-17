@@ -6,7 +6,7 @@ from sqlalchemy import select
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.features.agent.agents.controllers.agents import serialize_agent
-from app.core.rate_limit import migration_allowed
+from app.core.rate_limit import login_allowed, migration_allowed, registration_allowed
 from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep
 from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME, clear_session_cookie, set_session_cookie
 from app.features.mcp.servers.controllers.mcp_servers import serialize_mcp_server
@@ -185,6 +185,12 @@ async def _begin_mfa(session, user: User, locale: str | None) -> LoginResponse |
 
 @router.post("/register/code", status_code=204)
 async def register_code(body: SignupCodeRequest, request: Request, session: SessionDep):
+    if not registration_allowed(request):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many attempts",
+            headers={"Retry-After": "600"},
+        )
     code = await mfa_service.request_signup(
         session,
         name=body.name,
@@ -203,6 +209,12 @@ async def register_code(body: SignupCodeRequest, request: Request, session: Sess
 
 @router.post("/register", response_model=LoginResponse, status_code=201)
 async def register(body: RegisterRequest, request: Request, response: Response, session: SessionDep):
+    if not registration_allowed(request):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many attempts",
+            headers={"Retry-After": "600"},
+        )
     name, email, password = await mfa_service.confirm_signup(
         session,
         email=body.email,
@@ -250,6 +262,12 @@ async def login_migration(body: LoginRequest, request: Request, session: Session
 
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest, request: Request, response: Response, session: SessionDep):
+    if not login_allowed(request):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many attempts",
+            headers={"Retry-After": "600"},
+        )
     user = await auth_service.authenticate(
         session,
         body.email,
@@ -327,6 +345,13 @@ async def totp_confirm(body: TotpConfirmRequest, user: CurrentUser, session: Ses
     from app.features.identity.auth.services.totp import confirm_setup
 
     await confirm_setup(session, user, body.code)
+
+
+@router.post("/totp/verify", status_code=204)
+async def totp_verify(body: TotpConfirmRequest, user: CurrentUser, session: SessionDep):
+    from app.features.identity.auth.services.totp import verify_user_totp
+
+    await verify_user_totp(session, user, body.code)
 
 
 @router.get("/mfa", response_model=MfaStatus)

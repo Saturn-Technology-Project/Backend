@@ -28,10 +28,13 @@ from tests.catalog import seed_test_catalog
 @pytest.fixture(autouse=True)
 def reset_rate_limits():
     from app.core.rate_limit import reset
+    from app.features.identity.auth.services.totp import reset as reset_totp
 
     reset()
+    reset_totp()
     yield
     reset()
+    reset_totp()
 
 
 @pytest.fixture(autouse=True)
