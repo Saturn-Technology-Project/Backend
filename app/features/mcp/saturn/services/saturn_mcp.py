@@ -76,6 +76,7 @@ def _approval_notice(
     status: str,
     reason: str = "",
     phase: str = "",
+    policy_id: str | None = None,
 ) -> dict[str, Any]:
     data = {
         "approval_id": approval.id,
@@ -90,16 +91,17 @@ def _approval_notice(
         data["reason"] = reason
     if phase:
         data["phase"] = phase
+    if status == "pending":
+        from app.features.mcp.saturn.services.agent_messages import pending_fields
+
+        data.update(pending_fields(message, approval.id, policy_id))
     return rpc_error(request_id, code, message, data)
 
 
 def _approval_required_message(tool_name: str, run_id: str) -> str:
-    return (
-        "approval_required. A person must approve this before it runs. "
-        f"Do not start a new task. After it is approved, call {tool_name} again with the same arguments "
-        f'and set saturnRunId to "{run_id}". saturnRunId is a field on this tool. '
-        "Leaving it out starts a different request."
-    )
+    from app.features.mcp.saturn.services.agent_messages import approval_pending
+
+    return approval_pending(tool_name, run_id)
 
 
 def _approval_rejected_message(run_id: str) -> str:
@@ -509,7 +511,9 @@ class SaturnMcp:
             },
         )
         if decision.decision == PolicyDecision.DENY:
-            return rpc_error(request_id, -32004, "policy_denied", {"reason": decision.reason or "Policy denied"})
+            from app.features.mcp.saturn.services.agent_messages import deny_error
+
+            return deny_error(request_id, reason=decision.reason, policy_id=decision.policy_id)
         if decision.decision == PolicyDecision.APPROVAL_REQUIRED or item.approval:
             return await self._approval_call(
                 session,
@@ -578,21 +582,15 @@ class SaturnMcp:
                 digest = action_digest(action.arguments) or (approval.parameter_digest or "")
                 if digest:
                     if digest != parameter_digest(arguments):
-                        return rpc_error(
-                            request_id,
-                            -32004,
-                            "approval_mismatch",
-                            {"reason": "Approved parameters no longer match this call"},
-                        )
+                        from app.features.mcp.saturn.services.agent_messages import mismatch_error
+
+                        return mismatch_error(request_id, policy_id=getattr(decision, "policy_id", None))
                 else:
                     stored = plain_arguments(agent.organization_id, action.arguments)
                     if stored != arguments:
-                        return rpc_error(
-                            request_id,
-                            -32004,
-                            "approval_mismatch",
-                            {"reason": "Approved parameters no longer match this call"},
-                        )
+                        from app.features.mcp.saturn.services.agent_messages import mismatch_error
+
+                        return mismatch_error(request_id, policy_id=getattr(decision, "policy_id", None))
                 if approval.execution_state == "executed":
                     cached = action.result if isinstance(action.result, dict) else {}
                     return rpc_result(request_id, cached)
@@ -625,12 +623,9 @@ class SaturnMcp:
                     arguments=arguments,
                 )
                 if fresh.decision == PolicyDecision.DENY:
-                    return rpc_error(
-                        request_id,
-                        -32004,
-                        "policy_denied",
-                        {"reason": fresh.reason or "Policy denied"},
-                    )
+                    from app.features.mcp.saturn.services.agent_messages import deny_error
+
+                    return deny_error(request_id, reason=fresh.reason, policy_id=fresh.policy_id)
                 raw_response = await self._proxy(session, tool, arguments)
                 raw_response, result = _split_remote(raw_response)
                 reply = rpc_result(request_id, result)
@@ -665,12 +660,9 @@ class SaturnMcp:
                 if approval.parameter_digest and approval.parameter_digest != parameter_digest(arguments):
                     approval.status = ApprovalStatus.INVALIDATED.value
                     action.status = ActionStatus.DENIED.value
-                    return rpc_error(
-                        request_id,
-                        -32004,
-                        "approval_mismatch",
-                        {"reason": "Approved parameters no longer match this call"},
-                    )
+                    from app.features.mcp.saturn.services.agent_messages import mismatch_error
+
+                    return mismatch_error(request_id, policy_id=getattr(decision, "policy_id", None))
                 return _approval_notice(
                     request_id,
                     -32001,
@@ -678,6 +670,7 @@ class SaturnMcp:
                     approval,
                     tool.name,
                     status="pending",
+                    policy_id=getattr(decision, "policy_id", None),
                 )
             if approval is not None and _status_text(approval.status) == ApprovalStatus.EXPIRED.value:
                 return _approval_expired(request_id, approval, approval.expired_phase or "pending", tool.name)
@@ -816,6 +809,7 @@ class SaturnMcp:
             approval,
             tool.name,
             status="pending",
+            policy_id=getattr(decision, "policy_id", None),
         )
 
     async def _proxy(self, session: AsyncSession, tool: Tool, arguments: dict[str, Any]) -> dict[str, Any]:

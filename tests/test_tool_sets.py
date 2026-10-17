@@ -168,7 +168,7 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
     )
     assert held.status_code == 200, held.text
     error = held.json()["error"]
-    assert error["message"].startswith("approval_required")
+    assert error["data"]["code"] == "approval_pending"
     assert "saturnRunId" in error["message"]
     approval_id = error["data"]["approval_id"]
     run_id = error["data"]["saturnRunId"]
@@ -233,7 +233,8 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
         json={"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "repo.read", "arguments": {"repo": "saturn"}}},
         headers=headers,
     )
-    assert blocked.json()["error"]["message"] == "policy_denied"
+    assert blocked.json()["error"]["data"]["code"] == "policy_denied"
+    assert blocked.json()["error"]["message"] == blocked.json()["error"]["data"]["message"]
 
 
 async def test_agent_resubmits_by_saturn_run_id_argument(client, monkeypatch):
@@ -269,7 +270,7 @@ async def test_agent_resubmits_by_saturn_run_id_argument(client, monkeypatch):
         headers=headers,
     )
     error = first.json()["error"]
-    assert error["message"].startswith("approval_required")
+    assert error["data"]["code"] == "approval_pending"
     run_id = error["data"]["saturnRunId"]
     assert run_id
     assert error["data"]["argument"] == "saturnRunId"
