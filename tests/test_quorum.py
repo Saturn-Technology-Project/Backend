@@ -125,7 +125,8 @@ async def _request(client, access, agent_id, arguments, *, run_id=""):
 async def test_two_distinct_approvals_execute_once(client, monkeypatch):
     calls, people, access, agent_id, _policy, _group = await _quorum_tool(client, monkeypatch)
     body = await _request(client, access, agent_id, {"amount": 900})
-    assert body["error"]["message"].startswith("approval_required")
+    assert body["error"]["data"]["code"] == "approval_pending"
+    assert body["error"]["data"]["approval_url"]
     approval_id = body["error"]["data"]["approval_id"]
     assert calls["n"] == 0
 
@@ -216,7 +217,7 @@ async def test_reject_cancel_expiry_and_mismatch_do_not_execute(client, monkeypa
     changed = await _request(client, access, agent_id, {"amount": 3})
     changed_id = changed["error"]["data"]["approval_id"]
     mismatched = await _request(client, access, agent_id, {"amount": 4}, run_id=changed["error"]["data"]["saturnRunId"])
-    assert mismatched["error"]["message"] == "approval_mismatch"
+    assert mismatched["error"]["data"]["code"] == "approval_args_mismatch"
     assert (await client.post(f"/approvals/{changed_id}/approve", headers=_auth(people[0][1]))).status_code == 409
 
     stale_body = await _request(client, access, agent_id, {"amount": 5})
@@ -404,7 +405,8 @@ async def test_payment_needs_finance_and_admin(client, monkeypatch):
     agent_id = next(item["id"] for item in (await client.get("/agents")).json() if item["name"] == "Pay Agent")
     assert (await client.patch(f"/agents/{agent_id}", json={"tool_set_id": created.json()["id"]})).status_code == 200
     body = await _request(client, access, agent_id, {"amount": 900})
-    assert body["error"]["message"].startswith("approval_required")
+    assert body["error"]["data"]["code"] == "approval_pending"
+    assert body["error"]["data"]["approval_url"]
     approval_id = body["error"]["data"]["approval_id"]
 
     finance_only = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[1][1]))

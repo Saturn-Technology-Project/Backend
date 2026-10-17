@@ -159,7 +159,7 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
         headers=agent_headers,
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "repo.delete", "arguments": {"repo": "saturn"}}},
     )
-    assert held.json()["error"]["message"].startswith("approval_required")
+    assert held.json()["error"]["data"]["code"] == "approval_pending"
 
     hidden = await client.post(
         "/mcp",
