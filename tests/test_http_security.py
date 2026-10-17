@@ -25,6 +25,14 @@ async def test_expose_api_docs_false_hides_the_schema(client, monkeypatch):
     assert hidden.status_code == 404
 
 
+async def test_oauth_pages_use_a_script_nonce(client):
+    response = await client.get("/oauth/authorize")
+    policy = response.headers["content-security-policy"]
+    assert "unsafe-inline" not in policy
+    assert "'nonce-" in policy
+    assert "nonce=" in response.text
+
+
 async def test_security_headers_on_api_responses(client):
     response = await client.get("/health")
     assert response.headers["x-content-type-options"] == "nosniff"

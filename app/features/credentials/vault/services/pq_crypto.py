@@ -8,9 +8,11 @@ another tenant's ciphertext, and a copy of this process does not contain the roo
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
+import time
 
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM1024PrivateKey
@@ -29,9 +31,16 @@ class SecretNeedsReconnect(Exception):
     def __init__(self) -> None:
         super().__init__("This secret needs to be connected again")
 _INFO_AES = b"saturn-credential-aes-256-gcm-v1"
+# Full cryptoKeyVersion resource name, for example .../cryptoKeys/kem-root/cryptoKeyVersions/N.
+# Rotation creates a new version and points SATURN_KMS_KEY at it. Existing ciphertext stays
+# readable only by the version that produced it, so a rotation also rewraps each secret:
+# open with the old version, then seal again after the setting changes.
 _KMS_ENV = "SATURN_KMS_KEY"
+_CONTENT_TTL_SECONDS = 300.0
 _root: bytes | None = None
 _keys: dict[tuple[str, str, str], MLKEM1024PrivateKey] = {}
+_content_keys: dict[str, tuple[float, bytes]] = {}
+_kms_client = None
 
 
 def _hkdf(material: bytes, info: bytes, length: int) -> bytes:
@@ -45,6 +54,7 @@ def install_root(root: bytes) -> None:
         raise RuntimeError("local root must be at least 32 bytes")
     _root = root
     _keys.clear()
+    _content_keys.clear()
 
 
 def _mac(data: bytes) -> bytes:
@@ -55,9 +65,7 @@ def _mac(data: bytes) -> bytes:
     name = os.environ.get(_KMS_ENV, "").strip()
     if not name:
         raise RuntimeError(f"{_KMS_ENV} is required")
-    from google.cloud import kms
-
-    response = kms.KeyManagementServiceClient().mac_sign(request={"name": name, "data": data})
+    response = _kms().mac_sign(request={"name": name, "data": data})
     mac = bytes(response.mac)
     if len(mac) != 32:
         raise RuntimeError("KMS MAC was not 32 bytes")
@@ -77,10 +85,37 @@ def mlkem_seed(organization_id: str, user_id: str = "") -> bytes:
     return _mac(label + b"0") + _mac(label + b"1")
 
 
+def _kms():
+    global _kms_client
+    if _kms_client is None:
+        from google.cloud import kms
+
+        _kms_client = kms.KeyManagementServiceClient()
+    return _kms_client
+
+
 def content_key(organization_id: str) -> bytes:
     if not organization_id:
         raise RuntimeError("organization id is required")
-    return _mac(f"saturn-org-content-v2\n{organization_id}".encode())
+    now = time.monotonic()
+    cached = _content_keys.get(organization_id)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    value = _mac(f"saturn-org-content-v2\n{organization_id}".encode())
+    _content_keys[organization_id] = (now + _CONTENT_TTL_SECONDS, value)
+    return value
+
+
+async def content_key_async(organization_id: str) -> bytes:
+    return await asyncio.to_thread(content_key, organization_id)
+
+
+async def open_secret_async(token: str, organization_id: str, user_id: str = "") -> str:
+    return await asyncio.to_thread(open_secret, token, organization_id, user_id)
+
+
+async def seal_async(plain: str, organization_id: str, user_id: str = "") -> str:
+    return await asyncio.to_thread(seal, plain, organization_id, user_id)
 
 
 def _private(organization_id: str, user_id: str) -> MLKEM1024PrivateKey:

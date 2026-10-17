@@ -1,4 +1,6 @@
 import os
+import secrets
+from contextvars import ContextVar
 
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -6,13 +8,21 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 # Two years, the usual HSTS lifetime. Preload is omitted because it is hard to undo.
 HSTS = "max-age=63072000; includeSubDomains"
 API_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-OAUTH_CSP = (
-    "default-src 'none'; "
-    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
-    "style-src 'unsafe-inline'; "
-    "connect-src 'self'; "
-    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
-)
+_csp_nonce: ContextVar[str] = ContextVar("csp_nonce", default="")
+
+
+def current_csp_nonce() -> str:
+    return _csp_nonce.get()
+
+
+def oauth_csp(nonce: str) -> str:
+    return (
+        "default-src 'none'; "
+        f"script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; "
+        f"style-src 'nonce-{nonce}'; "
+        "connect-src 'self'; "
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    )
 # Swagger and ReDoc load scripts from a CDN and an inline bootstrap. Only used when docs are open.
 DOCS_CSP = (
     "default-src 'none'; "
@@ -56,7 +66,7 @@ def apply_security_headers(headers: MutableHeaders, scope: Scope, path: str) -> 
     headers["Referrer-Policy"] = "no-referrer"
     headers["Permissions-Policy"] = PERMISSIONS_POLICY
     if path.startswith("/oauth"):
-        headers["Content-Security-Policy"] = OAUTH_CSP
+        headers["Content-Security-Policy"] = oauth_csp(_csp_nonce.get())
     else:
         headers["Content-Security-Policy"] = DOCS_CSP if is_api_doc(path) and not api_docs_closed() else API_CSP
     if _https(scope):
@@ -72,7 +82,10 @@ class HttpSecurityMiddleware:
             await self.app(scope, receive, send)
             return
         path = scope.get("path") or ""
+        nonce_token = _csp_nonce.set(secrets.token_urlsafe(16)) if path.startswith("/oauth") else None
         if api_docs_closed() and is_api_doc(path):
+            if nonce_token is not None:
+                _csp_nonce.reset(nonce_token)
             await _not_found(scope, send)
             return
 
@@ -81,7 +94,11 @@ class HttpSecurityMiddleware:
                 apply_security_headers(MutableHeaders(raw=message["headers"]), scope, path)
             await send(message)
 
-        await self.app(scope, receive, send_with_headers)
+        try:
+            await self.app(scope, receive, send_with_headers)
+        finally:
+            if nonce_token is not None:
+                _csp_nonce.reset(nonce_token)
 
 
 async def _not_found(scope: Scope, send: Send) -> None:

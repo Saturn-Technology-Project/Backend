@@ -236,7 +236,11 @@ async def login_migration(body: LoginRequest, request: Request, session: Session
         return {}
     if body.legacy_v1 and verify_password(body.legacy_v1, stored):
         return {}
+    from app.features.identity.auth.services.auth_service import legacy_password_allowed
+
     if body.legacy_password and _pbkdf2_ok(body.legacy_password, stored):
+        if not legacy_password_allowed():
+            return {"migration": "reset"}
         return {}
     stage = migration_stage(stored, legacy_v1=body.legacy_v1, legacy_password=body.legacy_password)
     if stage:

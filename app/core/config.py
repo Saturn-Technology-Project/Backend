@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     policy_llm_base_url: str = ""
     policy_llm_api_key: str = ""
     policy_llm_model: str = ""
+    # ISO date (YYYY-MM-DD). After this day, a legacy password can no longer sign in.
+    legacy_password_until: str = ""
 
 
 @lru_cache

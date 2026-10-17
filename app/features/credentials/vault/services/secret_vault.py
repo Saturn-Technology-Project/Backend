@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.ids import utcnow
 from app.features.credentials.vault.models.secret_vault import SecretVault
-from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect, open_secret, seal
+from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect, open_secret_async, seal_async
 
 _SECRET_ID = re.compile(r"[^A-Za-z0-9_-]+")
 
@@ -35,7 +35,7 @@ async def put_secret(
     if not plaintext:
         await delete_secret(session, secret_id)
         return
-    blob = seal(plaintext, organization_id, user_id)
+    blob = await seal_async(plaintext, organization_id, user_id)
     project = _project()
     if project:
         await asyncio.to_thread(_gcp_put, project, secret_id, blob)
@@ -61,7 +61,7 @@ async def _ciphertext(session: AsyncSession, secret_id: str) -> str:
 async def get_secret(session: AsyncSession, secret_id: str, organization_id: str, user_id: str = "") -> str:
     if not secret_id or not organization_id:
         return ""
-    return open_secret(await _ciphertext(session, secret_id), organization_id, user_id)
+    return await open_secret_async(await _ciphertext(session, secret_id), organization_id, user_id)
 
 
 async def reconnect_status(session: AsyncSession, secret_id: str, organization_id: str, user_id: str = "") -> str:
@@ -71,7 +71,7 @@ async def reconnect_status(session: AsyncSession, secret_id: str, organization_i
     if not blob.startswith("pq2."):
         return "needs_reconnect"
     try:
-        open_secret(blob, organization_id, user_id)
+        await open_secret_async(blob, organization_id, user_id)
     except SecretNeedsReconnect:
         return "needs_reconnect"
     return "ok"
