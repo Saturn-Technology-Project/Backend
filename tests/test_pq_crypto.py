@@ -3,6 +3,7 @@ import base64
 import pytest
 
 from app.features.credentials.vault.services.credential_service import open_secret, seal
+from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect
 
 
 def test_credentials_use_mlkem_1024_and_hide_the_plaintext():
@@ -10,8 +11,10 @@ def test_credentials_use_mlkem_1024_and_hide_the_plaintext():
     assert token.startswith("pq2.")
     assert "gho-example-token" not in token
     assert open_secret(token, "org_acme") == "gho-example-token"
-    assert open_secret(token, "org_other") == ""
-    assert open_secret(token, "org_acme", "user_other") == ""
+    with pytest.raises(SecretNeedsReconnect):
+        open_secret(token, "org_other")
+    with pytest.raises(SecretNeedsReconnect):
+        open_secret(token, "org_acme", "user_other")
     raw = base64.b64decode(token.removeprefix("pq2."))
     assert len(raw) > 1568
 
@@ -21,7 +24,9 @@ def test_tampered_ciphertext_does_not_open():
     raw = bytearray(base64.b64decode(token.removeprefix("pq2.")))
     raw[-1] ^= 1
     broken = "pq2." + base64.b64encode(bytes(raw)).decode()
-    assert open_secret(broken, "org_acme") == ""
+    with pytest.raises(SecretNeedsReconnect):
+        opened = open_secret(broken, "org_acme")
+        assert opened != ""
 
 
 def test_tenants_do_not_share_a_credential_key():

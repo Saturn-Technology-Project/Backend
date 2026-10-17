@@ -153,7 +153,12 @@ async def update_endpoint(
 
 async def reveal_secret(session: AsyncSession, organization_id: str, endpoint_id: str) -> str:
     row = await _endpoint(session, organization_id, endpoint_id)
-    secret = await get_secret(session, row.secret_id, organization_id)
+    from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect
+
+    try:
+        secret = await get_secret(session, row.secret_id, organization_id)
+    except SecretNeedsReconnect as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Signing secret needs to be rotated") from exc
     if not secret:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Signing secret is not available")
     return secret

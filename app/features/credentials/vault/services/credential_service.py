@@ -24,8 +24,6 @@ def seal(plain: str, organization_id: str, user_id: str = "") -> str:
 def open_secret(token: str, organization_id: str, user_id: str = "") -> str:
     from app.features.credentials.vault.services.pq_crypto import open_secret as pq_open
 
-    if not token or not token.startswith("pq2."):
-        return ""
     return pq_open(token, organization_id, user_id)
 
 

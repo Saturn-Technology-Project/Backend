@@ -20,6 +20,14 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 logger = logging.getLogger(__name__)
 
 _PREFIX = "pq2."
+_LEGACY_PREFIX = "pq1."
+
+
+class SecretNeedsReconnect(Exception):
+    """The stored secret is pq1 or cannot be opened. The caller must reconnect it."""
+
+    def __init__(self) -> None:
+        super().__init__("This secret needs to be connected again")
 _INFO_AES = b"saturn-credential-aes-256-gcm-v1"
 _KMS_ENV = "SATURN_KMS_KEY"
 _root: bytes | None = None
@@ -96,8 +104,10 @@ def seal(plain: str, organization_id: str, user_id: str = "") -> str:
 
 
 def open_secret(token: str, organization_id: str, user_id: str = "") -> str:
-    if not token or not organization_id or not token.startswith(_PREFIX):
+    if not token or not organization_id:
         return ""
+    if token.startswith(_LEGACY_PREFIX) or not token.startswith(_PREFIX):
+        raise SecretNeedsReconnect()
     try:
         raw = base64.b64decode(token[len(_PREFIX) :])
         kem_ciphertext, rest = raw[:1568], raw[1568:]
@@ -105,6 +115,8 @@ def open_secret(token: str, organization_id: str, user_id: str = "") -> str:
         shared = _private(organization_id, user_id).decapsulate(kem_ciphertext)
         key = _hkdf(shared, _INFO_AES, 32)
         return AESGCM(key).decrypt(nonce, encrypted, None).decode()
+    except SecretNeedsReconnect:
+        raise
     except Exception as exc:
         logger.warning("credential open failed: %s", type(exc).__name__)
-        return ""
+        raise SecretNeedsReconnect() from exc
