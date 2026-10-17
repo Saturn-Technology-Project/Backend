@@ -9,6 +9,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import get_settings
 from app.core.http_security import HttpSecurityMiddleware
+from app.core.origin_auth import OriginAuthMiddleware
 from app.features.agent.agents.routes import router as agents_router
 from app.features.billing.payments.routes import router as payments_router
 from app.features.credentials.vault.routes import router as credentials_router
@@ -102,6 +103,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(HttpSecurityMiddleware)
+app.add_middleware(OriginAuthMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -135,6 +137,11 @@ app.include_router(payload_keys_router)
 @app.get("/")
 async def root():
     return {"status": "ok"}
+
+
+@app.get("/healthz")
+async def healthz():
+    return await health()
 
 
 @app.get("/health")

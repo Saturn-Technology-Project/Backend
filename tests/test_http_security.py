@@ -12,7 +12,8 @@ async def test_api_docs_stay_available_for_local_development(client):
 @pytest.mark.parametrize("path", DOC_PATHS)
 async def test_cloud_run_hides_api_docs(client, monkeypatch, path):
     monkeypatch.setenv("K_SERVICE", "saturn-backend")
-    hidden = await client.get(path)
+    monkeypatch.setenv("ORIGIN_AUTH_SECRET", "expected-value")
+    hidden = await client.get(path, headers={"X-Saturn-Origin-Auth": "expected-value"})
     assert hidden.status_code == 404
     assert hidden.json()["detail"] == "Not found"
 
