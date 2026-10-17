@@ -568,6 +568,9 @@ class AdminService:
             )
             session.add(organization)
             await session.flush()
+            from app.features.policy.policies.services.default_policy import ensure_default_policy
+
+            await ensure_default_policy(session, organization.id)
 
         await member_service._validate_ids(session, organization.id, agent_ids, mcp_server_ids)
 

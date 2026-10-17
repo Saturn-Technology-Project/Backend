@@ -68,6 +68,9 @@ async def lifespan(_app: FastAPI):
                     await connection.run_sync(Base.metadata.create_all)
             async with SessionLocal() as session:
                 await seed_if_empty(session)
+                from app.features.policy.policies.services.default_policy import log_agents_without_policy
+
+                await log_agents_without_policy(session)
                 await session.commit()
         if settings.saturn_embed_worker and not settings.skip_db_bootstrap:
             from app.features.webhooks.services.worker import run_webhook_worker

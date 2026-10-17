@@ -48,7 +48,7 @@ async def test_onboard_org_and_manage_members(client):
     assert org["health"]["runtime"] == "disconnected"
     assert org["health"]["mcp"] == "none"
     assert org["health"]["agents"] == "none"
-    assert org["health"]["policies"] == "none"
+    assert org["health"]["policies"] == "ok"
     assert "Connector not connected" in org["health"]["issues"]
     assert org["members"][0]["email"] == "admin@acme.test"
     assert org["members"][0]["role"] == "admin"

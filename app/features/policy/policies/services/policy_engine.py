@@ -320,6 +320,10 @@ def evaluate_graph_rules(
 
 def merge_results(results: list[EvaluationResult]) -> EvaluationResult:
     if not results:
+        from app.core.config import get_settings
+
+        if get_settings().policy_default_deny:
+            return EvaluationResult(decision=PolicyDecision.DENY, reason="沒有適用的 policy")
         return EvaluationResult(decision=PolicyDecision.ALLOW)
     return max(results, key=lambda item: _RESTRICTIVENESS[item.decision])
 

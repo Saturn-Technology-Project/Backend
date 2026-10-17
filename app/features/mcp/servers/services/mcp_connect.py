@@ -170,6 +170,9 @@ class McpConnectService:
             if (tool.upstream_name or tool.name) not in seen:
                 tool.status = ToolStatus.DISABLED.value
         await session.flush()
+        from app.features.policy.policies.services.default_policy import extend_default_policy
+
+        await extend_default_policy(session, server.organization_id)
 
 
 mcp_connect_service = McpConnectService()

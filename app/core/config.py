@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     seed_user_password: str = ""
     cors_origins: str = "http://localhost:3000,http://localhost:3001,https://dashboard.saturn-core.com"
     in_process_runtime: bool = False
+    policy_default_deny: bool = True
     saturn_embed_worker: bool = True
     saturn_secret_project: str = ""
     resend_api_key: str = ""

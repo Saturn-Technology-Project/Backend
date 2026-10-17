@@ -3,6 +3,7 @@ import os
 os.environ["SKIP_DB_BOOTSTRAP"] = "true"
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite://"
 os.environ["IN_PROCESS_RUNTIME"] = "true"
+os.environ["POLICY_DEFAULT_DENY"] = "false"
 os.environ["SEED_USER_EMAIL"] = "rick@saturn.ai"
 os.environ["SEED_USER_PASSWORD"] = "saturn"
 os.environ["SEED_USER_NAME"] = "Rick"
