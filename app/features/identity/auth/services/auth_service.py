@@ -97,9 +97,20 @@ def needs_legacy_migration(stored: str) -> bool:
     return _pbkdf2_parts(stored) is not None
 
 
+def legacy_password_allowed() -> bool:
+    raw = (get_settings().legacy_password_until or "").strip()
+    if not raw:
+        return True
+    from datetime import date
+
+    return date.today() <= date.fromisoformat(raw[:10])
+
+
 def migration_stage(stored: str, *, legacy_v1: str | None, legacy_password: str | None) -> str | None:
     if not needs_legacy_migration(stored):
         return None
+    if not legacy_password_allowed():
+        return "reset"
     if not legacy_v1 and not legacy_password:
         return "v1"
     if not legacy_password:
@@ -132,14 +143,15 @@ class AuthService:
         ok = active and verify_password(password, stored)
         if not ok and active and legacy_v1 and verify_password(legacy_v1, stored):
             ok = True
-        if not ok and active and legacy_password and _pbkdf2_ok(legacy_password, stored):
+        if not ok and active and legacy_password_allowed() and legacy_password and _pbkdf2_ok(legacy_password, stored):
             ok = True
         if not ok or user is None:
             stage = migration_stage(stored, legacy_v1=legacy_v1, legacy_password=legacy_password) if active else None
             if stage:
+                message = "請重設密碼。 Reset your password." if stage == "reset" else "Invalid email or password"
                 raise HTTPException(
                     status.HTTP_401_UNAUTHORIZED,
-                    {"message": "Invalid email or password", "migration": stage},
+                    {"message": message, "migration": stage},
                 )
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
         # Only a v2 verifier replaces the stored hash. A v1 sign-in keeps the old hash so the

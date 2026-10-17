@@ -24,6 +24,15 @@ def test_tampered_ciphertext_does_not_open():
     assert open_secret(broken, "org_acme") == ""
 
 
+def test_content_key_is_reused_until_it_expires():
+    from app.features.credentials.vault.services import pq_crypto
+
+    pq_crypto._content_keys.clear()
+    first = pq_crypto.content_key("org_acme")
+    assert pq_crypto.content_key("org_acme") == first
+    assert "org_acme" in pq_crypto._content_keys
+
+
 def test_tenants_do_not_share_a_credential_key():
     from app.features.credentials.vault.services import pq_crypto
 

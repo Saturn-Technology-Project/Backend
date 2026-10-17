@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.ids import utcnow
 from app.features.credentials.vault.models.secret_vault import SecretVault
-from app.features.credentials.vault.services.pq_crypto import open_secret, seal
+from app.features.credentials.vault.services.pq_crypto import open_secret_async, seal_async
 
 _SECRET_ID = re.compile(r"[^A-Za-z0-9_-]+")
 
@@ -35,7 +35,7 @@ async def put_secret(
     if not plaintext:
         await delete_secret(session, secret_id)
         return
-    blob = seal(plaintext, organization_id, user_id)
+    blob = await seal_async(plaintext, organization_id, user_id)
     project = _project()
     if project:
         await asyncio.to_thread(_gcp_put, project, secret_id, blob)
@@ -59,7 +59,7 @@ async def get_secret(session: AsyncSession, secret_id: str, organization_id: str
     else:
         row = await session.get(SecretVault, secret_id)
         blob = row.ciphertext if row is not None else ""
-    return open_secret(blob, organization_id, user_id)
+    return await open_secret_async(blob, organization_id, user_id)
 
 
 async def delete_secret(session: AsyncSession, secret_id: str) -> None:

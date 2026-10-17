@@ -59,6 +59,36 @@ async def test_login_and_me(client):
     assert (await client.get("/auth/me")).json()["locale"] == "en-US"
 
 
+async def test_legacy_password_is_refused_after_the_deadline(client, monkeypatch):
+    import hashlib
+    import secrets
+
+    from app.db.database import get_session
+    from app.features.identity.auth.services import auth_service as auth_module
+    from app.main import app
+    from app.models import User
+
+    monkeypatch.setattr(auth_module, "legacy_password_allowed", lambda: False)
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", b"correct horse", bytes.fromhex(salt), 210_000)
+    session_gen = app.dependency_overrides[get_session]()
+    session = await session_gen.__anext__()
+    try:
+        user = await session.get(User, "user_operator")
+        user.password_hash = f"pbkdf2_sha256$210000${salt}${digest.hex()}"
+        await session.commit()
+    finally:
+        await session_gen.aclose()
+
+    refused = await client.post(
+        "/auth/login",
+        json={"email": "rick@saturn.ai", "password": "v2." + ("ab" * 32), "legacy_password": "correct horse"},
+    )
+    assert refused.status_code == 401
+    assert refused.json()["detail"]["migration"] == "reset"
+    assert refused.json()["detail"]["message"] == "請重設密碼。 Reset your password."
+
+
 async def test_legacy_password_is_rewritten_as_argon2id(client):
     import hashlib
     import secrets

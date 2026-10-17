@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import ActorType
+from app.core.http_security import current_csp_nonce
 from app.core.rate_limit import registration_allowed
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.identity.auth.controllers.deps import SessionDep
@@ -55,14 +56,18 @@ def protected_resource(origin: str) -> dict:
 
 
 def _page(title: str, body: str, status_code: int = 200, *, wide: bool = False, lang: str = "zh-Hant") -> HTMLResponse:
+    from app.core.http_security import current_csp_nonce
+
     width = "520px" if wide else "420px"
+    nonce = escape(current_csp_nonce())
+    style_open = f'<style nonce="{nonce}">' if nonce else "<style>"
     html = f"""<!doctype html>
 <html lang="{escape(lang)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(title)}</title>
-  <style>
+  {style_open}
     body {{ margin: 0; background: #f7f7f5; color: #111110; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }}
     main {{ max-width: {width}; margin: 48px auto; padding: 0 20px 48px; }}
     h1 {{ margin: 8px 0 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }}
@@ -349,9 +354,10 @@ async def authorize(request: Request, session: SessionDep):
               <input type="hidden" name="legacy_v1" value="">
               <input type="hidden" name="legacy_password" value="">
               <div class="row"><button type="submit">登入 Sign in</button></div>
+              <p id="login-error" role="alert"></p>
             </form>
-            <script src="/oauth/argon2.js"></script>
-            <script>
+            <script nonce="{escape(current_csp_nonce())}" src="/oauth/argon2.js"></script>
+            <script nonce="{escape(current_csp_nonce())}">
               document.querySelector('form[action="/oauth/login"]').addEventListener('submit', async (event) => {{
                 const form = event.currentTarget;
                 const input = form.querySelector('input[name="password"]');
@@ -387,6 +393,8 @@ async def authorize(request: Request, session: SessionDep):
                   verifier = 'v2.' + hex(bits);
                 }} catch (_) {{
                   event.preventDefault();
+                  const note = document.getElementById('login-error');
+                  if (note) note.textContent = '無法完成登入。請重新整理後再試。 Sign-in could not finish. Reload the page and try again.';
                   return;
                 }}
                 const probe = async (extra) => {{
