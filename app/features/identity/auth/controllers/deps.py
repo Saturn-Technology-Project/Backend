@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy import select
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME
@@ -43,7 +44,26 @@ async def get_current_user(
             "Invalid or expired session",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    if not _totp_exempt(request.url.path) and await _admin_needs_totp(session, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "MFA setup is required")
     return user
+
+
+def _totp_exempt(path: str) -> bool:
+    if path in {"/", "/health", "/healthz", "/auth/me"}:
+        return True
+    return path.startswith("/auth/logout") or path.startswith("/auth/mfa") or path.startswith("/auth/totp")
+
+
+async def _admin_needs_totp(session: AsyncSession, user: User) -> bool:
+    if user.totp_enabled:
+        return False
+    if user.is_platform_admin:
+        return True
+    from app.features.organization.org.services.access import is_org_admin
+
+    employee = await session.scalar(select(Employee).where(Employee.user_id == user.id))
+    return employee is not None and is_org_admin(employee.permissions)
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]

@@ -29,6 +29,8 @@ class User(Base):
     notify_audit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     locale: Mapped[str] = mapped_column(String(16), default="zh-Hant", nullable=False)
     is_platform_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    totp_secret: Mapped[str] = mapped_column(Text, default="", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False

@@ -393,6 +393,7 @@ class UserRead(ORMModel):
     profile_id: str = ""
     locale: str = "zh-Hant"
     email_change_pending: bool = False
+    mfa_setup_required: bool = False
 
 
 class AccessPermissions(BaseModel):

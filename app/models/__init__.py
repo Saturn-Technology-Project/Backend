@@ -31,7 +31,7 @@ from app.features.identity.oauth.models.oauth import OAuthAccess, OAuthClient, O
 from app.features.credentials.vault.models.secret_vault import SecretVault
 from app.features.organization.org.models.organization import Organization
 from app.features.identity.auth.models.password_reset import PasswordReset
-from app.features.identity.auth.models.mfa import EmailCode, LoginChallenge, Passkey, WebAuthnChallenge
+from app.features.identity.auth.models.mfa import EmailCode, LoginChallenge, Passkey, TotpBackupCode, WebAuthnChallenge
 from app.features.policy.policies.models.policy import Policy, PolicyRule
 from app.features.execution.runs.models.run import Run
 from app.features.identity.auth.models.session import AuthSession
@@ -76,6 +76,7 @@ __all__ = [
     "Tool",
     "ToolSet",
     "ToolSetItem",
+    "TotpBackupCode",
     "User",
     "WebAuthnChallenge",
     "agent_mcp_servers",
