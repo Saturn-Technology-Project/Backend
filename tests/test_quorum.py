@@ -283,6 +283,9 @@ async def test_groups_are_an_enterprise_or_team_capability(client):
     assert other.json()["kind"] == "organization"
     signed = await client.post("/auth/login", json={"email": "other-admin@saturn.ai", "password": "password1"})
     foreign_headers = _auth(signed.json()["token"])
+    from tests.totp_access import finish_totp
+
+    await finish_totp(client, foreign_headers)
     foreign_org = await client.get("/org", headers=foreign_headers)
     assert foreign_org.json()["organization"]["entitlements"]["groups"] is True
     hidden = await client.get(f"/org/groups/{owned.json()['id']}", headers=foreign_headers)

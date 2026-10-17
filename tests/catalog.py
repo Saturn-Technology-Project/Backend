@@ -82,6 +82,9 @@ REFUND_RULES = [
 
 async def seed_test_catalog(session: AsyncSession) -> None:
     await seed_if_empty(session)
+    actor = await session.get(User, settings.default_actor_id)
+    if actor is not None:
+        actor.totp_enabled = True
 
     if await session.get(Agent, "agent_customer_ops") is None:
         session.add(

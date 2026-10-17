@@ -436,6 +436,9 @@ async def test_free_plan_cannot_manage_webhooks(client):
     signed = await client.post("/auth/login", json={"email": "free-hooks@example.com", "password": "password1"})
     assert signed.status_code == 200, signed.text
     headers = {"Authorization": f"Bearer {signed.json()['token']}"}
+    from tests.totp_access import finish_totp
+
+    await finish_totp(client, headers)
     blocked = await client.post(
         "/org/webhooks",
         headers=headers,

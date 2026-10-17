@@ -1,6 +1,7 @@
 import pytest
 
 from tests.oauth_access import oauth_access
+from tests.totp_access import finish_totp
 
 
 @pytest.mark.asyncio
@@ -23,6 +24,7 @@ async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
     token = signed.json()["token"]
     assert signed.json()["user"]["profile_id"] == signed.json()["user"]["id"]
     headers = {"Authorization": f"Bearer {token}"}
+    await finish_totp(client, headers)
 
     opened = await client.post(
         "/mcp",

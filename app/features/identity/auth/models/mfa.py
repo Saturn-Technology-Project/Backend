@@ -10,6 +10,20 @@ from app.core.ids import utcnow
 from app.db.database import Base
 
 
+class TotpBackupCode(Base):
+    """SHA-256 hash of a one-time backup code. The code itself is not stored."""
+
+    __tablename__ = "totp_backup_codes"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
 class EmailCode(Base):
     __tablename__ = "email_codes"
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -39,7 +40,7 @@ from app.schemas import (
     SignupCodeRequest,
     UserRead,
 )
-from app.features.organization.org.services.access import allows, empty_permissions, normalize_permissions
+from app.features.organization.org.services.access import allows, empty_permissions, is_org_admin, normalize_permissions
 from app.features.organization.org.services.organization_service import serialize_organization
 from app.features.platform.admin.services.admin_service import admin_service
 from app.features.identity.auth.services.auth_service import (
@@ -151,6 +152,7 @@ async def serialize_user(session, user: User) -> UserRead:
             user.organization.plan,
         ),
         locale=normalize_locale(user.locale),
+        mfa_setup_required=(not user.totp_enabled) and (user.is_platform_admin or is_org_admin(permissions)),
     )
 
 
@@ -297,6 +299,30 @@ async def update_notices(body: NoticeSettings, user: CurrentUser, session: Sessi
     user.notify_audit = body.audit
     await session.flush()
     return body
+
+
+class TotpSetupRead(BaseModel):
+    secret: str
+    otpauth_url: str
+    backup_codes: list[str]
+
+
+class TotpConfirmRequest(BaseModel):
+    code: str
+
+
+@router.post("/totp/setup", response_model=TotpSetupRead)
+async def totp_setup(user: CurrentUser, session: SessionDep):
+    from app.features.identity.auth.services.totp import begin_setup
+
+    return await begin_setup(session, user)
+
+
+@router.post("/totp/confirm", status_code=204)
+async def totp_confirm(body: TotpConfirmRequest, user: CurrentUser, session: SessionDep):
+    from app.features.identity.auth.services.totp import confirm_setup
+
+    await confirm_setup(session, user, body.code)
 
 
 @router.get("/mfa", response_model=MfaStatus)

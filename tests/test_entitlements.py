@@ -2,6 +2,7 @@ import pytest
 
 from app.features.organization.org.services.plans import allows_pro, allows_saturn_cloud, entitlements
 from tests.oauth_access import oauth_access
+from tests.totp_access import finish_totp
 
 
 def test_unknown_plan_keeps_the_gateway_and_denies_pro():
@@ -39,7 +40,9 @@ async def _onboard(client, *, name: str, email: str, plan: str) -> str:
     assert created.status_code == 201, created.text
     signed = await client.post("/auth/login", json={"email": email, "password": "password1"})
     assert signed.status_code == 200, signed.text
-    return signed.json()["token"]
+    token = signed.json()["token"]
+    await finish_totp(client, {"Authorization": f"Bearer {token}"})
+    return token
 
 
 def _auth(token: str) -> dict[str, str]:
