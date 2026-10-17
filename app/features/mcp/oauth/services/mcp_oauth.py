@@ -349,8 +349,13 @@ class McpOAuth:
             await session.delete(pending)
             await session.flush()
             return _page(False, nonce, "The MCP provider did not return an authorization code.")
-        verifier = open_secret(pending.verifier_ciphertext, pending.organization_id, pending.user_id)
-        secret = open_secret(pending.client_secret_ciphertext, pending.organization_id, pending.user_id)
+        from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect
+
+        try:
+            verifier = open_secret(pending.verifier_ciphertext, pending.organization_id, pending.user_id)
+            secret = open_secret(pending.client_secret_ciphertext, pending.organization_id, pending.user_id) if pending.client_secret_ciphertext else ""
+        except SecretNeedsReconnect:
+            return _page(False, nonce, "This sign-in expired. Close the window and connect again.")
         try:
             token = await self._exchange(pending, code=code, verifier=verifier, client_secret=secret)
             from app.features.mcp.servers.services.mcp_connect import mcp_connect_service
@@ -415,7 +420,12 @@ class McpOAuth:
     async def authorization_for(self, session: AsyncSession, server: McpServer | None) -> str:
         if server is None:
             return ""
-        grant = await read_grant(session, server)
+        from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect
+
+        try:
+            grant = await read_grant(session, server)
+        except SecretNeedsReconnect as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "This connection needs to be signed in again") from exc
         secret = grant["access_token"]
         expires = server.token_expires_at
         if expires is not None and _aware(expires) <= utcnow() + timedelta(seconds=60):
@@ -432,7 +442,12 @@ class McpOAuth:
         return await self._refresh(session, server)
 
     async def _refresh(self, session: AsyncSession, server: McpServer) -> str:
-        grant = await read_grant(session, server)
+        from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect
+
+        try:
+            grant = await read_grant(session, server)
+        except SecretNeedsReconnect as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "This connection needs to be signed in again") from exc
         refresh = grant["refresh_token"]
         if not refresh or not server.oauth_token_endpoint or not server.oauth_client_id:
             return ""

@@ -11,6 +11,7 @@ from app.core.ids import new_id
 from app.models import McpServer, Tool, User
 from app.core.enums import ToolStatus, ToolType
 from app.features.mcp.servers.services.mcp_endpoint import require_mcp_endpoint
+from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect
 from app.features.mcp.servers.services.mcp_grant import read_grant, write_grant
 from app.features.mcp.servers.services.mcp_remote import McpUnauthorized, list_remote_tools
 
@@ -58,7 +59,10 @@ class McpConnectService:
         if authorization is not None:
             token = authorization.strip()
         elif existing is not None and not endpoint_changed:
-            token = (await read_grant(session, existing))["access_token"]
+            try:
+                token = (await read_grant(session, existing))["access_token"]
+            except SecretNeedsReconnect as exc:
+                raise HTTPException(status.HTTP_409_CONFLICT, "This connection needs to be signed in again") from exc
         try:
             discovered = await list_remote_tools(url, token)
         except McpUnauthorized as exc:

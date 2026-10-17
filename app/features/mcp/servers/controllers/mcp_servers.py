@@ -8,12 +8,13 @@ from app.features.organization.org.services.mapping_service import mapping_servi
 from app.features.mcp.servers.services.mcp_connect import mcp_connect_service
 from app.features.mcp.oauth.services.mcp_oauth import callback_origin, mcp_oauth
 from app.features.organization.org.services.removal_service import removal_service
+from app.features.credentials.vault.services.secret_vault import reconnect_status
 from app.features.mcp.servers.services.mcp_gateway import mcp_gateway
 
 router = APIRouter(prefix="/mcp-servers", tags=["mcp-servers"])
 
 
-def serialize_mcp_server(server: McpServer) -> McpServerRead:
+def serialize_mcp_server(server: McpServer, *, secret_status: str = "ok") -> McpServerRead:
     active = [tool for tool in (server.tools or []) if tool.status == "active"]
     tools = sorted(tool.name for tool in active)
     link = mcp_gateway.link_for(server.id)
@@ -24,6 +25,7 @@ def serialize_mcp_server(server: McpServer) -> McpServerRead:
         status=server.status,
         connected=bool(link and link.connected),
         has_authorization=bool(server.credential_id),
+        secret_status=secret_status,
         gateway="mcp-gateway",
         organization_id=server.organization_id,
         tools=tools,
@@ -38,7 +40,11 @@ def serialize_mcp_server(server: McpServer) -> McpServerRead:
 async def list_mcp_servers(session: SessionDep, user: CurrentUser, _access: AgentsRead):
     await mapping_service.bind_workspace(session, user)
     servers = await mapping_service.list_mcp_servers(session, user)
-    return [serialize_mcp_server(server) for server in servers]
+    listed = []
+    for server in servers:
+        status_name = await reconnect_status(session, server.credential_id, server.organization_id)
+        listed.append(serialize_mcp_server(server, secret_status=status_name))
+    return listed
 
 
 @router.post("/oauth/start", response_model=McpOAuthStart)

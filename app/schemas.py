@@ -72,6 +72,7 @@ class McpServerRead(ORMModel):
     status: str
     connected: bool = False
     has_authorization: bool = False
+    secret_status: str = "ok"
     gateway: str = "mcp-gateway"
     organization_id: str | None = None
     tools: list[str] = Field(default_factory=list)
