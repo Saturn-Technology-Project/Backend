@@ -1,0 +1,31 @@
+# Production dependencies. Edit this file, then regenerate both hashed locks
+# (EXCLUDE_NEWER is a date about two weeks before today, so a release that was
+# published hours ago and later yanked as malicious is never picked up):
+#
+#   uv pip compile requirements.in --universal --python-version 3.12 \
+#     --generate-hashes --exclude-newer "$EXCLUDE_NEWER" -o requirements.txt
+#   uv pip compile requirements-dev.in --universal --python-version 3.12 \
+#     --generate-hashes --exclude-newer "$EXCLUDE_NEWER" -o requirements-dev.txt
+#
+# Install with `pip install --require-hashes -r requirements.txt`.
+# Test-only packages live in requirements-dev.in.
+fastapi==0.141.1
+# fastapi allows any starlette >=0.46. Pin it explicitly so the version that
+# carries the Host-header and FileResponse Range fixes cannot float.
+starlette==1.7.0
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.38
+asyncpg==0.30.0
+alembic==1.14.1
+pydantic==2.10.6
+pydantic-settings==2.8.1
+python-dotenv==1.2.4
+greenlet==3.1.1
+httpx==0.28.1
+eval-type-backport==0.2.2
+cryptography==50.0.2
+argon2-cffi==23.1.0
+webauthn==3.0.1
+google-cloud-secret-manager==2.31.0
+google-cloud-kms==3.5.1
+redis==5.2.1

@@ -1,3 +1,6 @@
+# Local development only. Passwords come from .env (see .env.example); the
+# database and Redis listen on 127.0.0.1 only, so nothing else on the network
+# can reach them.
 name: saturn
 
 services:
@@ -5,10 +8,10 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: saturn
-      POSTGRES_PASSWORD: saturn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: saturn
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - saturn_pg:/var/lib/postgresql/data
     healthcheck:
@@ -19,8 +22,12 @@ services:
 
   redis:
     image: redis:7-alpine
+    environment:
+      # redis-cli reads REDISCLI_AUTH, so the health check authenticates too.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    command: ["sh", "-c", 'exec redis-server --requirepass "$$REDISCLI_AUTH"']
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -34,8 +41,8 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://saturn:saturn@postgres:5432/saturn
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://saturn:${POSTGRES_PASSWORD}@postgres:5432/saturn
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy

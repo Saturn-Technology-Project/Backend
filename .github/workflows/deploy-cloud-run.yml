@@ -8,7 +8,12 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+
+# One production deploy at a time, so two releases never run migrations or
+# replace revisions concurrently. A newer push waits instead of cancelling.
+concurrency:
+  group: deploy-cloud-run-production
+  cancel-in-progress: false
 
 env:
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -20,45 +25,64 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Gitleaks
-        run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz | tar -xz -C /usr/local/bin gitleaks
-          gitleaks dir . --no-banner --redact
-          gitleaks git . --log-opts="-1" --no-banner --redact
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install
-        run: pip install -r requirements.txt
-
-      - name: Pytest
-        run: pytest
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
 
   deploy:
     needs: test
     runs-on: ubuntu-latest
+    # Protection rules (required reviewers, deployment branch = main) are set
+    # on this environment in GitHub. See infra/gcp/README.md.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+
+    # Optional settings. Each one left unset keeps the behaviour from before it existed.
+    env:
+      # Runtime identity for the services and the migration job. Unset: the
+      # project's default compute service account.
+      RUNTIME_SERVICE_ACCOUNT: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
+      # all | internal | internal-and-cloud-load-balancing. Unset: the API keeps its current ingress.
+      CLOUD_RUN_INGRESS: ${{ vars.CLOUD_RUN_INGRESS }}
+      # 'true': run migrations once in a Cloud Run Job and start the services with RUN_MIGRATIONS=false.
+      MIGRATIONS_JOB: ${{ vars.MIGRATIONS_JOB }}
+      MIGRATIONS_JOB_NAME: ${{ vars.MIGRATIONS_JOB_NAME || 'saturn-migrate' }}
+      MIGRATIONS_DATABASE_URL_SECRET: ${{ vars.MIGRATIONS_DATABASE_URL_SECRET || 'DATABASE_URL' }}
+      MIGRATIONS_SERVICE_ACCOUNT: ${{ vars.MIGRATIONS_SERVICE_ACCOUNT || vars.RUNTIME_SERVICE_ACCOUNT }}
+      # 'true': mount SEED_USER_EMAIL / SEED_USER_PASSWORD on the API so it can create the first admin.
+      SEED_ON_DEPLOY: ${{ vars.SEED_ON_DEPLOY }}
+      # Secret Manager secret that holds REDIS_URL (for example a rediss:// URL with AUTH).
+      REDIS_URL_SECRET: ${{ vars.REDIS_URL_SECRET || 'REDIS_URL' }}
+      # Secret Manager secret with the Memorystore server CA (PEM), mounted at REDIS_CA_PATH.
+      REDIS_CA_SECRET: ${{ vars.REDIS_CA_SECRET }}
+      REDIS_CA_PATH: /etc/secrets/redis-ca/ca.pem
+      CLOUD_SQL_INSTANCE_CONNECTION_NAME: ${{ vars.CLOUD_SQL_INSTANCE_CONNECTION_NAME }}
+      SERVERLESS_VPC_CONNECTOR: ${{ vars.SERVERLESS_VPC_CONNECTOR }}
+      MAX_INSTANCES: ${{ vars.MAX_INSTANCES || '10' }}
 
     steps:
+      - name: Only deploy from main
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Production deploys run only from refs/heads/main, not ${GITHUB_REF}."
+            exit 1
+          fi
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
 
       - name: Configure Docker auth
         run: gcloud auth configure-docker "${GAR_LOCATION}-docker.pkg.dev" --quiet
@@ -69,15 +93,22 @@ jobs:
           IMAGE_URI="${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:${GITHUB_SHA}"
           echo "uri=${IMAGE_URI}" >> "${GITHUB_OUTPUT}"
 
+      # Provenance and SBOM attestations need a BuildKit container builder, and they
+      # turn the pushed image into an OCI index. Opt in with IMAGE_ATTESTATIONS=true
+      # after checking Cloud Run accepts that index (infra/gcp/README.md).
+      - name: Set up Docker Buildx
+        if: vars.IMAGE_ATTESTATIONS == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
       - name: Build and push image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           push: true
           platforms: linux/amd64
-          provenance: false
-          sbom: false
+          provenance: ${{ vars.IMAGE_ATTESTATIONS == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ vars.IMAGE_ATTESTATIONS == 'true' }}
           tags: ${{ steps.image.outputs.uri }}
 
       - name: Render runtime env file
@@ -89,9 +120,11 @@ jobs:
           CORS_ORIGINS: https://dashboard.saturn-core.com
           PUBLIC_WS_URL: https://api.saturn-core.com
           SATURN_KMS_KEY: ${{ vars.SATURN_KMS_KEY }}
+          LEGACY_PASSWORD_UNTIL: ${{ vars.LEGACY_PASSWORD_UNTIL }}
         run: |
           python3 - <<'PY'
           import os
+          from datetime import date
           from pathlib import Path
 
           values = {
@@ -105,6 +138,14 @@ jobs:
               "SATURN_KMS_KEY": os.environ["SATURN_KMS_KEY"],
               "SATURN_EMBED_WORKER": "false",
           }
+          legacy_until = (os.environ.get("LEGACY_PASSWORD_UNTIL") or "").strip()
+          if legacy_until:
+              # The app parses this on every legacy sign-in; a bad value would fail each one.
+              date.fromisoformat(legacy_until)
+              values["LEGACY_PASSWORD_UNTIL"] = legacy_until
+          if os.environ.get("MIGRATIONS_JOB") == "true":
+              # The job below has already migrated; the containers must not.
+              values["RUN_MIGRATIONS"] = "false"
           Path("cloud-run.env.yaml").write_text(
               "".join(f'{key}: "{value}"\n' for key, value in values.items()),
               encoding="utf-8",
@@ -116,12 +157,86 @@ jobs:
           )
           PY
 
-      - name: Deploy to Cloud Run
+      # Each service gets only the secrets it reads. --set-secrets replaces the
+      # whole set, so anything left out here is unmounted on deploy.
+      - name: Resolve secrets per service
         run: |
+          set -euo pipefail
+          common="DATABASE_URL=DATABASE_URL:latest,REDIS_URL=${REDIS_URL_SECRET}:latest"
+          if [ -n "${REDIS_CA_SECRET}" ]; then
+            common="${common},${REDIS_CA_PATH}=${REDIS_CA_SECRET}:latest"
+          fi
+          api="${common}"
+          api="${api},SATURN_GITHUB_OAUTH_CLIENT_ID=SATURN_GITHUB_OAUTH_CLIENT_ID:latest"
+          api="${api},SATURN_GITHUB_OAUTH_CLIENT_SECRET=SATURN_GITHUB_OAUTH_CLIENT_SECRET:latest"
+          api="${api},SATURN_GOOGLE_OAUTH_CLIENT_ID=SATURN_GOOGLE_OAUTH_CLIENT_ID:latest"
+          api="${api},SATURN_GOOGLE_OAUTH_CLIENT_SECRET=SATURN_GOOGLE_OAUTH_CLIENT_SECRET:latest"
+          api="${api},RESEND_API_KEY=RESEND_API_KEY:latest,RESEND_FROM=RESEND_FROM:latest"
+          api="${api},POLICY_LLM_BASE_URL=POLICY_LLM_BASE_URL:latest"
+          api="${api},POLICY_LLM_API_KEY=POLICY_LLM_API_KEY:latest"
+          api="${api},POLICY_LLM_MODEL=POLICY_LLM_MODEL:latest"
+          api="${api},ORIGIN_AUTH_SECRET=ORIGIN_AUTH_SECRET:latest"
+          if [ "${SEED_ON_DEPLOY}" = "true" ]; then
+            api="${api},SEED_USER_EMAIL=SEED_USER_EMAIL:latest,SEED_USER_PASSWORD=SEED_USER_PASSWORD:latest"
+          fi
+          # The worker expires approvals and delivers webhooks. Expiry sends the
+          # task-outcome email, so it needs Resend; it serves no public traffic.
+          worker="${common},RESEND_API_KEY=RESEND_API_KEY:latest,RESEND_FROM=RESEND_FROM:latest"
+          {
+            echo "API_SECRETS=${api}"
+            echo "WORKER_SECRETS=${worker}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Run database migrations
+        if: env.MIGRATIONS_JOB == 'true'
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.uri }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ -n "${MIGRATIONS_SERVICE_ACCOUNT}" ]; then
+            extra+=(--service-account "${MIGRATIONS_SERVICE_ACCOUNT}")
+          fi
+          gcloud run jobs deploy "${MIGRATIONS_JOB_NAME}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --image "${IMAGE_REF}" \
+            --command alembic \
+            --args upgrade,head \
+            --tasks 1 \
+            --max-retries 0 \
+            --task-timeout 900s \
+            --cpu 1 \
+            --memory 512Mi \
+            --set-secrets "DATABASE_URL=${MIGRATIONS_DATABASE_URL_SECRET}:latest" \
+            --set-cloudsql-instances "${CLOUD_SQL_INSTANCE_CONNECTION_NAME}" \
+            --vpc-connector "${SERVERLESS_VPC_CONNECTOR}" \
+            --vpc-egress private-ranges-only \
+            "${extra[@]}" \
+            --execute-now \
+            --wait
+
+      - name: Deploy to Cloud Run
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.uri }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ -n "${RUNTIME_SERVICE_ACCOUNT}" ]; then
+            extra+=(--service-account "${RUNTIME_SERVICE_ACCOUNT}")
+          fi
+          case "${CLOUD_RUN_INGRESS}" in
+            "") ;;
+            all | internal | internal-and-cloud-load-balancing)
+              extra+=(--ingress "${CLOUD_RUN_INGRESS}") ;;
+            *)
+              echo "::error::CLOUD_RUN_INGRESS must be all, internal or internal-and-cloud-load-balancing."
+              exit 1 ;;
+          esac
           gcloud run deploy "${CLOUD_RUN_SERVICE}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${GCP_REGION}" \
-            --image "${{ steps.image.outputs.uri }}@${{ steps.build.outputs.digest }}" \
+            --image "${IMAGE_REF}" \
             --platform managed \
             --allow-unauthenticated \
             --port 8000 \
@@ -129,20 +244,28 @@ jobs:
             --no-session-affinity \
             --cpu 1 \
             --memory 512Mi \
-            --max-instances "${{ vars.MAX_INSTANCES || '10' }}" \
+            --max-instances "${MAX_INSTANCES}" \
             --env-vars-file cloud-run.env.yaml \
-            --set-secrets DATABASE_URL=DATABASE_URL:latest,REDIS_URL=REDIS_URL:latest,SEED_USER_EMAIL=SEED_USER_EMAIL:latest,SEED_USER_PASSWORD=SEED_USER_PASSWORD:latest,SATURN_GITHUB_OAUTH_CLIENT_ID=SATURN_GITHUB_OAUTH_CLIENT_ID:latest,SATURN_GITHUB_OAUTH_CLIENT_SECRET=SATURN_GITHUB_OAUTH_CLIENT_SECRET:latest,SATURN_GOOGLE_OAUTH_CLIENT_ID=SATURN_GOOGLE_OAUTH_CLIENT_ID:latest,SATURN_GOOGLE_OAUTH_CLIENT_SECRET=SATURN_GOOGLE_OAUTH_CLIENT_SECRET:latest,RESEND_API_KEY=RESEND_API_KEY:latest,RESEND_FROM=RESEND_FROM:latest,POLICY_LLM_BASE_URL=POLICY_LLM_BASE_URL:latest,POLICY_LLM_API_KEY=POLICY_LLM_API_KEY:latest,POLICY_LLM_MODEL=POLICY_LLM_MODEL:latest,ORIGIN_AUTH_SECRET=ORIGIN_AUTH_SECRET:latest \
-            --add-cloudsql-instances "${{ vars.CLOUD_SQL_INSTANCE_CONNECTION_NAME }}" \
-            --vpc-connector "${{ vars.SERVERLESS_VPC_CONNECTOR }}" \
+            --set-secrets "${API_SECRETS}" \
+            --add-cloudsql-instances "${CLOUD_SQL_INSTANCE_CONNECTION_NAME}" \
+            --vpc-connector "${SERVERLESS_VPC_CONNECTOR}" \
             --vpc-egress private-ranges-only \
-            --startup-probe=timeoutSeconds=10,periodSeconds=10,failureThreshold=36,tcpSocket.port=8000
+            --startup-probe=timeoutSeconds=10,periodSeconds=10,failureThreshold=36,tcpSocket.port=8000 \
+            "${extra[@]}"
 
       - name: Deploy webhook worker
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.uri }}@${{ steps.build.outputs.digest }}
         run: |
+          set -euo pipefail
+          extra=()
+          if [ -n "${RUNTIME_SERVICE_ACCOUNT}" ]; then
+            extra+=(--service-account "${RUNTIME_SERVICE_ACCOUNT}")
+          fi
           gcloud run deploy saturn-worker \
             --project "${GCP_PROJECT_ID}" \
             --region "${GCP_REGION}" \
-            --image "${{ steps.image.outputs.uri }}@${{ steps.build.outputs.digest }}" \
+            --image "${IMAGE_REF}" \
             --platform managed \
             --no-allow-unauthenticated \
             --ingress internal \
@@ -154,8 +277,9 @@ jobs:
             --cpu 1 \
             --memory 512Mi \
             --env-vars-file cloud-run.worker.env.yaml \
-            --set-secrets DATABASE_URL=DATABASE_URL:latest,REDIS_URL=REDIS_URL:latest,SEED_USER_EMAIL=SEED_USER_EMAIL:latest,SEED_USER_PASSWORD=SEED_USER_PASSWORD:latest,SATURN_GITHUB_OAUTH_CLIENT_ID=SATURN_GITHUB_OAUTH_CLIENT_ID:latest,SATURN_GITHUB_OAUTH_CLIENT_SECRET=SATURN_GITHUB_OAUTH_CLIENT_SECRET:latest,SATURN_GOOGLE_OAUTH_CLIENT_ID=SATURN_GOOGLE_OAUTH_CLIENT_ID:latest,SATURN_GOOGLE_OAUTH_CLIENT_SECRET=SATURN_GOOGLE_OAUTH_CLIENT_SECRET:latest,RESEND_API_KEY=RESEND_API_KEY:latest,RESEND_FROM=RESEND_FROM:latest,POLICY_LLM_BASE_URL=POLICY_LLM_BASE_URL:latest,POLICY_LLM_API_KEY=POLICY_LLM_API_KEY:latest,POLICY_LLM_MODEL=POLICY_LLM_MODEL:latest \
-            --add-cloudsql-instances "${{ vars.CLOUD_SQL_INSTANCE_CONNECTION_NAME }}" \
-            --vpc-connector "${{ vars.SERVERLESS_VPC_CONNECTOR }}" \
+            --set-secrets "${WORKER_SECRETS}" \
+            --add-cloudsql-instances "${CLOUD_SQL_INSTANCE_CONNECTION_NAME}" \
+            --vpc-connector "${SERVERLESS_VPC_CONNECTOR}" \
             --vpc-egress private-ranges-only \
-            --startup-probe=timeoutSeconds=10,periodSeconds=10,failureThreshold=36,tcpSocket.port=8000
+            --startup-probe=timeoutSeconds=10,periodSeconds=10,failureThreshold=36,tcpSocket.port=8000 \
+            "${extra[@]}"

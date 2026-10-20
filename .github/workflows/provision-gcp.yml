@@ -5,7 +5,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -16,6 +15,8 @@ env:
   CLOUD_SQL_DATABASE: ${{ vars.CLOUD_SQL_DATABASE || 'saturn' }}
   CLOUD_SQL_USER: ${{ vars.CLOUD_SQL_USER || 'saturn' }}
   CLOUD_SQL_TIER: ${{ vars.CLOUD_SQL_TIER || 'db-g1-small' }}
+  CLOUD_SQL_AVAILABILITY_TYPE: ${{ vars.CLOUD_SQL_AVAILABILITY_TYPE || 'zonal' }}
+  CLOUD_SQL_BACKUP_START_TIME: ${{ vars.CLOUD_SQL_BACKUP_START_TIME || '18:00' }}
   REDIS_INSTANCE: ${{ vars.REDIS_INSTANCE || 'saturn-redis' }}
   REDIS_TIER: ${{ vars.REDIS_TIER || 'BASIC' }}
   REDIS_SIZE_GB: ${{ vars.REDIS_SIZE_GB || '1' }}
@@ -26,21 +27,40 @@ env:
 jobs:
   provision:
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
+      - name: Only provision from main
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Provisioning runs only from refs/heads/main, not ${GITHUB_REF}."
+            exit 1
+          fi
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          # A provision-only identity, once it exists (infra/gcp/README.md). Until
+          # then the deployer keeps provisioning, as before.
+          service_account: ${{ secrets.GCP_PROVISION_SERVICE_ACCOUNT_EMAIL || secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
 
       - name: Bootstrap Google Cloud resources
         run: bash infra/gcp/bootstrap.sh
         env:
           CLOUD_SQL_PASSWORD: ${{ secrets.CLOUD_SQL_PASSWORD }}
+          # 'true' only once the identity above may grant IAM (runtime-service-account.sh).
+          SETUP_RUNTIME_SERVICE_ACCOUNT: ${{ vars.SETUP_RUNTIME_SERVICE_ACCOUNT }}
+          SATURN_KMS_KEY: ${{ vars.SATURN_KMS_KEY }}
+          DEPLOYER_SA: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}

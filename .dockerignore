@@ -13,3 +13,12 @@ tests
 *.db
 .DS_Store
 .env
+.env.*
+!.env.example
+requirements-dev.in
+requirements-dev.txt
+docker-compose.yml
+.gitleaks.toml
+docs
+cloud-run*.env.yaml
+pytest.ini
