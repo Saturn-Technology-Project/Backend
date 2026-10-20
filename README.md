@@ -36,15 +36,19 @@ This repo is the API. Console and admin are separate repos.
 
 ```bash
 cp .env.example .env
+# Fill in POSTGRES_PASSWORD and REDIS_PASSWORD (for example `openssl rand -hex 16`),
+# SEED_USER_EMAIL and SEED_USER_PASSWORD.
 docker compose up --build
 ```
 
-Set `SEED_USER_EMAIL` and `SEED_USER_PASSWORD` in `.env` before the first boot. Those values create the platform admin. Do not commit them.
+Set `SEED_USER_EMAIL` and `SEED_USER_PASSWORD` in `.env` before the first boot. Those values create the platform admin. Do not commit them. Compose refuses to start until `POSTGRES_PASSWORD` and `REDIS_PASSWORD` are set.
 
 - API: http://localhost:8000
 - Docs: http://localhost:8000/docs
-- Postgres: localhost:5433
-- Redis: localhost:6379
+- Postgres: 127.0.0.1:5433 (user `saturn`, password `POSTGRES_PASSWORD`)
+- Redis: 127.0.0.1:6379 (password `REDIS_PASSWORD`)
+
+Postgres and Redis listen on 127.0.0.1 only. The container runs as an unprivileged user (uid 10001). It applies migrations on start, unless `RUN_MIGRATIONS=false`.
 
 ## Auth
 
@@ -95,14 +99,39 @@ Python 3.12.
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements-dev.txt
 pytest
 ```
 
 Pytest loads a local catalog fixture (`tests/catalog.py`) so the execution-loop tests do not depend on production seed data.
 
+## Dependencies
+
+| File | Contents |
+|---|---|
+| `requirements.in` | direct production dependencies, pinned with `==` |
+| `requirements-dev.in` | test-only additions (pytest, pytest-asyncio, aiosqlite) |
+| `requirements.txt` | full production lock with hashes, installed in the image |
+| `requirements-dev.txt` | production lock plus test tools, with hashes, installed in CI |
+
+Everything installs with `--require-hashes`, so any package, direct or transitive, must match a hash in the lock. The production image never contains the test tools. To add or bump a package, edit the `.in` file and regenerate both locks with the `uv pip compile` commands at the top of `requirements.in`. Commit the `.in` and `.txt` files together.
+
+Vendored third-party files are listed with their versions and hashes in [`docs/vendored-assets.md`](docs/vendored-assets.md).
+
+## Configuration
+
+Settings come from the environment (or `.env`); see `.env.example`. Besides the app settings in `app/core/config.py`, the container reads:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `RUN_MIGRATIONS` | `true` | `false` skips `alembic upgrade head` on container start (production runs it in a Cloud Run Job instead) |
+| `MIGRATION_LOCK_WAIT` | `300s` | how long a migration waits for another runner's advisory lock |
+| `LEGACY_PASSWORD_UNTIL` | empty | ISO date after which legacy (pre-argon2) passwords stop working |
+
+uvicorn does not trust `X-Forwarded-*` from any peer but 127.0.0.1.
+
 ## Deploy
 
-Cloud Run + Cloud SQL + Memorystore. GitHub Actions on `main`.
+Cloud Run + Cloud SQL + Memorystore. GitHub Actions on `main`, through the `production` environment.
 
-See [`infra/gcp/README.md`](infra/gcp/README.md).
+See [`infra/gcp/README.md`](infra/gcp/README.md) for setup, every deploy variable, and the hardening runbooks (runtime service account, migration job, Redis TLS, ingress).
