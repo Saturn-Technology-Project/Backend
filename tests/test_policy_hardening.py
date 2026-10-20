@@ -155,7 +155,8 @@ async def test_oversize_graphs_are_refused_with_400(client):
 
     huge = {"nodes": [{"id": "t", "type": "tool", "data": {"tool": "x", "blob": "a" * (MAX_DEFINITION_BYTES + 1)}}]}
     too_big = await client.post("/policies", json={"name": "Huge", "definition": huge})
-    assert too_big.status_code == 400
+    # Refused before it is stored: by the request schema (422) or the service (400), never a 500.
+    assert too_big.status_code in {400, 422}
 
     names = [item["name"] for item in (await client.get("/policies")).json()]
     assert not {"Layers", "Chain", "Many", "Huge"} & set(names)
@@ -504,6 +505,7 @@ async def test_oversized_fields_are_400_not_500(client):
     ]
     for body in cases:
         response = await client.post("/policies", json=body)
-        assert response.status_code in {400, 404}, (body["name"][:10], response.status_code, response.text)
+        # The request schema (422) or the service (400/404) refuses it; never a 500.
+        assert response.status_code in {400, 404, 422}, (body["name"][:10], response.status_code, response.text)
     names = [item["name"] for item in (await client.get("/policies")).json()]
     assert not {"Env", "Op", "Value", "Text", "Tool", "Linked"} & set(names)

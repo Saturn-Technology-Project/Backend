@@ -19,6 +19,7 @@ from app.features.execution.activity.services.zero_access import (
     wrap_secret,
 )
 from tests.oauth_access import oauth_access
+from tests.policy_helpers import activate_created
 from tests.test_quorum import _auth, _people, _request
 
 BAD_KEY = "ff" * 1568
@@ -117,7 +118,7 @@ async def _approval_setup(client, monkeypatch, calls, policy_body):
         "/policies",
         json={"name": "HV", "rules": [{"tool": "pay.send", "condition": "true", "decision": "approval_required", "approval_policy_id": policy.json()["id"]}]},
     )
-    assert rule.status_code == 201, rule.text
+    await activate_created(client, rule)
     access = await oauth_access(client, "Pay Agent")
     await client.post("/mcp", headers={"Authorization": f"Bearer {access}"}, json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     agent_id = next(item["id"] for item in (await client.get("/agents")).json() if item["name"] == "Pay Agent")
