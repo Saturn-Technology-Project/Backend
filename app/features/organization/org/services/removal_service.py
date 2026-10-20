@@ -86,7 +86,7 @@ class RemovalService:
                 session.expire(obj, ["mcp_servers"])
         from app.features.credentials.vault.services.secret_vault import delete_secret
 
-        await delete_secret(session, server.credential_id)
+        await delete_secret(session, server.credential_id, server.organization_id)
         await session.delete(server)
         await session.flush()
 

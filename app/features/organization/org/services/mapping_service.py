@@ -20,6 +20,11 @@ class MappingService:
             return employee
         if user.id != settings.default_actor_id:
             return None
+        # Only the very first boot of an empty org. A seed admin who was removed from a
+        # working org must not get an admin seat back by signing in.
+        others = await session.scalar(select(Employee.id).where(Employee.organization_id == user.organization_id).limit(1))
+        if others is not None:
+            return None
         suffix = user.id[5:] if user.id.startswith("user_") else user.id
         employee = Employee(
             id="emp_" + suffix,

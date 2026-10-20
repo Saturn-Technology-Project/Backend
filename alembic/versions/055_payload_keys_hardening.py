@@ -9,7 +9,7 @@
   reveals or blocks another organization's credential.
 
 Revision ID: 055_payload_keys_hardening
-Revises: 054_approvals_hardening
+Revises: 053_auth_hardening
 Create Date: 2026-10-20
 
 """
@@ -21,7 +21,7 @@ from alembic import op
 from sqlalchemy import inspect
 
 revision: str = "055_payload_keys_hardening"
-down_revision: Union[str, Sequence[str], None] = "054_approvals_hardening"
+down_revision: Union[str, Sequence[str], None] = "053_auth_hardening"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -59,7 +59,15 @@ def upgrade() -> None:
 def downgrade() -> None:
     pk = inspect(op.get_bind()).get_pk_constraint("org_credentials")
     if list(pk.get("constrained_columns") or []) != ["id"]:
-        # Fails if two organizations now use the same id; resolve those rows first.
+        shared = op.get_bind().execute(
+            sa.text("SELECT id FROM org_credentials GROUP BY id HAVING COUNT(*) > 1 LIMIT 5")
+        ).scalars().all()
+        if shared:
+            raise RuntimeError(
+                "Cannot downgrade: these credential ids are now used by more than one organization: "
+                + ", ".join(shared)
+                + ". Rename or delete the extra rows first."
+            )
         with op.batch_alter_table("org_credentials") as batch:
             batch.drop_constraint(pk.get("name") or "org_credentials_pkey", type_="primary")
             batch.create_primary_key("org_credentials_pkey", ["id"])

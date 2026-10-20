@@ -12,7 +12,13 @@ from starlette.requests import Request
 
 
 def configured_origin() -> str:
-    return os.environ.get("PUBLIC_WS_URL", "").strip().rstrip("/")
+    """PUBLIC_WS_URL as an http(s) origin. ws:// and wss:// map to http:// and https://."""
+    value = os.environ.get("PUBLIC_WS_URL", "").strip().rstrip("/")
+    if value.startswith("wss://"):
+        return "https://" + value.removeprefix("wss://")
+    if value.startswith("ws://"):
+        return "http://" + value.removeprefix("ws://")
+    return value
 
 
 def public_origin(request: Request | None = None) -> str:

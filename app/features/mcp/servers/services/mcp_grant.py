@@ -28,7 +28,7 @@ async def write_grant(session: AsyncSession, server: McpServer, grant: dict[str,
     body = _empty()
     body.update({key: str(grant.get(key) or "") for key in body})
     if not any(body.values()):
-        await delete_secret(session, secret_id)
+        await delete_secret(session, secret_id, server.organization_id)
         server.credential_id = ""
         return
     await put_secret(session, secret_id, json.dumps(body), server.organization_id)
