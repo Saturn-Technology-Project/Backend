@@ -1,10 +1,24 @@
 version: 2
 updates:
+  # requirements.in / requirements-dev.in hold the direct pins; the .txt files
+  # are hashed locks. If a Dependabot PR does not regenerate a lock, run the
+  # uv pip compile commands at the top of requirements.in on that branch.
   - package-ecosystem: pip
     directory: "/"
     schedule:
       interval: weekly
+  # Actions are pinned to commit SHAs with the release tag in a comment;
+  # Dependabot bumps the SHA and the comment together.
   - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+  # The Dockerfile base image is pinned by digest.
+  - package-ecosystem: docker
     directory: "/"
     schedule:
       interval: weekly

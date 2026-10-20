@@ -1,0 +1,21 @@
+# gitleaks configuration. CI runs gitleaks 8.30.1 against the working tree and
+# the full git history with this file. [[allowlists]] needs gitleaks 8.25 or newer.
+title = "Saturn backend"
+
+[extend]
+# Keep every built-in rule; this file only adds narrow exceptions.
+useDefault = true
+
+# Fake values that tests use on purpose. Each entry needs both the exact file
+# and the exact literal, so the same string anywhere else is still reported.
+[[allowlists]]
+description = "Fake API key in the notice redaction test"
+condition = "AND"
+paths = ['''^tests/test_notices\.py$''']
+regexes = ['''^sk_live_secret$''']
+
+[[allowlists]]
+description = "RFC 6238 sample TOTP secret in the admin TOTP test"
+condition = "AND"
+paths = ['''^tests/test_admin_totp\.py$''']
+regexes = ['''^JBSWY3DPEHPK3PXP$''']
