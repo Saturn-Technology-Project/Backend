@@ -375,13 +375,18 @@ _INVITE = {
 }
 
 
-def invite_link(token: str) -> str:
+def invite_link(token: str, email: str = "") -> str:
+    """The invitee's address rides along: the console salts the password hash with it, so it must
+    be the exact address the account is created under."""
     from urllib.parse import quote
 
-    return f"{console_origin()}/accept-invite?token={quote(token, safe='')}"
+    link = f"{console_origin()}/accept-invite?token={quote(token, safe='')}"
+    if email:
+        link += f"&email={quote(email.strip().lower(), safe='@')}"
+    return link
 
 
-def _invite_message(token: str, org: str, inviter: str, days: int, locale: str) -> tuple[str, str, str]:
+def _invite_message(token: str, org: str, inviter: str, days: int, locale: str, email: str = "") -> tuple[str, str, str]:
     lang = _copy_language(locale)
     copy = _INVITE[lang]
     org_name = org or "Saturn"
@@ -389,7 +394,7 @@ def _invite_message(token: str, org: str, inviter: str, days: int, locale: str) 
     subject = copy["subject"].format(org=org_name)
     title = copy["title"].format(org=org_name)
     body = copy["body"].format(who=who, org=org_name, days=days)
-    link = invite_link(token)
+    link = invite_link(token, email)
     text = f"{title}\n\n{body}\n\n{copy['link']}: {link}\n\n{copy['ignore']}\n\nSaturn\n"
     button = (
         f'<p style="margin:24px 0 0;"><a href="{escape(link)}" style="display:inline-block;padding:10px 16px;'
@@ -415,7 +420,7 @@ async def send_invite(
     settings = get_settings()
     if not settings.resend_api_key or not settings.resend_from:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Email delivery is not configured")
-    subject, text, html = _invite_message(token, organization, inviter, days, mail_locale(locale))
+    subject, text, html = _invite_message(token, organization, inviter, days, mail_locale(locale), email)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(

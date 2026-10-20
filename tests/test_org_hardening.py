@@ -423,3 +423,13 @@ async def test_invitation_rows_never_store_the_raw_token(client):
 
     row = await _with_session(load)
     assert row.token_hash != token and token not in row.token_hash
+
+
+def test_invite_link_carries_the_invitee_address():
+    from app.features.identity.auth.services.mailer import _invite_message, invite_link
+
+    link = invite_link("inv_abc", "New.Person+ops@Example.com")
+    assert link.endswith("/accept-invite?token=inv_abc&email=new.person%2Bops@example.com")
+    _subject, text, html = _invite_message("inv_abc", "Acme", "", 7, "en-US", "ops@example.com")
+    assert "email=ops@example.com" in text
+    assert "email=ops@example.com" in html

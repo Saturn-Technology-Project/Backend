@@ -40,10 +40,10 @@ from app.features.execution.activity.services.zero_access import (
 from app.features.organization.org.services.access import allows
 from app.models import Action, AuditLog, Employee, Run, User
 
-# The console still uploads v1 (HKDF) recovery backups. Turn this off once it sends v2 (PBKDF2).
-ACCEPT_LEGACY_RECOVERY_KDF = True
-# The console still uploads password-derived member backups. Turn this off once it sends CLIENT-SECRET.
-ACCEPT_LEGACY_PASSWORD_BACKUP = True
+# The console uploads v2 (PBKDF2) recovery backups and CLIENT-SECRET member backups. Older uploads
+# are refused; backups already stored in the old formats can still be downloaded and opened.
+ACCEPT_LEGACY_RECOVERY_KDF = False
+ACCEPT_LEGACY_PASSWORD_BACKUP = False
 
 KEY_AUDIT_SOURCE = "payload_keys"
 EVENT_ORG_KEY_CREATED = "payload_org_key_created"
@@ -240,6 +240,10 @@ async def register_member_key(
 ) -> MemberPayloadKey:
     employee = await _member(session, user_id, organization_id)
     public_hex = _encapsulation_key(public_key, "public_key")
+    key_id = new_id("mpk")
+    # Validate the backup before touching the current key: the session commits on HTTPException,
+    # so a refused registration must not leave the member without their working key.
+    backup_row = _member_backup(organization_id, user_id, key_id, backup) if backup is not None else None
     current = await own_member_key(session, organization_id=organization_id, user_id=user_id)
     replaced = current is not None
     replaced_id = current.id if current is not None else ""
@@ -250,7 +254,7 @@ async def register_member_key(
     # approved on registration, which also covers the owner bootstrapping the first key.
     auto = _is_key_admin(employee)
     row = MemberPayloadKey(
-        id=new_id("mpk"),
+        id=key_id,
         organization_id=organization_id,
         user_id=user_id,
         public_key=public_hex,
@@ -262,8 +266,8 @@ async def register_member_key(
         created_at=utcnow(),
     )
     session.add(row)
-    if backup is not None:
-        session.add(_member_backup(organization_id, user_id, row.id, backup))
+    if backup_row is not None:
+        session.add(backup_row)
     await session.flush()
     await _audit(
         session,

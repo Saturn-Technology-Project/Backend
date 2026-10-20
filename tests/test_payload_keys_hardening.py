@@ -442,7 +442,7 @@ def test_new_envelopes_have_no_plain_content_hash_and_legacy_still_opens():
 # M-10 ---------------------------------------------------------------------------------------
 
 
-async def test_member_backup_accepts_client_secret_blob_and_marks_password_backup_legacy(client):
+async def test_member_backup_accepts_client_secret_blob_and_refuses_password_backups(client):
     _private, public = generate_mlkem()
     blob = os.urandom(200).hex()
     registered = await client.post(
@@ -464,13 +464,15 @@ async def test_member_backup_accepts_client_secret_blob_and_marks_password_backu
 
     from app.features.execution.activity.services.zero_access import password_backup
 
+    # The console now wraps member keys in the browser (CLIENT-SECRET), so the server refuses
+    # backups it could open itself from the login password.
     private2, public2 = generate_mlkem()
     legacy = await client.post(
         "/org/payload-keys/member",
         json={"public_key": public2.hex(), "backup": password_backup("pw", "u", private2)},
     )
-    assert legacy.status_code == 200, legacy.text
-    assert (await client.get("/org/payload-keys/member/backup")).json()["legacy"] is True
+    assert legacy.status_code == 400, legacy.text
+    assert (await client.get("/org/payload-keys/member/backup")).json()["blob"] == blob
 
 
 # I-07 ---------------------------------------------------------------------------------------
