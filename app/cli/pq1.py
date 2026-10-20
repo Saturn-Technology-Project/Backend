@@ -27,7 +27,8 @@ async def pq1_locations(session: AsyncSession) -> list[tuple[str, str]]:
     credentials = await session.scalars(
         select(OrgCredential).where(OrgCredential.secret_ciphertext.startswith(_PREFIX))
     )
-    found.extend(("org_credentials", row.id) for row in credentials.all())
+    # Credential ids are unique per organization, so the location names both.
+    found.extend(("org_credentials", f"{row.organization_id}/{row.id}") for row in credentials.all())
     pending = await session.scalars(select(McpOAuthPending))
     for row in pending.all():
         if row.verifier_ciphertext.startswith(_PREFIX) or row.client_secret_ciphertext.startswith(_PREFIX):
@@ -43,7 +44,8 @@ async def delete_pq1(session: AsyncSession) -> list[tuple[str, str]]:
             if row is not None:
                 await session.delete(row)
         elif table == "org_credentials":
-            row = await session.get(OrgCredential, row_id)
+            organization_id, _, credential_id = row_id.partition("/")
+            row = await session.get(OrgCredential, {"organization_id": organization_id, "id": credential_id})
             if row is not None:
                 row.secret_ciphertext = ""
         elif table == "mcp_oauth_pending":
