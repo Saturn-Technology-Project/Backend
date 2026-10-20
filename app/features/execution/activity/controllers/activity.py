@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from app.core.ids import utcnow
 from app.features.identity.auth.controllers.deps import AgentsRead, CurrentUser, SessionDep
@@ -40,26 +40,14 @@ def _read(item: AuditLog) -> ActivityEventRead:
     )
 
 
-def _aware(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
+LIST_DEFAULT_LIMIT = 500
+LIST_MAX_LIMIT = 1000
+EXPORT_DEFAULT_LIMIT = 5000
+EXPORT_MAX_LIMIT = 10000
 
 
-def _matches(item: AuditLog, q: str | None, tool: str | None, agent: str | None) -> bool:
-    if tool and tool.strip() and tool.strip() not in (item.tool or ""):
-        return False
-    if agent and agent.strip() and agent.strip() not in (item.actor_id or ""):
-        return False
-    needle = (q or "").strip().lower()
-    if not needle:
-        return True
-    haystack = " ".join(
-        part
-        for part in (item.event, item.tool, item.result, item.actor_id, item.actor_type)
-        if part
-    ).lower()
-    return needle in haystack
+def _contains(column, needle: str):
+    return func.lower(func.coalesce(column, "")).contains(needle.lower(), autoescape=True)
 
 
 async def _rows(
@@ -70,25 +58,43 @@ async def _rows(
     q: str | None,
     tool: str | None,
     agent: str | None,
-) -> list[AuditLog]:
+    limit: int,
+    offset: int,
+) -> tuple[list[AuditLog], bool]:
+    """Matching rows newest first, filtered in SQL. Returns one page and whether more exist."""
     org = await session.get(Organization, user.organization_id)
     plan = org.plan if org is not None else None
     days = audit_retention_days(plan)
-    stmt = (
-        select(AuditLog)
-        .where(AuditLog.organization_id == user.organization_id)
-        .order_by(AuditLog.created_at.desc())
+    stmt = select(AuditLog).where(
+        AuditLog.organization_id == user.organization_id,
+        AuditLog.payload["source"].as_string() == "saturn_mcp",
     )
     if run_id:
         stmt = stmt.where(AuditLog.run_id == run_id)
-    result = await session.execute(stmt)
-    rows = [item for item in result.scalars().all() if recorded_by_saturn_mcp(item)]
     if days is not None:
-        cutoff = _aware(utcnow() - timedelta(days=days))
-        rows = [item for item in rows if _aware(item.created_at) >= cutoff]
-    if any(value and value.strip() for value in (q, tool, agent)):
-        rows = [item for item in rows if _matches(item, q, tool, agent)]
-    return rows
+        stmt = stmt.where(AuditLog.created_at >= utcnow() - timedelta(days=days))
+    if tool and tool.strip():
+        stmt = stmt.where(AuditLog.tool.contains(tool.strip(), autoescape=True))
+    if agent and agent.strip():
+        stmt = stmt.where(AuditLog.actor_id.contains(agent.strip(), autoescape=True))
+    needle = (q or "").strip()
+    if needle:
+        stmt = stmt.where(
+            or_(
+                *(
+                    _contains(column, needle)
+                    for column in (AuditLog.event, AuditLog.tool, AuditLog.result, AuditLog.actor_id, AuditLog.actor_type)
+                )
+            )
+        )
+    stmt = stmt.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).offset(offset).limit(limit + 1)
+    rows = list((await session.execute(stmt)).scalars().all())
+    return rows[:limit], len(rows) > limit
+
+
+def _page_headers(response: Response, offset: int, count: int, more: bool) -> None:
+    if more:
+        response.headers["X-Next-Offset"] = str(offset + count)
 
 
 @router.get("", response_model=list[ActivityEventRead])
@@ -96,12 +102,16 @@ async def list_activity(
     session: SessionDep,
     user: CurrentUser,
     _access: AgentsRead,
+    response: Response,
     run_id: str | None = None,
     q: str | None = None,
     tool: str | None = None,
     agent: str | None = None,
+    limit: int = Query(LIST_DEFAULT_LIMIT, ge=1, le=LIST_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
 ):
-    rows = await _rows(session, user, run_id=run_id, q=q, tool=tool, agent=agent)
+    rows, more = await _rows(session, user, run_id=run_id, q=q, tool=tool, agent=agent, limit=limit, offset=offset)
+    _page_headers(response, offset, len(rows), more)
     return [_read(item) for item in rows]
 
 
@@ -114,17 +124,21 @@ async def export_activity(
     q: str | None = None,
     tool: str | None = None,
     agent: str | None = None,
+    limit: int = Query(EXPORT_DEFAULT_LIMIT, ge=1, le=EXPORT_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
 ):
-    rows = await _rows(session, user, run_id=run_id, q=q, tool=tool, agent=agent)
+    rows, more = await _rows(session, user, run_id=run_id, q=q, tool=tool, agent=agent, limit=limit, offset=offset)
     body = json.dumps(
         [_read(item).model_dump(mode="json") for item in rows],
         ensure_ascii=False,
     )
-    return Response(
+    response = Response(
         content=body,
         media_type="application/json",
         headers={"Content-Disposition": 'attachment; filename="activity.json"'},
     )
+    _page_headers(response, offset, len(rows), more)
+    return response
 
 
 @router.post("/{event_id}/reveal")

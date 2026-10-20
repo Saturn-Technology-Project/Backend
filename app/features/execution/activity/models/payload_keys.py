@@ -34,6 +34,8 @@ class OrgKeyBackup(Base):
     key_version: Mapped[int] = mapped_column(Integer, nullable=False)
     format_version: Mapped[int] = mapped_column(Integer, nullable=False)
     kdf: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 0 for the legacy HKDF format; the PBKDF2 iteration count for v2.
+    iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     salt: Mapped[str] = mapped_column(String(128), nullable=False)
     nonce: Mapped[str] = mapped_column(String(64), nullable=False)
     ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
@@ -64,6 +66,10 @@ class MemberPayloadKey(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     public_key: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    # pending until a team.write admin approves it; only approved keys receive new DEK wraps.
+    approval: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="approved")
+    approved_by: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default="")
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     assist_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

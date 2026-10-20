@@ -3,6 +3,7 @@ import os
 import pytest
 
 from app.features.execution.activity.services.zero_access import (
+    dek_proof,
     decrypt_payload,
     encrypt_payload,
     generate_mlkem,
@@ -208,7 +209,7 @@ async def test_rotation_rewraps_the_dek_and_leaves_ciphertext_unchanged(client, 
                 "id": item["id"],
                 "type": item["type"],
                 "wrapped_dek": wrap_secret(new_public, dek, f"dek\n{org}\n2\n{item['id']}\n{item['type']}".encode()).hex(),
-                "content_sha256": item["content_sha256"],
+                "dek_proof": dek_proof(dek, org, item["id"], item["type"]),
             }
         )
     assert records

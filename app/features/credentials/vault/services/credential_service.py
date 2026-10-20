@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 
 from fastapi import HTTPException, status
@@ -31,6 +32,12 @@ def _clip(value: str, limit: int) -> str:
     return value.strip()[:limit]
 
 
+def vault_id_for(organization_id: str, credential_id: str) -> str:
+    """Credential ids are per organization, so the vault entry name carries the organization too."""
+    org_tag = hashlib.sha256(f"saturn-credential-org\n{organization_id}".encode()).hexdigest()[:16]
+    return f"org-{org_tag}-{credential_id}"
+
+
 class CredentialService:
     async def list_credentials(self, session: AsyncSession, organization_id: str) -> list[OrgCredential]:
         result = await session.scalars(
@@ -55,9 +62,8 @@ class CredentialService:
         credential_id = body.id.strip() if body.id else ""
         if credential_id and not _ID.match(credential_id):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid credential id")
-        current = await session.get(OrgCredential, credential_id) if credential_id else None
-        if current is not None and current.organization_id != user.organization_id:
-            raise HTTPException(status.HTTP_409_CONFLICT, "Credential id is already used")
+        # Ids are scoped to the organization: another tenant using the same id is invisible here.
+        current = await self._get(session, user.organization_id, credential_id) if credential_id else None
         if current is None:
             current = OrgCredential(
                 id=credential_id or new_id("crd"),
@@ -77,25 +83,31 @@ class CredentialService:
         if body.secret is not None:
             from app.features.credentials.vault.services.secret_vault import delete_secret, put_secret
 
-            vault_id = f"org-{current.id}"
+            vault_id = vault_id_for(user.organization_id, current.id)
             if body.secret:
                 await put_secret(session, vault_id, body.secret, user.organization_id)
+                if current.vault_id and current.vault_id != vault_id:
+                    # The old entry ("org-<id>", from when ids were global) belonged to this row.
+                    await delete_secret(session, current.vault_id, user.organization_id)
                 current.vault_id = vault_id
             else:
-                await delete_secret(session, current.vault_id or vault_id)
+                await delete_secret(session, current.vault_id or vault_id, user.organization_id)
                 current.vault_id = ""
             current.secret_ciphertext = ""
         current.updated_at = utcnow()
         await session.flush()
         return current
 
+    async def _get(self, session: AsyncSession, organization_id: str, credential_id: str) -> OrgCredential | None:
+        return await session.get(OrgCredential, {"organization_id": organization_id, "id": credential_id})
+
     async def delete(self, session: AsyncSession, user: User, credential_id: str) -> None:
-        current = await session.get(OrgCredential, credential_id)
-        if current is None or current.organization_id != user.organization_id:
+        current = await self._get(session, user.organization_id, credential_id)
+        if current is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Credential not found")
         from app.features.credentials.vault.services.secret_vault import delete_secret
 
-        await delete_secret(session, current.vault_id)
+        await delete_secret(session, current.vault_id, user.organization_id)
         await session.delete(current)
 
 
