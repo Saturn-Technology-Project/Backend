@@ -7,13 +7,15 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.ids import new_id, utcnow
 from app.models import Action, Agent, Approval, Run, Tool, ToolSet, ToolSetItem, User
 from app.core.enums import ActionStatus, ActorType, ApprovalStatus, AuditEvent, PolicyDecision, RunStatus
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.execution.activity.services.zero_access import PAYLOAD_ENCRYPTION, action_digest, is_zero_access
-from app.features.execution.activity.services.content_seal import plain_arguments, policy_fields
+from app.features.execution.activity.services.content_seal import policy_fields
+from app.features.execution.approvals.services.approval_arguments import digest_matches, server_sealed
 from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 from app.features.mcp.servers.services.mcp_remote import call_remote_tool
 from app.features.policy.policies.services.policy_engine import policy_engine
@@ -143,6 +145,35 @@ def rpc_error(request_id: Any, code: int, message: str, data: dict[str, Any] | N
     return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
+def _unknown_run(request_id: Any) -> dict[str, Any]:
+    return rpc_error(
+        request_id,
+        -32000,
+        "unknown_run. This saturnRunId was not issued to this agent. Leave saturnRunId out to start a separate request.",
+        {"argument": SATURN_RUN_ARGUMENT, "reason": "UNKNOWN_RUN"},
+    )
+
+
+def _same_arguments(organization_id: str, action: Action, approval: Approval, arguments: dict[str, Any]) -> bool:
+    """The resubmitted arguments must be the ones people approved."""
+    from app.features.execution.approvals.services.approval_arguments import ArgumentsUnavailable, stored_arguments
+
+    digests = [value for value in (action_digest(action.arguments), approval.parameter_digest or "") if value]
+    if digests:
+        return all(digest_matches(organization_id, value, arguments) for value in digests)
+    if is_zero_access(action.arguments):
+        return False
+    try:
+        return stored_arguments(organization_id, action.arguments) == arguments
+    except ArgumentsUnavailable:
+        return False
+
+
+# Agent-created Saturn MCP agents. One OAuth client can name several products, but not without bound.
+MAX_AGENTS_PER_CLIENT = 5
+MAX_AGENTS_PER_USER = 25
+
+
 class SaturnMcp:
     async def handle(
         self,
@@ -161,10 +192,12 @@ class SaturnMcp:
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         await self._bind_profile(session, agent_id, user, profile_id, client_id)
         if method == "initialize" and profile_id:
-            await self._connect_client(session, user, agent_id, profile_id, params, client_id, client_name)
+            refused = await self._connect_client(session, user, agent_id, profile_id, params, client_id, client_name)
+            if refused:
+                return rpc_error(request_id, -32000, refused, {"reason": "AGENT_LIMIT"})
         agent = await self._client_for_call(session, user, agent_id, profile_id, client_name, client_id)
         if agent is None and profile_id and client_name and not agent_id:
-            await self._connect_client(
+            refused = await self._connect_client(
                 session,
                 user,
                 "",
@@ -173,12 +206,18 @@ class SaturnMcp:
                 client_id,
                 client_name,
             )
+            if refused:
+                return rpc_error(request_id, -32000, refused, {"reason": "AGENT_LIMIT"})
             agent = await self._client_for_call(session, user, "", profile_id, client_name, client_id)
         if agent is not None and str((agent.settings or {}).get("origin") or "") == "saturn_mcp":
             agent.last_seen_at = utcnow()
             await session.flush()
-        if mcp_session_id and agent is not None and self._owns(agent, user, client_id):
-            await mcp_sessions.open(mcp_session_id, user.id, agent.id, client_id)
+        owned = agent if agent is not None and self._owns(agent, user, client_id) else None
+        if mcp_session_id and method == "initialize":
+            # The controller issued this id for this initialize; nothing else creates a session record.
+            await mcp_sessions.open(mcp_session_id, user.id, owned.id if owned is not None else "", client_id)
+        elif mcp_session_id and owned is not None:
+            await mcp_sessions.bind(mcp_session_id, user.id, owned.id, client_id)
         if method == "initialize":
             return rpc_result(
                 request_id,
@@ -267,31 +306,35 @@ class SaturnMcp:
         params: dict[str, Any],
         client_id: str = "",
         client_name: str = "",
-    ) -> None:
+    ) -> str:
+        """Create or refresh the agent for this client. Returns an error message when refused."""
         if not client_id:
-            return
+            return ""
         name = self._product_name(params, client_name)
         existing = await session.get(Agent, agent_id) if agent_id else None
         if existing is not None and not self._owns(existing, user, client_id):
-            return
+            return ""
         agent = existing or await self._find_client_agent(session, user, profile_id, name, client_id)
         if agent is None:
+            refused = await self._over_agent_limit(session, user, client_id)
+            if refused:
+                return refused
             agent = Agent(
                 id=self._stable_id(profile_id, user.id, name),
                 organization_id=user.organization_id,
                 name=name,
                 description="",
                 model="",
-                settings={},
+                settings={"created_client_id": client_id},
             )
             session.add(agent)
         settings = dict(agent.settings or {})
         current_profile = str(settings.get("profile_id") or "")
         current_user = str(settings.get("registered_user_id") or "")
         if current_profile and current_profile != profile_id:
-            return
+            return ""
         if current_user and current_user != user.id:
-            return
+            return ""
         settings["origin"] = "saturn_mcp"
         settings["profile_id"] = current_profile or profile_id
         settings["registered_user_id"] = user.id
@@ -301,6 +344,26 @@ class SaturnMcp:
         agent.name = name
         agent.last_seen_at = utcnow()
         await session.flush()
+        return ""
+
+    async def _over_agent_limit(self, session: AsyncSession, user: User, client_id: str) -> str:
+        result = await session.execute(select(Agent).where(Agent.organization_id == user.organization_id))
+        mine = [
+            agent
+            for agent in result.scalars().all()
+            if (agent.settings or {}).get("origin") == "saturn_mcp"
+            and (agent.settings or {}).get("registered_user_id") == user.id
+        ]
+        if len(mine) >= MAX_AGENTS_PER_USER:
+            return "agent_limit. This account already has the maximum number of connected agents. Remove one in Saturn first."
+        from_client = [
+            agent
+            for agent in mine
+            if str((agent.settings or {}).get("created_client_id") or (agent.settings or {}).get("client_id") or "") == client_id
+        ]
+        if len(from_client) >= MAX_AGENTS_PER_CLIENT:
+            return "agent_limit. This connection already created the maximum number of agents. Reuse an existing client name."
+        return ""
 
     async def _find_client_agent(
         self,
@@ -467,6 +530,10 @@ class SaturnMcp:
             )
             return rpc_error(request_id, -32003, "Agent is not allowed to call this tool")
         tool, item = match
+        if run_id:
+            owned = await session.get(Run, run_id)
+            if owned is None or owned.organization_id != agent.organization_id or owned.agent_id != agent.id:
+                return _unknown_run(request_id)
         audit_no = await self._next_audit_no(session, agent.organization_id)
         server_name = tool.mcp_server.name if tool.mcp_server is not None else ""
         stamp = {"audit_no": audit_no, "run_id": run_id, "action_id": action_id, "server_name": server_name}
@@ -567,7 +634,7 @@ class SaturnMcp:
         audit_no: int,
         decision=None,
     ) -> dict[str, Any]:
-        from app.features.execution.approvals.services.approval_service import approval_service, parameter_digest
+        from app.features.execution.approvals.services.approval_service import approval_service
 
         action = await session.get(Action, action_id) if action_id else None
         if action is not None:
@@ -579,18 +646,10 @@ class SaturnMcp:
                 if phase:
                     return _approval_expired(request_id, approval, phase, tool.name)
             if approval is not None and approval.status == ApprovalStatus.APPROVED.value:
-                digest = action_digest(action.arguments) or (approval.parameter_digest or "")
-                if digest:
-                    if digest != parameter_digest(arguments):
-                        from app.features.mcp.saturn.services.agent_messages import mismatch_error
+                if not _same_arguments(agent.organization_id, action, approval, arguments):
+                    from app.features.mcp.saturn.services.agent_messages import mismatch_error
 
-                        return mismatch_error(request_id, policy_id=getattr(decision, "policy_id", None))
-                else:
-                    stored = plain_arguments(agent.organization_id, action.arguments)
-                    if stored != arguments:
-                        from app.features.mcp.saturn.services.agent_messages import mismatch_error
-
-                        return mismatch_error(request_id, policy_id=getattr(decision, "policy_id", None))
+                    return mismatch_error(request_id, policy_id=getattr(decision, "policy_id", None))
                 if approval.execution_state == "executed":
                     cached = action.result if isinstance(action.result, dict) else {}
                     return rpc_result(request_id, cached)
@@ -600,64 +659,11 @@ class SaturnMcp:
                     return rpc_error(request_id, -32005, "execution_failed")
                 if approval.execution_state == "claimed":
                     return rpc_error(request_id, -32005, "execution_in_progress")
-                claimed = await session.execute(
-                    update(Approval)
-                    .where(
-                        Approval.id == approval.id,
-                        Approval.status == ApprovalStatus.APPROVED.value,
-                        Approval.execution_state == "none",
-                    )
-                    .values(execution_state="claimed")
+                return await self._execute_approved(
+                    session, agent, tool, request_id, action, approval, arguments=arguments, audit_no=audit_no
                 )
-                if claimed.rowcount != 1:
-                    await session.refresh(approval)
-                    if _status_text(approval.status) == ApprovalStatus.EXPIRED.value:
-                        return _approval_expired(request_id, approval, approval.expired_phase or "resubmit", tool.name)
-                    return rpc_error(request_id, -32005, "execution_in_progress")
-                approval.execution_state = "claimed"
-                fresh = await policy_engine.evaluate_named(
-                    session,
-                    organization_id=agent.organization_id,
-                    agent=agent,
-                    tool_name=tool.name,
-                    arguments=arguments,
-                )
-                if fresh.decision == PolicyDecision.DENY:
-                    from app.features.mcp.saturn.services.agent_messages import deny_error
-
-                    return deny_error(request_id, reason=fresh.reason, policy_id=fresh.policy_id)
-                raw_response = await self._proxy(session, tool, arguments)
-                raw_response, result = _split_remote(raw_response)
-                reply = rpc_result(request_id, result)
-                action.status = ActionStatus.COMPLETED.value
-                action.result = result
-                approval.execution_state = "executed"
-                run = await session.get(Run, action.run_id)
-                if run is not None:
-                    run.status = RunStatus.COMPLETED.value
-                await self._audit(
-                    session,
-                    event=AuditEvent.TOOL_EXECUTED,
-                    actor_type=ActorType.AGENT,
-                    actor_id=agent.id,
-                    organization_id=agent.organization_id,
-                    run_id=action.run_id,
-                    action_id=action.id,
-                    tool=tool.name,
-                    result="completed",
-                    payload={
-                        "audit_no": audit_no,
-                        "server_name": tool.mcp_server.name if tool.mcp_server is not None else "",
-                        "arguments": arguments,
-                        "approval_id": approval.id,
-                        "raw_response": raw_response,
-                        "server_result": result,
-                        "agent_result": reply,
-                    },
-                )
-                return reply
             if approval is not None and approval.status == ApprovalStatus.PENDING.value:
-                if approval.parameter_digest and approval.parameter_digest != parameter_digest(arguments):
+                if approval.parameter_digest and not digest_matches(agent.organization_id, approval.parameter_digest, arguments):
                     approval.status = ApprovalStatus.INVALIDATED.value
                     action.status = ActionStatus.DENIED.value
                     from app.features.mcp.saturn.services.agent_messages import mismatch_error
@@ -716,11 +722,15 @@ class SaturnMcp:
                         decision=decision,
                     )
 
-        ident = run_id or new_id("run")
-        run = await session.get(Run, ident)
-        if run is None:
+        # Run ids are always generated here. An agent-supplied saturnRunId only refers to a run it already owns.
+        if run_id:
+            run = await session.get(Run, run_id)
+            if run is None or run.organization_id != agent.organization_id or run.agent_id != agent.id:
+                return _unknown_run(request_id)
+            run.status = RunStatus.WAITING_APPROVAL.value
+        else:
             run = Run(
-                id=ident,
+                id=new_id("run"),
                 organization_id=agent.organization_id,
                 agent_id=agent.id,
                 input=tool.name,
@@ -728,23 +738,18 @@ class SaturnMcp:
             )
             session.add(run)
             await session.flush()
-        elif run.organization_id != agent.organization_id or run.agent_id != agent.id:
-            return rpc_error(request_id, -32000, "Run does not belong to this agent")
-        else:
-            run.status = RunStatus.WAITING_APPROVAL.value
 
-        action_ident = action_id or new_id("act")
         if action is None:
-            taken = await session.get(Action, action_ident)
-            if taken is not None:
-                action_ident = new_id("act")
+            action_ident = new_id("act")
             from app.features.execution.activity.services.zero_access import protect_mapping
             from app.features.execution.approvals.services.approval_service import parameter_digest as digest_of
 
             envelope = await protect_mapping(session, agent.organization_id, action_ident, "action", arguments)
-            stored_arguments: dict[str, Any] = {"digest": digest_of(arguments)}
+            stored_arguments: dict[str, Any] = {"digest": digest_of(agent.organization_id, arguments)}
             if envelope is None:
-                stored_arguments["encryption"] = "unavailable"
+                # No payload key: keep the approved arguments sealed with the organization content key,
+                # so execution sends the real arguments instead of this record.
+                stored_arguments.update(server_sealed(agent.organization_id, arguments))
             else:
                 stored_arguments["envelope"] = envelope
                 stored_arguments["encryption"] = PAYLOAD_ENCRYPTION
@@ -811,6 +816,134 @@ class SaturnMcp:
             status="pending",
             policy_id=getattr(decision, "policy_id", None),
         )
+
+    async def _execute_approved(
+        self,
+        session: AsyncSession,
+        agent: Agent,
+        tool: Tool,
+        request_id: Any,
+        action: Action,
+        approval: Approval,
+        *,
+        arguments: dict[str, Any],
+        audit_no: int,
+    ) -> dict[str, Any]:
+        from app.features.execution.approvals.services.approval_service import (
+            _uncertain,
+            record_unrecorded_outcome,
+            settle_claim,
+        )
+
+        run = await session.get(Run, action.run_id)
+        fresh = await policy_engine.evaluate_named(
+            session,
+            organization_id=agent.organization_id,
+            agent=agent,
+            tool_name=tool.name,
+            arguments=arguments,
+        )
+        if fresh.decision == PolicyDecision.DENY:
+            # Close the approval before anything is claimed, so it cannot stay claimed forever.
+            closed = await session.execute(
+                update(Approval)
+                .where(
+                    Approval.id == approval.id,
+                    Approval.status == ApprovalStatus.APPROVED.value,
+                    Approval.execution_state == "none",
+                )
+                .values(status=ApprovalStatus.INVALIDATED.value)
+            )
+            if closed.rowcount == 1:
+                set_committed_value(approval, "status", ApprovalStatus.INVALIDATED.value)
+                action.status = ActionStatus.DENIED.value
+                if run is not None:
+                    run.status = RunStatus.FAILED.value
+                    run.updated_at = utcnow()
+                await self._audit(
+                    session,
+                    event=AuditEvent.APPROVAL_INVALIDATED,
+                    actor_type=ActorType.SYSTEM,
+                    actor_id="saturn",
+                    organization_id=agent.organization_id,
+                    run_id=action.run_id,
+                    action_id=action.id,
+                    tool=tool.name,
+                    result="invalidated",
+                    payload={"approval_id": approval.id, "reason": "policy denies on resubmit"},
+                )
+            from app.features.mcp.saturn.services.agent_messages import deny_error
+
+            return deny_error(request_id, reason=fresh.reason, policy_id=fresh.policy_id)
+        claimed = await session.execute(
+            update(Approval)
+            .where(
+                Approval.id == approval.id,
+                Approval.status == ApprovalStatus.APPROVED.value,
+                Approval.execution_state == "none",
+            )
+            .values(execution_state="claimed")
+        )
+        if claimed.rowcount != 1:
+            await session.refresh(approval)
+            if _status_text(approval.status) == ApprovalStatus.EXPIRED.value:
+                return _approval_expired(request_id, approval, approval.expired_phase or "resubmit", tool.name)
+            return rpc_error(request_id, -32005, "execution_in_progress")
+        set_committed_value(approval, "execution_state", "claimed")
+        # The claim must survive anything that fails after the upstream call.
+        await session.commit()
+        try:
+            raw_response = await self._proxy(session, tool, arguments)
+        except Exception as exc:
+            if _uncertain(exc):
+                await settle_claim(session, approval, "uncertain")
+                if run is not None:
+                    from app.features.identity.auth.services.notices import notify_task_outcome
+
+                    await notify_task_outcome(session, run, "failed")
+                return rpc_error(request_id, -32005, "execution_uncertain")
+            action.status = ActionStatus.FAILED.value
+            if run is not None:
+                run.status = RunStatus.FAILED.value
+                run.updated_at = utcnow()
+            await settle_claim(session, approval, "failed")
+            raise
+        approval_id = approval.id
+        try:
+            raw_response, result = _split_remote(raw_response)
+            reply = rpc_result(request_id, result)
+            action.status = ActionStatus.COMPLETED.value
+            action.result = result
+            if run is not None:
+                run.status = RunStatus.COMPLETED.value
+                run.updated_at = utcnow()
+            await settle_claim(session, approval, "executed", commit=False)
+            await self._audit(
+                session,
+                event=AuditEvent.TOOL_EXECUTED,
+                actor_type=ActorType.AGENT,
+                actor_id=agent.id,
+                organization_id=agent.organization_id,
+                run_id=action.run_id,
+                action_id=action.id,
+                tool=tool.name,
+                result="completed",
+                payload={
+                    "audit_no": audit_no,
+                    "server_name": tool.mcp_server.name if tool.mcp_server is not None else "",
+                    "arguments": arguments,
+                    "approval_id": approval.id,
+                    "raw_response": raw_response,
+                    "server_result": result,
+                    "agent_result": reply,
+                },
+            )
+            await session.commit()
+        except Exception:
+            # The upstream already ran. Keep the claim and say the outcome is uncertain instead of a 500.
+            await record_unrecorded_outcome(session, approval_id)
+            return rpc_error(request_id, -32005, "execution_uncertain")
+        return reply
 
     async def _proxy(self, session: AsyncSession, tool: Tool, arguments: dict[str, Any]) -> dict[str, Any]:
         from app.features.mcp.oauth.services.mcp_oauth import mcp_oauth

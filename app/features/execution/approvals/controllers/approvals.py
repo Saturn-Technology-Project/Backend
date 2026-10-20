@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request, status
 
 from app.features.identity.auth.controllers.deps import ActorDep, ApprovalsRead, ApprovalsWrite, CurrentUser, SessionDep
 from app.schemas import ApprovalDecisionRead, ApprovalRead, ApprovalRequirementProgress
@@ -67,8 +67,11 @@ async def approve(
 ):
     execution_arguments = None
     raw = await request.body()
-    if raw:
-        parsed = json.loads(raw)
+    if raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Request body must be JSON") from exc
         if isinstance(parsed, dict) and isinstance(parsed.get("arguments"), dict):
             execution_arguments = parsed["arguments"]
     _run, action, outcome, detail = await approval_service.approve(

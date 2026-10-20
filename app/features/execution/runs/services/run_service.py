@@ -21,6 +21,7 @@ from app.core.enums import (
 )
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.execution.activity.services.content_seal import plain_arguments, policy_fields
+from app.features.execution.approvals.services.approval_arguments import ArgumentsUnavailable, stored_arguments
 from app.features.organization.org.services.mapping_service import mapping_service
 from app.features.mcp.servers.services.mcp_executor import MCPExecutionError, mcp_executor
 from app.features.policy.policies.services.policy_engine import EvaluationResult, policy_engine
@@ -173,7 +174,20 @@ class RunService:
                 reason=action.policy_reason,
             )
             return tool, decision
-        resolved = arguments if arguments is not None else plain_arguments(agent.organization_id, action.arguments)
+        if arguments is not None:
+            resolved = arguments
+        else:
+            try:
+                resolved = stored_arguments(agent.organization_id, action.arguments)
+            except ArgumentsUnavailable:
+                # Fail closed: never evaluate policy on {} because the stored arguments cannot be opened.
+                return tool, EvaluationResult(
+                    decision=PolicyDecision.DENY,
+                    policy_id=action.policy_id,
+                    policy_version=action.policy_version,
+                    matched_rule_id=action.policy_rule_id,
+                    reason="Stored arguments could not be opened",
+                )
         decision = await policy_engine.evaluate(
             session,
             organization_id=agent.organization_id,
@@ -285,7 +299,11 @@ class RunService:
         try:
             if not settings.in_process_runtime:
                 raise MCPExecutionError("In-process MCP runtime is disabled")
-            result = await mcp_executor.execute(tool.name, plain_arguments(agent.organization_id, action.arguments))
+            try:
+                arguments = stored_arguments(agent.organization_id, action.arguments)
+            except ArgumentsUnavailable as exc:
+                raise MCPExecutionError("Stored arguments could not be opened") from exc
+            result = await mcp_executor.execute(tool.name, arguments)
         except MCPExecutionError as exc:
             action.status = ActionStatus.FAILED
             action.result = {"status": "error", "error": str(exc)}

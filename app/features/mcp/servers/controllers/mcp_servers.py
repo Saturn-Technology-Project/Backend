@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
+from app.core.public_origin import public_origin
 from app.features.identity.auth.controllers.deps import AgentsRead, CurrentUser, SaturnCloud, SessionDep, TeamWrite
 from app.models import McpServer
 from app.schemas import McpConnect, McpOAuthBegin, McpOAuthStart, McpServerRead, McpToolRead
@@ -61,7 +62,7 @@ async def start_mcp_oauth(
         user,
         name=body.name,
         endpoint=body.endpoint,
-        origin=callback_origin(str(request.base_url).rstrip("/")),
+        origin=callback_origin(public_origin(request)),
         nonce=body.nonce,
     )
     if result.get("authorization_url"):

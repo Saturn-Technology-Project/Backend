@@ -6,6 +6,7 @@ import secrets
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.core.public_origin import public_origin
 from app.features.identity.auth.controllers.deps import SessionDep
 from app.models import Organization, User
 from app.features.identity.oauth.services.oauth_service import oauth_service
@@ -24,8 +25,18 @@ def _unauthorized(origin: str) -> HTTPException:
     )
 
 
+def _http_origin(request: Request) -> str:
+    # PUBLIC_WS_URL, not the Host header: a client must not choose where metadata points.
+    origin = public_origin(request)
+    if origin.startswith("wss://"):
+        return "https://" + origin.removeprefix("wss://")
+    if origin.startswith("ws://"):
+        return "http://" + origin.removeprefix("ws://")
+    return origin
+
+
 async def _caller(request: Request, session: SessionDep) -> tuple[User, str, str]:
-    origin = str(request.base_url).rstrip("/")
+    origin = _http_origin(request)
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
     if not token:
@@ -61,7 +72,18 @@ async def saturn_mcp_endpoint(request: Request, session: SessionDep) -> JSONResp
         return JSONResponse(rpc_error(message.get("id", 1), -32000, "Profile does not match"))
     method = str(message.get("method") or "")
     incoming = (request.headers.get("mcp-session-id") or "").strip()
-    session_id = incoming or (secrets.token_urlsafe(18) if method == "initialize" else "")
+    if method == "initialize":
+        # Session ids are issued here only. A client cannot pick one, or reuse another caller's.
+        session_id = secrets.token_urlsafe(18)
+    elif incoming:
+        if await mcp_sessions.get(incoming, user.id, client_id) is None:
+            return JSONResponse(
+                rpc_error(message.get("id", 1), -32000, "Session not found. Send initialize to start a new session."),
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        session_id = incoming
+    else:
+        session_id = ""
     body = await saturn_mcp.handle(
         session,
         user,
@@ -72,7 +94,8 @@ async def saturn_mcp_endpoint(request: Request, session: SessionDep) -> JSONResp
         mcp_session_id=session_id,
         message=message,
     )
-    headers = {"Mcp-Session-Id": session_id} if session_id else {}
+    issued = bool(session_id) and (method != "initialize" or "result" in body)
+    headers = {"Mcp-Session-Id": session_id} if issued else {}
     return JSONResponse(body, headers=headers)
 
 

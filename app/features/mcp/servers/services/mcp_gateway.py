@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.ids import utcnow
 from app.models import McpServer
+from app.features.mcp.servers.services.mcp_remote import redact_url
 
 
 @dataclass
@@ -85,7 +86,7 @@ class McpGateway:
                 {
                     "id": link.server_id,
                     "name": link.name,
-                    "endpoint": link.endpoint,
+                    "endpoint": redact_url(link.endpoint),
                     "connected": link.connected,
                     "error": link.error,
                 }

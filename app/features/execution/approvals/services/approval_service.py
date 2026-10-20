@@ -1,21 +1,31 @@
 from __future__ import annotations
 
-import hashlib
-import json
+import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.config import get_settings
 from app.core.ids import new_id, utcnow
 from app.features.execution.approvals.models.approval import ApprovalDecision, ApprovalPolicy, ApprovalRequirement
+from app.features.execution.approvals.services.approval_arguments import (
+    ArgumentsUnavailable,
+    digest_matches,
+    is_server_sealed,
+    keyed_digest,
+    open_sealed,
+    stored_arguments,
+)
 from app.features.organization.org.models.group import Group, GroupMember
-from app.features.execution.activity.services.content_seal import plain_arguments
+from app.features.organization.org.services.access import is_org_admin
 from app.features.execution.activity.services.zero_access import action_digest, is_zero_access
-from app.models import Action, Agent, Approval, Employee, Run
+from app.features.mcp.servers.services.mcp_remote import McpTimeout
+from app.models import Action, Agent, Approval, Employee, Run, Tool
 from app.core.enums import (
     ActionStatus,
     ActorType,
@@ -36,6 +46,7 @@ from app.features.execution.approvals.services.expiration import (
 from app.features.execution.runs.services.run_service import run_service
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 class ApprovalService:
@@ -77,9 +88,13 @@ class ApprovalService:
         approval, action, run, agent = await self._load_pending(
             session, approval_id, actor_id, organization_id=organization_id
         )
+        # Every approval, including a single-approver one, checks who may vote.
+        await self._ensure_open(session, approval)
+        employee = await self._employee(session, actor_id, run.organization_id)
+        await self._assert_voter(session, approval, employee, actor_id)
         if int(approval.required_count or 1) > 1:
             return await self._approve_quorum(
-                session, approval, action, run, agent, actor_id, execution_arguments=execution_arguments
+                session, approval, action, run, agent, actor_id, employee, execution_arguments=execution_arguments
             )
         mapped = action.policy_reason in {"tool_set_approval", "saturn_mcp"}
 
@@ -87,9 +102,7 @@ class ApprovalService:
             session, action, agent=agent
         )
         if decision.decision == PolicyDecision.DENY:
-            approval.status = ApprovalStatus.REJECTED
-            approval.resolved_at = utcnow()
-            approval.resolved_by = actor_id
+            await self._resolve_pending(session, approval, ApprovalStatus.REJECTED, actor_id)
             action.status = ActionStatus.DENIED
             run.status = RunStatus.FAILED
             await session.flush()
@@ -115,10 +128,8 @@ class ApprovalService:
         }:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Policy decision is not executable")
 
-        approval.status = ApprovalStatus.APPROVED
-        approval.resolved_at = utcnow()
-        approval.resolved_by = actor_id
-        await session.flush()
+        # Atomic claim: of two concurrent approvals only one moves the row out of pending.
+        await self._resolve_pending(session, approval, ApprovalStatus.APPROVED, actor_id)
         await audit_service.log(
             session,
             event=AuditEvent.APPROVAL_GRANTED,
@@ -169,14 +180,11 @@ class ApprovalService:
         approval, action, run, _agent = await self._load_pending(
             session, approval_id, actor_id, organization_id=organization_id
         )
-        if int(approval.required_count or 1) > 1:
-            await self._ensure_open(session, approval)
-            employee = await self._employee(session, actor_id, organization_id)
-            await self._assert_voter(session, approval, employee, actor_id)
+        await self._ensure_open(session, approval)
+        employee = await self._employee(session, actor_id, organization_id)
+        await self._assert_voter(session, approval, employee, actor_id)
         mapped = action.policy_reason in {"tool_set_approval", "saturn_mcp"}
-        approval.status = ApprovalStatus.REJECTED
-        approval.resolved_at = utcnow()
-        approval.resolved_by = actor_id
+        await self._resolve_pending(session, approval, ApprovalStatus.REJECTED, actor_id)
         action.status = ActionStatus.REJECTED
         run.status = RunStatus.CANCELLED
         run.updated_at = utcnow()
@@ -250,9 +258,12 @@ class ApprovalService:
         approval, action, run, _agent = await self._load_pending(
             session, approval_id, actor_id, organization_id=organization_id
         )
-        approval.status = ApprovalStatus.CANCELLED
-        approval.resolved_at = utcnow()
-        approval.resolved_by = actor_id
+        await self._ensure_open(session, approval)
+        employee = await self._employee(session, actor_id, organization_id)
+        # Only the person who asked, or a team admin, may withdraw a request.
+        if approval.requester_user_id != actor_id and not is_org_admin(employee.permissions):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the requester or an admin can cancel this request")
+        await self._resolve_pending(session, approval, ApprovalStatus.CANCELLED, actor_id)
         action.status = ActionStatus.REJECTED
         run.status = RunStatus.CANCELLED
         run.updated_at = utcnow()
@@ -281,7 +292,7 @@ class ApprovalService:
         arguments: dict,
         requester_user_id: str | None,
     ) -> None:
-        approval.parameter_digest = parameter_digest(arguments if isinstance(arguments, dict) else {})
+        approval.parameter_digest = parameter_digest(organization_id, arguments if isinstance(arguments, dict) else {})
         approval.requester_user_id = requester_user_id
         approval.policy_id = getattr(decision, "policy_id", None)
         approval.policy_version = getattr(decision, "policy_version", None)
@@ -331,6 +342,33 @@ class ApprovalService:
             await arm_pending(session, approval, organization_id)
         await session.flush()
 
+    async def _resolve_pending(
+        self,
+        session: AsyncSession,
+        approval: Approval,
+        target: ApprovalStatus,
+        actor_id: str,
+    ) -> None:
+        """Move a pending approval to its outcome with a conditional UPDATE so only one caller wins."""
+        now = utcnow()
+        moved = await session.execute(
+            update(Approval)
+            .where(
+                Approval.id == approval.id,
+                Approval.status == ApprovalStatus.PENDING.value,
+                Approval.execution_state == "none",
+            )
+            .values(status=target.value, resolved_at=now, resolved_by=actor_id)
+        )
+        if moved.rowcount != 1:
+            await session.refresh(approval)
+            if _status_text(approval.status) == ApprovalStatus.EXPIRED.value:
+                raise HTTPException(status.HTTP_409_CONFLICT, "Approval expired")
+            raise HTTPException(status.HTTP_409_CONFLICT, "Approval is not pending")
+        set_committed_value(approval, "status", target.value)
+        set_committed_value(approval, "resolved_at", now)
+        set_committed_value(approval, "resolved_by", actor_id)
+
     async def _approve_quorum(
         self,
         session: AsyncSession,
@@ -339,11 +377,9 @@ class ApprovalService:
         run: Run,
         agent: Agent,
         actor_id: str,
+        employee: Employee,
         execution_arguments: dict | None = None,
     ) -> tuple[Run, Action, str, str | None]:
-        await self._ensure_open(session, approval)
-        employee = await self._employee(session, actor_id, run.organization_id)
-        await self._assert_voter(session, approval, employee, actor_id)
         duplicate = await session.scalar(
             select(ApprovalDecision).where(
                 ApprovalDecision.approval_id == approval.id,
@@ -352,16 +388,27 @@ class ApprovalService:
         )
         if duplicate is not None:
             raise HTTPException(status.HTTP_409_CONFLICT, "This member already decided")
-        session.add(
-            ApprovalDecision(
-                id=new_id("vote"),
-                approval_id=approval.id,
-                employee_id=employee.id,
-                decision="approved",
-            )
+        vote = ApprovalDecision(
+            id=new_id("vote"),
+            approval_id=approval.id,
+            employee_id=employee.id,
+            decision="approved",
         )
+        session.add(vote)
         await session.flush()
         counts = await self._tally(session, approval)
+        prepared: _Prepared | None = None
+        if _requirements_met(counts):
+            await self._revalidate_quorum(session, approval, action, agent)
+            counts = await self._tally(session, approval)
+            if _requirements_met(counts):
+                try:
+                    prepared = await self._prepare_execution(session, approval, action, agent, execution_arguments)
+                except HTTPException:
+                    # Keep the approval open so this member can vote again with the arguments.
+                    await session.delete(vote)
+                    await session.flush()
+                    raise
         progress = _progress_text(counts)
         await audit_service.log(
             session,
@@ -382,13 +429,7 @@ class ApprovalService:
                 "source": "saturn_mcp",
             },
         )
-        if not _requirements_met(counts):
-            return run, action, "pending", progress
-
-        await self._revalidate_quorum(session, approval, action, agent)
-        counts = await self._tally(session, approval)
-        progress = _progress_text(counts)
-        if not _requirements_met(counts):
+        if prepared is None:
             return run, action, "pending", progress
 
         claimed = await session.execute(
@@ -407,11 +448,11 @@ class ApprovalService:
         )
         if claimed.rowcount != 1:
             await session.refresh(approval)
-            if str(getattr(approval.status, "value", approval.status)) == ApprovalStatus.EXPIRED.value:
+            if _status_text(approval.status) == ApprovalStatus.EXPIRED.value:
                 raise HTTPException(status.HTTP_409_CONFLICT, "Approval expired")
             raise HTTPException(status.HTTP_409_CONFLICT, "Execution already claimed")
-        approval.status = ApprovalStatus.APPROVED.value
-        approval.execution_state = "claimed"
+        set_committed_value(approval, "status", ApprovalStatus.APPROVED.value)
+        set_committed_value(approval, "execution_state", "claimed")
         await audit_service.log(
             session,
             event=AuditEvent.APPROVAL_QUORUM,
@@ -442,15 +483,28 @@ class ApprovalService:
             payload={"approval_id": approval.id, "source": "saturn_mcp"},
         )
         await notify_transition(session, run.organization_id, "approval.granted", approval, action.tool)
-        try:
-            await self._execute_claimed(
-                session, approval, action, run, agent, actor_id, execution_arguments=execution_arguments
-            )
-        except HTTPException as exc:
-            if approval.execution_state == "claimed":
-                approval.execution_state = "uncertain" if _uncertain(exc) else "failed"
-            raise
+        # The claim must survive anything that fails after the upstream call, so it is committed first.
+        await session.commit()
+        await self._execute_claimed(session, approval, action, run, agent, actor_id, prepared)
         return await run_service.load_run(session, run.id), action, "completed", "success"
+
+    async def _prepare_execution(
+        self,
+        session: AsyncSession,
+        approval: Approval,
+        action: Action,
+        agent: Agent,
+        execution_arguments: dict | None,
+    ) -> _Prepared:
+        tool = await run_service.get_tool(session, agent.organization_id, action.tool)
+        gateway = bool(getattr(tool, "mcp_server_id", None) or getattr(tool, "mcp_endpoint", None))
+        if not gateway and settings.in_process_runtime:
+            return _Prepared(tool=tool, gateway=False, arguments=None)
+        return _Prepared(
+            tool=tool,
+            gateway=True,
+            arguments=approved_arguments(agent.organization_id, approval, action, execution_arguments),
+        )
 
     async def _execute_claimed(
         self,
@@ -460,73 +514,70 @@ class ApprovalService:
         run: Run,
         agent: Agent,
         actor_id: str,
-        execution_arguments: dict | None = None,
+        prepared: _Prepared,
     ) -> None:
-        tool = await run_service.get_tool(session, agent.organization_id, action.tool)
-        gateway = bool(getattr(tool, "mcp_server_id", None) or getattr(tool, "mcp_endpoint", None))
-        if gateway or not settings.in_process_runtime:
-            from app.features.mcp.saturn.services.saturn_mcp import saturn_mcp
+        if prepared.gateway:
+            from app.features.mcp.saturn.services.saturn_mcp import _split_remote, saturn_mcp
 
-            arguments = execution_arguments if is_zero_access(action.arguments) else plain_arguments(agent.organization_id, action.arguments)
-            if is_zero_access(action.arguments):
-                if not isinstance(execution_arguments, dict):
-                    raise HTTPException(status.HTTP_409_CONFLICT, "Encrypted arguments are required to execute this approval")
-                if action_digest(action.arguments) != parameter_digest(execution_arguments):
-                    raise HTTPException(status.HTTP_409_CONFLICT, "Approved parameters no longer match this call")
-                arguments = execution_arguments
+            arguments = prepared.arguments or {}
             try:
-                raw_response = await saturn_mcp._proxy(session, tool, arguments)
+                raw_response = await saturn_mcp._proxy(session, prepared.tool, arguments)
             except Exception as exc:
                 if _uncertain(exc):
-                    approval.execution_state = "uncertain"
-                    await session.flush()
+                    await settle_claim(session, approval, "uncertain")
                     from app.features.identity.auth.services.notices import notify_task_outcome
 
                     await notify_task_outcome(session, run, "failed")
                     raise HTTPException(
                         status.HTTP_409_CONFLICT, "Upstream outcome is uncertain"
                     ) from exc
-                approval.execution_state = "failed"
                 action.status = ActionStatus.FAILED
                 run.status = RunStatus.FAILED
-                await session.flush()
+                await settle_claim(session, approval, "failed")
                 raise
-            from app.features.mcp.saturn.services.saturn_mcp import _split_remote
-
-            raw_response, result = _split_remote(raw_response)
-            action.status = ActionStatus.COMPLETED.value
-            action.result = result
-            approval.execution_state = "executed"
-            run.status = RunStatus.COMPLETED.value
-            run.updated_at = utcnow()
-            await session.flush()
-            await audit_service.log(
-                session,
-                event=AuditEvent.TOOL_EXECUTED,
-                actor_type=ActorType.AGENT,
-                actor_id=agent.id,
-                organization_id=run.organization_id,
-                run_id=run.id,
-                action_id=action.id,
-                tool=action.tool,
-                result="completed",
-                payload={
-                    "approval_id": approval.id,
-                    "arguments": arguments,
-                    "server_result": result,
-                    "raw_response": raw_response,
-                    "source": "saturn_mcp",
-                },
-            )
-            await audit_service.log(
-                session,
-                event=AuditEvent.RUN_COMPLETED,
-                actor_type=ActorType.SYSTEM,
-                actor_id="saturn",
-                organization_id=run.organization_id,
-                run_id=run.id,
-                result="success",
-            )
+            approval_id = approval.id
+            try:
+                raw_response, result = _split_remote(raw_response)
+                action.status = ActionStatus.COMPLETED.value
+                action.result = result
+                run.status = RunStatus.COMPLETED.value
+                run.updated_at = utcnow()
+                await settle_claim(session, approval, "executed", commit=False)
+                await audit_service.log(
+                    session,
+                    event=AuditEvent.TOOL_EXECUTED,
+                    actor_type=ActorType.AGENT,
+                    actor_id=agent.id,
+                    organization_id=run.organization_id,
+                    run_id=run.id,
+                    action_id=action.id,
+                    tool=action.tool,
+                    result="completed",
+                    payload={
+                        "approval_id": approval.id,
+                        "arguments": arguments,
+                        "server_result": result,
+                        "raw_response": raw_response,
+                        "source": "saturn_mcp",
+                    },
+                )
+                await audit_service.log(
+                    session,
+                    event=AuditEvent.RUN_COMPLETED,
+                    actor_type=ActorType.SYSTEM,
+                    actor_id="saturn",
+                    organization_id=run.organization_id,
+                    run_id=run.id,
+                    result="success",
+                )
+                await session.commit()
+            except Exception as exc:
+                # The upstream already ran. A 500 here would roll the outcome back, so record it as uncertain.
+                await record_unrecorded_outcome(session, approval_id)
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "The tool ran but Saturn could not record the outcome; treat it as uncertain",
+                ) from exc
             return
         await run_service.execute_action(
             session,
@@ -538,10 +589,10 @@ class ApprovalService:
             skip_policy=True,
         )
         if action.status == ActionStatus.FAILED:
-            approval.execution_state = "failed"
             run.status = RunStatus.FAILED
+            await settle_claim(session, approval, "failed")
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Tool execution failed")
-        approval.execution_state = "executed"
+        await settle_claim(session, approval, "executed", commit=False)
         await run_service.continue_run(session, run)
 
     async def _revalidate_quorum(
@@ -551,8 +602,17 @@ class ApprovalService:
         action: Action,
         agent: Agent,
     ) -> None:
-        arguments = None if action_digest(action.arguments) else plain_arguments(agent.organization_id, action.arguments)
-        if arguments is not None and approval.parameter_digest and approval.parameter_digest != parameter_digest(arguments):
+        arguments = None
+        if not action_digest(action.arguments) and not is_zero_access(action.arguments):
+            try:
+                arguments = stored_arguments(agent.organization_id, action.arguments)
+            except ArgumentsUnavailable:
+                await self._invalidate(session, approval, action, "parameters unreadable")
+        if (
+            arguments is not None
+            and approval.parameter_digest
+            and not digest_matches(agent.organization_id, approval.parameter_digest, arguments)
+        ):
             await self._invalidate(session, approval, action, "parameters changed")
         _tool, fresh = await run_service.evaluate_action_policy(session, action, agent=agent)
         if fresh.decision == PolicyDecision.DENY:
@@ -672,6 +732,7 @@ class ApprovalService:
                 ApprovalDecision.approval_id == approval.id,
                 ApprovalDecision.decision == "approved",
             )
+            .order_by(ApprovalDecision.created_at, ApprovalDecision.id)
         )
         votes = list(result.scalars().all())
         specs = _requirement_specs(approval)
@@ -686,13 +747,43 @@ class ApprovalService:
         memberships: dict[str, set[str]] = {}
         for member in rows.scalars().all():
             memberships.setdefault(member.employee_id, set()).add(member.group_id)
-        return [
-            (
-                sum(1 for item in votes if spec["group_id"] in memberships.get(item.employee_id, set())),
-                int(spec["required_count"]),
-            )
-            for spec in specs
-        ]
+        voters = list(dict.fromkeys(item.employee_id for item in votes))
+        return _assign_votes(voters, memberships, specs)
+
+
+def _assign_votes(
+    voters: list[str],
+    memberships: dict[str, set[str]],
+    specs: list[dict],
+) -> list[tuple[int, int]]:
+    """Each vote fills at most one requirement seat (maximum bipartite matching).
+
+    A person in Finance and Admin counts once, for whichever requirement still needs them.
+    """
+    seats: list[int] = []
+    for index, spec in enumerate(specs):
+        seats.extend([index] * int(spec["required_count"]))
+    holder: list[str | None] = [None] * len(seats)
+
+    def place(voter: str, visited: set[int]) -> bool:
+        groups = memberships.get(voter, set())
+        for seat, index in enumerate(seats):
+            if seat in visited or specs[index]["group_id"] not in groups:
+                continue
+            visited.add(seat)
+            current = holder[seat]
+            if current is None or place(current, visited):
+                holder[seat] = voter
+                return True
+        return False
+
+    for voter in voters:
+        place(voter, set())
+    filled = [0] * len(specs)
+    for seat, index in enumerate(seats):
+        if holder[seat] is not None:
+            filled[index] += 1
+    return [(filled[index], int(spec["required_count"])) for index, spec in enumerate(specs)]
 
 
 def _requirement_specs(approval: Approval) -> list[dict]:
@@ -725,12 +816,90 @@ def _as_utc(value: datetime) -> datetime:
     return value
 
 
-def parameter_digest(arguments: dict) -> str:
-    raw = json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(raw.encode()).hexdigest()
+def parameter_digest(organization_id: str, arguments: dict) -> str:
+    """Keyed per organization, so a database copy cannot confirm guesses of the arguments."""
+    return keyed_digest(organization_id, arguments)
+
+
+@dataclass
+class _Prepared:
+    tool: Tool
+    gateway: bool
+    arguments: dict | None
+
+
+def approved_arguments(
+    organization_id: str,
+    approval: Approval,
+    action: Action,
+    execution_arguments: dict | None,
+) -> dict:
+    """The exact arguments people approved. Never a digest stub."""
+    stored = action.arguments
+    digest = action_digest(stored)
+    if is_zero_access(stored):
+        if not isinstance(execution_arguments, dict):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Encrypted arguments are required to execute this approval")
+        arguments = execution_arguments
+    elif is_server_sealed(stored):
+        try:
+            arguments = open_sealed(organization_id, stored)
+        except ArgumentsUnavailable as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Approved parameters can no longer be read") from exc
+    elif digest:
+        # Written before arguments were sealed server-side: only the digest was kept.
+        if not isinstance(execution_arguments, dict):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Approved parameters are required to execute this approval")
+        arguments = execution_arguments
+    else:
+        try:
+            arguments = stored_arguments(organization_id, stored)
+        except ArgumentsUnavailable as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Approved parameters can no longer be read") from exc
+    for expected in (digest, approval.parameter_digest):
+        if expected and not digest_matches(organization_id, expected, arguments):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Approved parameters no longer match this call")
+    return arguments
+
+
+async def settle_claim(session: AsyncSession, approval: Approval, state: str, *, commit: bool = True) -> None:
+    """Record how a claimed execution ended. Only a claimed row moves."""
+    await session.execute(
+        update(Approval)
+        .where(Approval.id == approval.id, Approval.execution_state == "claimed")
+        .values(execution_state=state)
+    )
+    set_committed_value(approval, "execution_state", state)
+    await session.flush()
+    if commit:
+        await session.commit()
+
+
+async def record_unrecorded_outcome(session: AsyncSession, approval_id: str) -> None:
+    """Something failed after the upstream ran. Keep the committed claim and mark it uncertain."""
+    try:
+        await session.rollback()
+    except Exception:
+        logger.exception("Rollback after an executed approval failed")
+    try:
+        await session.execute(
+            update(Approval)
+            .where(Approval.id == approval_id, Approval.execution_state == "claimed")
+            .values(execution_state="uncertain")
+        )
+        await session.commit()
+    except Exception:
+        # The claim is already committed, so the call still cannot run again automatically.
+        logger.exception("Could not mark approval %s uncertain", approval_id)
+
+
+def _status_text(value) -> str:
+    return value.value if hasattr(value, "value") else str(value or "")
 
 
 def _uncertain(exc: BaseException) -> bool:
+    if isinstance(exc, McpTimeout):
+        return True
     return isinstance(exc, TimeoutError) or type(exc).__name__ in {
         "TimeoutException",
         "ConnectTimeout",
