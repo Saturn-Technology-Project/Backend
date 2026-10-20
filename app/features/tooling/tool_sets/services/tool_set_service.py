@@ -12,13 +12,23 @@ from app.features.organization.org.services.plans import profile_identity, tool_
 
 
 class ToolSetService:
-    async def list_sets(self, session: AsyncSession, organization_id: str) -> list[ToolSet]:
-        result = await session.execute(
+    async def list_sets(
+        self,
+        session: AsyncSession,
+        organization_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ToolSet]:
+        statement = (
             select(ToolSet)
             .options(selectinload(ToolSet.items).selectinload(ToolSetItem.tool).selectinload(Tool.mcp_server))
             .where(ToolSet.organization_id == organization_id)
-            .order_by(ToolSet.name.asc())
+            .order_by(ToolSet.name.asc(), ToolSet.id.asc())
         )
+        if limit is not None:
+            statement = statement.limit(limit).offset(offset)
+        result = await session.execute(statement)
         return list(result.scalars().unique().all())
 
     async def create(

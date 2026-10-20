@@ -13,16 +13,13 @@ from app.features.execution.activity.services.audit_service import audit_service
 from app.features.organization.org.services.mapping_service import mapping_service
 
 
-def _slug_id(prefix: str, name: str) -> str:
-    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in name).strip("_")
-    while "__" in slug:
-        slug = slug.replace("__", "_")
-    return f"{prefix}_{slug}" if slug else new_id(prefix)
-
-
 class AgentService:
-    async def list_agents(self, session: AsyncSession, user: User) -> list[Agent]:
-        return await mapping_service.list_org_agents(session, user.organization_id)
+    async def list_agents(
+        self, session: AsyncSession, user: User, *, limit: int | None = None, offset: int = 0
+    ) -> list[Agent]:
+        return await mapping_service.list_org_agents(
+            session, user.organization_id, limit=limit, offset=offset
+        )
 
     async def get_agent(self, session: AsyncSession, user: User, agent_id: str) -> Agent:
         return await mapping_service.require_org_agent(session, user, agent_id)
@@ -37,12 +34,10 @@ class AgentService:
         model: str,
         agent_id: str | None = None,
     ) -> Agent:
-        ident = agent_id or _slug_id("agent", name)
-        existing = await session.get(Agent, ident)
-        if existing is not None:
-            ident = new_id("agent")
+        # The id is always generated here. A client-chosen or name-derived id is a global
+        # primary key, so probing it would tell one tenant which ids exist in other tenants.
         agent = Agent(
-            id=ident,
+            id=new_id("agent"),
             organization_id=user.organization_id,
             name=name,
             description=description,

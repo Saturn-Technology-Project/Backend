@@ -182,10 +182,22 @@ async def get_subscription(session: AsyncSession, org: Organization) -> Subscrip
     return payload
 
 
+PROCESSOR_MISSING = "Payment processor is not configured"
+
+
+def payment_processor_configured() -> bool:
+    """No processor is wired up yet (payments are a stub). Until one is, nothing is charged."""
+    return False
+
+
 async def pay_invoice(session: AsyncSession, org: Organization, invoice_id: str) -> SubscriptionRead:
+    """Settle an invoice.
+
+    Without a payment processor nothing can be charged, so an invoice with an amount due is
+    refused (501) instead of being marked paid. Only a zero-amount invoice can be settled here.
+    Once a processor exists, invoices must be marked paid from its verified webhook, not here.
+    """
     billing = ensure_billing(org)
-    if not _payment_on_file(billing.get("payment")):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No payment method on file")
     invoices = billing.get("invoices") if isinstance(billing.get("invoices"), list) else []
     target = None
     for item in invoices:
@@ -196,6 +208,14 @@ async def pay_invoice(session: AsyncSession, org: Organization, invoice_id: str)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invoice not found")
     if str(target.get("status") or "") == "paid":
         raise HTTPException(status.HTTP_409_CONFLICT, "Invoice already paid")
+    try:
+        amount = Decimal(str(target.get("amount") or "0"))
+    except Exception:
+        amount = None
+    if amount is None or amount != 0:
+        if not payment_processor_configured():
+            raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, PROCESSOR_MISSING)
+        raise HTTPException(status.HTTP_409_CONFLICT, "Invoices are settled by the payment processor")
     now = utcnow()
     target["status"] = "paid"
     target["paid_at"] = now.isoformat()

@@ -29,6 +29,7 @@ from app.features.organization.org.services.member_service import member_service
 from app.features.identity.auth.services.photo import clean_photo
 from app.features.organization.org.services.organization_service import serialize_organization
 from app.features.organization.org.services.subscription_service import get_subscription, pay_invoice
+from app.shared.pagination import Page
 
 router = APIRouter(prefix="/org", tags=["org"])
 
@@ -64,7 +65,9 @@ def serialize_member(employee: Employee) -> MemberRead:
     )
 
 
-def serialize_invite(invite: Invitation, token: str | None = None) -> InviteRead | InviteCreateResponse:
+def serialize_invite(
+    invite: Invitation, token: str | None = None, *, created: bool = False
+) -> InviteRead | InviteCreateResponse:
     payload = dict(
         id=invite.id,
         email=invite.email,
@@ -80,7 +83,7 @@ def serialize_invite(invite: Invitation, token: str | None = None) -> InviteRead
         created_at=invite.created_at,
         token=token,
     )
-    if token is not None:
+    if created or token is not None:
         return InviteCreateResponse(**payload)
     return InviteRead(**payload)
 
@@ -142,14 +145,18 @@ async def update_me(body: MeUpdateRequest, session: SessionDep, user: CurrentUse
 
 
 @router.get("/users", response_model=list[OrgUserRead])
-async def list_org_users(session: SessionDep, user: CurrentUser, _access: TeamRead):
-    members = await member_service.list_members(session, user.organization_id)
+async def list_org_users(session: SessionDep, user: CurrentUser, _access: TeamRead, page: Page):
+    members = await member_service.list_members(
+        session, user.organization_id, limit=page.limit, offset=page.offset
+    )
     return [serialize_org_user(item) for item in members]
 
 
 @router.get("/members", response_model=list[MemberRead])
-async def list_members(session: SessionDep, user: CurrentUser, _access: TeamRead):
-    members = await member_service.list_members(session, user.organization_id)
+async def list_members(session: SessionDep, user: CurrentUser, _access: TeamRead, page: Page):
+    members = await member_service.list_members(
+        session, user.organization_id, limit=page.limit, offset=page.offset
+    )
     return [serialize_member(item) for item in members]
 
 
@@ -209,11 +216,12 @@ async def invite_member(
         agent_ids=body.agent_ids,
         mcp_server_ids=body.mcp_server_ids,
     )
-    return serialize_invite(invite, token)
+    # token is None outside local development: the invitee gets the link by email.
+    return serialize_invite(invite, token, created=True)
 
 
 @router.get("/subscription", response_model=SubscriptionRead)
-async def read_subscription(session: SessionDep, user: CurrentUser):
+async def read_subscription(session: SessionDep, user: CurrentUser, _access: TeamWrite):
     org = await session.get(Organization, user.organization_id)
     if org is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
@@ -222,7 +230,7 @@ async def read_subscription(session: SessionDep, user: CurrentUser):
 
 @router.post("/subscription/invoices/{invoice_id}/pay", response_model=SubscriptionRead)
 async def pay_subscription_invoice(
-    invoice_id: str, session: SessionDep, user: CurrentUser
+    invoice_id: str, session: SessionDep, user: CurrentUser, _access: TeamWrite
 ):
     org = await session.get(Organization, user.organization_id)
     if org is None:

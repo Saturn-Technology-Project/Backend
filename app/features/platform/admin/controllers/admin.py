@@ -34,13 +34,35 @@ from app.schemas import (
 from app.features.platform.admin.services.admin_service import admin_service
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.organization.org.services.member_service import member_service
-from app.core.enums import ActorType
+from app.core.enums import ActorType, AuditEvent
+from app.shared.pagination import Page
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 def serialize_org(snap: dict) -> AdminOrgSummary:
     return AdminOrgSummary(**snap)
+
+
+_PROMPT_TEXT_KEYS = ("previous", "prompt")
+
+
+def _platform_payload(event: str, payload):
+    """What a platform admin may see of a tenant's audit payload.
+
+    Agent system prompts are tenant content. The org's own audit log keeps the full text;
+    the cross-tenant admin view shows only that a prompt changed and how long it is.
+    """
+    shown = admin_audit_payload(payload)
+    if not isinstance(shown, dict) or str(event) != AuditEvent.PROMPT_UPDATED.value:
+        return shown
+    redacted = dict(shown)
+    for key in _PROMPT_TEXT_KEYS:
+        if key in redacted:
+            text = redacted.pop(key)
+            redacted[f"{key}_length"] = len(text) if isinstance(text, str) else 0
+    redacted["redacted"] = True
+    return redacted
 
 
 def serialize_event(item: AuditLog) -> AdminEventRead:
@@ -53,7 +75,7 @@ def serialize_event(item: AuditLog) -> AdminEventRead:
         organization_id=item.organization_id,
         organization_name=org.name if org is not None else None,
         result=item.result,
-        payload=admin_audit_payload(item.payload),
+        payload=_platform_payload(item.event, item.payload),
         created_at=item.created_at,
     )
 
@@ -92,8 +114,9 @@ async def get_stats(session: SessionDep, _admin: PlatformAdmin):
 
 
 @router.get("/orgs", response_model=list[AdminOrgSummary])
-async def list_orgs(session: SessionDep, _admin: PlatformAdmin):
-    return [serialize_org(item) for item in await admin_service.list_orgs(session)]
+async def list_orgs(session: SessionDep, _admin: PlatformAdmin, page: Page):
+    rows = await admin_service.list_orgs(session, limit=page.limit, offset=page.offset)
+    return [serialize_org(item) for item in rows]
 
 
 @router.post("/orgs", response_model=AdminOrgDetail, status_code=status.HTTP_201_CREATED)
@@ -229,15 +252,16 @@ async def update_org_member(
 async def reset_org_member_password(
     organization_id: str,
     employee_id: str,
-    body: MemberPasswordResetRequest,
     session: SessionDep,
     admin: PlatformAdmin,
+    body: MemberPasswordResetRequest | None = None,
 ):
+    # body.password is accepted for compatibility and ignored: the admin never sets a
+    # tenant user's password. The user's sessions are revoked and they are emailed a reset code.
     await admin_service.get_org(session, organization_id)
     employee = await member_service.reset_password(
         session,
         employee_id,
-        body.password,
         organization_id=organization_id,
     )
     await audit_service.log(
@@ -246,7 +270,7 @@ async def reset_org_member_password(
         actor_type=ActorType.USER,
         actor_id=admin.id,
         organization_id=organization_id,
-        payload={"employee_id": employee_id},
+        payload={"employee_id": employee_id, "method": "email_code"},
     )
     return serialize_member(employee)
 
@@ -259,8 +283,8 @@ async def list_org_agents(organization_id: str, session: SessionDep, _admin: Pla
 
 
 @router.get("/users", response_model=list[AdminUserRead])
-async def list_users(session: SessionDep, _admin: PlatformAdmin):
-    users = await admin_service.list_users(session)
+async def list_users(session: SessionDep, _admin: PlatformAdmin, page: Page):
+    users = await admin_service.list_users(session, limit=page.limit, offset=page.offset)
     return [serialize_admin_user(user) for user in users]
 
 

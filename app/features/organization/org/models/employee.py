@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.ids import utcnow
@@ -25,6 +25,11 @@ class Employee(Base):
     permissions: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     agent_edit_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=None)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    # Set once the member's MCP server assignments exist (auto-assigned on first bind, or set by
+    # an admin). After that an empty list means "revoked", not "never assigned".
+    mcp_assignments_initialized: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )

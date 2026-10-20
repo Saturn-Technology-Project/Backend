@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import timedelta, timezone
 
@@ -18,9 +19,42 @@ from app.features.organization.org.services.access import (
     permissions_for_role,
     resolve_permissions,
 )
+from app.features.identity.auth.models.password_reset import PasswordReset
+from app.features.identity.auth.services import mailer
 from app.features.identity.auth.services.auth_service import hash_password, hash_token
+from app.shared import runtime
+
+logger = logging.getLogger(__name__)
 
 INVITE_TTL_DAYS = 7
+RESET_TTL_MINUTES = 10
+MIN_PASSWORD_LENGTH = 8
+# One message for every "this address cannot be invited here" case, so the response does not
+# say whether the address belongs to a member or to a pending invite.
+INVITE_CONFLICT = "This email already has a member or a pending invite in this organization"
+
+
+def require_password_policy(password: str) -> None:
+    if len(password or "") < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Password must be at least {MIN_PASSWORD_LENGTH} characters",
+        )
+
+
+def lock_org_employees_statement(organization_id: str):
+    return (
+        select(Employee)
+        .where(Employee.organization_id == organization_id)
+        .order_by(Employee.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def unusable_password_hash() -> str:
+    """A hash of a random secret nobody knows. The account can only be entered after a reset."""
+    return hash_password(secrets.token_urlsafe(32))
 
 
 class MemberService:
@@ -37,8 +71,15 @@ class MemberService:
         )
         return result.scalar_one_or_none()
 
-    async def list_members(self, session: AsyncSession, organization_id: str) -> list[Employee]:
-        result = await session.execute(
+    async def list_members(
+        self,
+        session: AsyncSession,
+        organization_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Employee]:
+        statement = (
             select(Employee)
             .options(
                 selectinload(Employee.user),
@@ -46,8 +87,11 @@ class MemberService:
                 selectinload(Employee.mcp_servers),
             )
             .where(Employee.organization_id == organization_id)
-            .order_by(Employee.created_at.asc())
+            .order_by(Employee.created_at.asc(), Employee.id.asc())
         )
+        if limit is not None:
+            statement = statement.limit(limit).offset(offset)
+        result = await session.execute(statement)
         return list(result.scalars().unique().all())
 
     async def list_invites(self, session: AsyncSession, organization_id: str) -> list[Invitation]:
@@ -65,6 +109,15 @@ class MemberService:
         if employee is None or employee.organization_id != organization_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
         return employee
+
+    async def _lock_org_employees(self, session: AsyncSession, organization_id: str) -> None:
+        """Lock every employee row of the org until commit (Postgres; a no-op on SQLite).
+
+        The last-admin check reads all admins and then writes one of them. Two concurrent
+        demotions must not both pass it, so each takes these row locks first; the second waits
+        for the first to commit and then reads the rows as the first left them.
+        """
+        await session.execute(lock_org_employees_statement(organization_id))
 
     async def _admin_count(self, session: AsyncSession, organization_id: str) -> int:
         result = await session.execute(
@@ -102,6 +155,7 @@ class MemberService:
                     )
                 servers.append(server)
             employee.mcp_servers = servers
+            employee.mcp_assignments_initialized = True
         await session.flush()
 
     async def invite(
@@ -116,7 +170,13 @@ class MemberService:
         permissions: dict | None,
         agent_ids: list[str] | None,
         mcp_server_ids: list[str] | None,
-    ) -> tuple[Invitation, str]:
+    ) -> tuple[Invitation, str | None]:
+        """Create an invite and email its one-time link.
+
+        The token is returned to the caller only in local development and tests. In production
+        it reaches the invitee by email only, so an admin cannot accept an invite in someone
+        else's name.
+        """
         organization_id = actor.organization_id
         org = await session.get(Organization, organization_id)
         if org is not None and org.kind != "organization":
@@ -125,12 +185,18 @@ class MemberService:
         if not normalized:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email is required")
 
+        dev = runtime.local_dev_mode()
+        if not dev and not runtime.email_configured():
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Email delivery is not configured")
+
         existing_user = await session.execute(select(User).where(User.email == normalized))
         user = existing_user.scalar_one_or_none()
-        if user is not None:
-            if user.organization_id == organization_id:
-                raise HTTPException(status.HTTP_409_CONFLICT, "User is already a member of this org")
-            raise HTTPException(status.HTTP_409_CONFLICT, "Email is already used in another org")
+        if user is not None and user.organization_id == organization_id:
+            raise HTTPException(status.HTTP_409_CONFLICT, INVITE_CONFLICT)
+        # An address that belongs to another organization gets the same response as a new one,
+        # so invites cannot be used to learn which emails have Saturn accounts elsewhere. Such an
+        # invite cannot be accepted (accept_invite refuses existing users) and no email is sent.
+        deliverable = user is None
 
         pending = await session.execute(
             select(Invitation).where(
@@ -140,12 +206,24 @@ class MemberService:
             )
         )
         if pending.scalar_one_or_none() is not None:
-            raise HTTPException(status.HTTP_409_CONFLICT, "A pending invite already exists")
+            raise HTTPException(status.HTTP_409_CONFLICT, INVITE_CONFLICT)
 
         resolved_role, resolved_perms = resolve_permissions(role, permissions)
         await self._validate_ids(session, organization_id, agent_ids, mcp_server_ids)
 
         raw = "inv_" + secrets.token_urlsafe(24)
+        if deliverable and runtime.email_configured():
+            # Send before anything is written: a failed send raises and leaves no dangling invite.
+            await mailer.send_invite(
+                normalized,
+                raw,
+                organization=org.name if org is not None else "",
+                inviter=actor.name or "",
+                days=INVITE_TTL_DAYS,
+                locale=getattr(actor, "locale", None),
+            )
+        elif not deliverable:
+            logger.info("Invite created for an address that already has an account; no email sent")
         invite = Invitation(
             id=new_id("invite"),
             organization_id=organization_id,
@@ -163,7 +241,7 @@ class MemberService:
         )
         session.add(invite)
         await session.flush()
-        return invite, raw
+        return invite, (raw if dev else None)
 
     async def _validate_ids(
         self,
@@ -194,8 +272,7 @@ class MemberService:
         return invite
 
     async def accept_invite(self, session: AsyncSession, token: str, password: str) -> User:
-        if len(password) < 8:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters")
+        require_password_policy(password)
         result = await session.execute(
             select(Invitation).where(Invitation.token_hash == hash_token(token))
         )
@@ -247,7 +324,8 @@ class MemberService:
             employee,
             organization_id=org.id,
             agent_ids=list(invite.agent_ids or []),
-            mcp_server_ids=list(invite.mcp_server_ids or []),
+            # No servers on the invite: the first workspace bind assigns the org's servers once.
+            mcp_server_ids=list(invite.mcp_server_ids or []) or None,
         )
         invite.status = "accepted"
         invite.accepted_at = utcnow()
@@ -277,6 +355,8 @@ class MemberService:
         from fastapi import status as http_status
 
         org_id = organization_id or actor.organization_id
+        if role is not None or permissions is not None or status is not None:
+            await self._lock_org_employees(session, org_id)
         employee = await self.require_org_member(session, org_id, employee_id)
         previous_perms = dict(employee.permissions or {})
         previous_agents = {agent.id for agent in employee.agents}
@@ -344,20 +424,52 @@ class MemberService:
         assert loaded is not None
         return loaded
 
+    async def issue_password_reset(self, session: AsyncSession, user: User) -> None:
+        """Email the user a one-time reset code. Raises before writing anything if it cannot be sent."""
+        if not runtime.email_configured():
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Email delivery is not configured")
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        await mailer.send_reset_code(user.email, code, user.locale)
+        await self.store_reset_code(session, user.email, code)
+
+    async def store_reset_code(self, session: AsyncSession, email: str, code: str) -> None:
+        now = utcnow()
+        open_codes = await session.execute(
+            select(PasswordReset).where(
+                PasswordReset.email == email,
+                PasswordReset.used_at.is_(None),
+            )
+        )
+        for record in open_codes.scalars():
+            record.used_at = now
+        session.add(
+            PasswordReset(
+                id=new_id("rst"),
+                email=email,
+                code_hash=hash_password(code),
+                expires_at=now + timedelta(minutes=RESET_TTL_MINUTES),
+                attempts=0,
+            )
+        )
+        await session.flush()
+
     async def reset_password(
         self,
         session: AsyncSession,
         employee_id: str,
-        password: str,
         *,
         organization_id: str,
     ) -> Employee:
-        if len(password) < 8:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters")
+        """Platform-admin reset: the admin never chooses or learns the new password.
+
+        The current password stops working, every session and OAuth grant is revoked, and the
+        user gets a one-time code by email to choose a new password with /auth/reset-password.
+        """
         employee = await self.require_org_member(session, organization_id, employee_id)
         if employee.user is None:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "User account not found")
-        employee.user.password_hash = hash_password(password)
+        await self.issue_password_reset(session, employee.user)
+        employee.user.password_hash = unusable_password_hash()
         await self._revoke_sessions(session, employee.user_id)
         await self._revoke_oauth(session, employee.user_id)
         await session.flush()
