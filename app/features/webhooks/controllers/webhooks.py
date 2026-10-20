@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
@@ -24,13 +25,16 @@ router = APIRouter(prefix="/org", tags=["webhooks"])
 
 
 class WebhookCreate(BaseModel):
-    url: str
-    events: list[str] = Field(default_factory=lambda: ["approval.granted", "approval.rejected", "approval.expired"])
+    url: str = Field(max_length=2000)
+    events: list[Annotated[str, Field(max_length=64)]] = Field(
+        default_factory=lambda: ["approval.granted", "approval.rejected", "approval.expired"],
+        max_length=16,
+    )
 
 
 class WebhookUpdate(BaseModel):
-    url: str | None = None
-    events: list[str] | None = None
+    url: str | None = Field(default=None, max_length=2000)
+    events: list[Annotated[str, Field(max_length=64)]] | None = Field(default=None, max_length=16)
     enabled: bool | None = None
 
 
@@ -207,6 +211,7 @@ async def post_retry(delivery_id: str, session: SessionDep, member: TeamWrite, _
 
 
 @router.post("/webhooks/dispatch", response_model=DispatchRead)
-async def post_dispatch(session: SessionDep, _member: TeamWrite, _pro: ProPlan):
-    processed = await deliver_due(session)
+async def post_dispatch(session: SessionDep, member: TeamWrite, _pro: ProPlan):
+    # Only the caller's own queue; the global queue belongs to the background worker.
+    processed = await deliver_due(session, organization_id=member.organization_id)
     return DispatchRead(processed=processed)

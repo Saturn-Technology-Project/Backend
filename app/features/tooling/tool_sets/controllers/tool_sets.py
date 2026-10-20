@@ -4,6 +4,7 @@ from app.features.identity.auth.controllers.deps import CurrentUser, PoliciesRea
 from app.models import ToolSet
 from app.schemas import ToolSetItemRead, ToolSetRead, ToolSetUpdate, ToolSetWrite
 from app.features.tooling.tool_sets.services.tool_set_service import tool_set_service
+from app.shared.pagination import Page
 
 router = APIRouter(prefix="/tool-sets", tags=["tool-sets"])
 
@@ -36,8 +37,10 @@ def serialize_tool_set(tool_set: ToolSet) -> ToolSetRead:
 
 
 @router.get("", response_model=list[ToolSetRead])
-async def list_tool_sets(session: SessionDep, user: CurrentUser, _access: PoliciesRead):
-    sets = await tool_set_service.list_sets(session, user.organization_id)
+async def list_tool_sets(session: SessionDep, user: CurrentUser, _access: PoliciesRead, page: Page):
+    sets = await tool_set_service.list_sets(
+        session, user.organization_id, limit=page.limit, offset=page.offset
+    )
     return [serialize_tool_set(item) for item in sets]
 
 

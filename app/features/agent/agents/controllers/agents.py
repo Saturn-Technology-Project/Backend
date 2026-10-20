@@ -18,6 +18,7 @@ from app.features.agent.agents.services.agent_config import public_settings
 from app.features.agent.agents.services.agent_service import agent_service
 from app.features.organization.org.services.mapping_service import mapping_service
 from app.features.organization.org.services.removal_service import removal_service
+from app.shared.pagination import Page
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -111,9 +112,9 @@ def serialize_agent(agent, pushed: bool | None = None, registration: dict[str, s
 
 
 @router.get("", response_model=list[AgentRead])
-async def list_agents(session: SessionDep, user: CurrentUser, _access: AgentsRead):
+async def list_agents(session: SessionDep, user: CurrentUser, _access: AgentsRead, page: Page):
     await mapping_service.bind_workspace(session, user)
-    agents = await agent_service.list_agents(session, user)
+    agents = await agent_service.list_agents(session, user, limit=page.limit, offset=page.offset)
     registrations = await _registrations(session, agents)
     return [serialize_agent(agent, registration=registrations.get(agent.id)) for agent in agents]
 
@@ -133,7 +134,6 @@ async def create_agent(body: AgentCreate, session: SessionDep, user: CurrentUser
         name=body.name,
         description=body.description,
         model=body.model,
-        agent_id=body.id,
     )
     registrations = await _registrations(session, [agent])
     return serialize_agent(agent, registration=registrations.get(agent.id))

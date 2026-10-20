@@ -55,7 +55,7 @@ async def test_password_changes_revoke_oauth_tokens(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_admin_reset_and_downgrade_revoke_oauth_tokens(client):
+async def test_admin_reset_and_downgrade_revoke_oauth_tokens(client, monkeypatch):
     invited = await client.post(
         "/org/invites",
         json={"email": "agent-user@saturn.ai", "name": "Agent User", "role": "operator"},
@@ -81,12 +81,25 @@ async def test_admin_reset_and_downgrade_revoke_oauth_tokens(client):
     assert usable.status_code == 200, usable.text
 
     org_id = (await client.get("/org")).json()["organization"]["id"]
+    sent = []
+
+    async def capture(email, code, _locale=None):
+        sent.append((email, code))
+
+    monkeypatch.setattr("app.shared.runtime.email_configured", lambda: True)
+    monkeypatch.setattr("app.features.identity.auth.services.mailer.send_reset_code", capture)
     reset = await client.post(
         f"/admin/orgs/{org_id}/members/{member_id}/password",
         json={"password": "password2"},
     )
     assert reset.status_code == 200, reset.text
     assert (await _refresh(client, refresh, client_id)).status_code == 400
+    # The user, not the admin, picks the new password with the emailed code.
+    chosen = await client.post(
+        "/auth/reset-password",
+        json={"email": "agent-user@saturn.ai", "code": sent[-1][1], "password": "password2"},
+    )
+    assert chosen.status_code == 204, chosen.text
 
     access, refresh, client_id = await oauth_tokens(
         client,

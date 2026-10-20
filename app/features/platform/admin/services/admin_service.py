@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status as http_status
@@ -26,7 +27,13 @@ from app.features.organization.org.services.access import permissions_for_role, 
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.identity.auth.services.auth_service import hash_password
 from app.features.mcp.servers.services.mcp_gateway import mcp_gateway
-from app.features.organization.org.services.member_service import member_service
+from app.features.identity.auth.services import mailer
+from app.features.organization.org.services.member_service import (
+    member_service,
+    require_password_policy,
+    unusable_password_hash,
+)
+from app.shared import runtime
 from app.features.organization.org.services.plans import canonical_plan, kind_for_plan
 
 settings = get_settings()
@@ -96,9 +103,14 @@ class AdminService:
         for org_id in result.scalars():
             await mcp_gateway.connect_organization(session, org_id)
 
-    async def list_orgs(self, session: AsyncSession) -> list[dict]:
+    async def list_orgs(
+        self, session: AsyncSession, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict]:
         await self._bind_all_mcp(session)
-        result = await session.execute(select(Organization).order_by(Organization.created_at.asc()))
+        statement = select(Organization).order_by(Organization.created_at.asc(), Organization.id.asc())
+        if limit is not None:
+            statement = statement.limit(limit).offset(offset)
+        result = await session.execute(statement)
         orgs = list(result.scalars().all())
         rows = []
         for org in orgs:
@@ -217,7 +229,7 @@ class AdminService:
         name: str,
         admin_email: str,
         admin_name: str,
-        admin_password: str,
+        admin_password: str | None,
         admin_title: str,
         plan: str = "free",
         kind: str | None = None,
@@ -310,12 +322,17 @@ class AdminService:
             )
         return org
 
-    async def list_users(self, session: AsyncSession) -> list[User]:
-        result = await session.execute(
+    async def list_users(
+        self, session: AsyncSession, *, limit: int | None = None, offset: int = 0
+    ) -> list[User]:
+        statement = (
             select(User)
             .options(selectinload(User.organization), selectinload(User.employee))
-            .order_by(User.created_at.asc())
+            .order_by(User.created_at.asc(), User.id.asc())
         )
+        if limit is not None:
+            statement = statement.limit(limit).offset(offset)
+        result = await session.execute(statement)
         return list(result.scalars().unique().all())
 
     async def list_events(self, session: AsyncSession, limit: int = 50) -> list[AuditLog]:
@@ -519,7 +536,7 @@ class AdminService:
         plan: str = "free",
         email: str,
         name: str,
-        password: str,
+        password: str | None,
         title: str,
         role: str,
         permissions: dict | None,
@@ -528,9 +545,18 @@ class AdminService:
         mcp_server_ids: list[str],
         actor: User | None = None,
         kind: str | None = None,
+        self_service: bool = False,
     ) -> Employee:
-        if len(password) < 8:
-            raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters")
+        """Create a user, its employee row and (when organization is None) a new organization.
+
+        self_service: the person is choosing their own password (sign-up).
+        Otherwise a platform admin is creating the account. An admin-chosen password is used
+        only in local development and tests; in production the admin never knows the password:
+        the account gets an unusable one and the user is emailed a one-time reset code.
+        """
+        use_password = self_service or (runtime.local_dev_mode() and bool(password))
+        if use_password:
+            require_password_policy(password or "")
         normalized = email.strip().lower()
         if not normalized:
             raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Email is required")
@@ -551,6 +577,7 @@ class AdminService:
         cleaned_plan = canonical_plan(plan, strict=True)
         if organization is not None and organization.kind == "personal":
             raise HTTPException(http_status.HTTP_403_FORBIDDEN, "Personal accounts cannot add members")
+        resolved_kind = ""
         if organization is None:
             resolved_kind = (kind or "").strip().lower() or kind_for_plan(cleaned_plan)
             if resolved_kind not in {"personal", "organization"}:
@@ -559,6 +586,22 @@ class AdminService:
                 raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "A personal account uses Free or Pro")
             if resolved_kind == "organization" and cleaned_plan not in {"team", "enterprise"}:
                 raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "A team account uses Team or Enterprise")
+        else:
+            await member_service._validate_ids(session, organization.id, agent_ids, mcp_server_ids)
+
+        reset_code: str | None = None
+        if use_password:
+            password_hash = hash_password(password or "")
+        else:
+            password_hash = unusable_password_hash()
+            if cleaned_status == "active":
+                if not runtime.email_configured():
+                    raise HTTPException(http_status.HTTP_503_SERVICE_UNAVAILABLE, "Email delivery is not configured")
+                # Sent before anything is written, so a failed send leaves no half-made account.
+                reset_code = f"{secrets.randbelow(1_000_000):06d}"
+                await mailer.send_reset_code(normalized, reset_code, None)
+
+        if organization is None:
             organization = Organization(
                 id=new_id("org"),
                 name=(org_name or "").strip() or cleaned_name,
@@ -572,14 +615,12 @@ class AdminService:
 
             await ensure_default_policy(session, organization.id)
 
-        await member_service._validate_ids(session, organization.id, agent_ids, mcp_server_ids)
-
         user = User(
             id=new_id("user"),
             organization_id=organization.id,
             email=normalized,
             name=cleaned_name,
-            password_hash=hash_password(password),
+            password_hash=password_hash,
             status=cleaned_status,
             is_platform_admin=False,
         )
@@ -604,8 +645,11 @@ class AdminService:
             loaded,
             organization_id=organization.id,
             agent_ids=agent_ids,
-            mcp_server_ids=mcp_server_ids,
+            # No servers given: the first workspace bind assigns the org's servers once.
+            mcp_server_ids=list(mcp_server_ids or []) or None,
         )
+        if reset_code is not None:
+            await member_service.store_reset_code(session, normalized, reset_code)
         created = await member_service.load_member(session, loaded.id)
         assert created is not None
         if actor is not None:
@@ -642,6 +686,7 @@ class AdminService:
             agent_ids=[],
             mcp_server_ids=[],
             kind="personal",
+            self_service=True,
         )
         user = employee.user
         if user is None:

@@ -46,19 +46,33 @@ class MappingService:
 
         await mcp_gateway.connect_organization(session, user.organization_id)
         org_servers = await self.list_org_mcp_servers(session, user.organization_id)
-        if allows(employee.permissions, "agents", "read") and not employee.mcp_servers:
-            employee.mcp_servers.extend(org_servers)
+        # Auto-assign the org's servers only the first time. Once assignments exist, an empty
+        # list is an admin's decision (a revocation) and must not be refilled here.
+        if allows(employee.permissions, "agents", "read") and not employee.mcp_assignments_initialized:
+            if not employee.mcp_servers:
+                employee.mcp_servers.extend(org_servers)
+            employee.mcp_assignments_initialized = True
             await session.flush()
             employee = await self.employee_for_user(session, user.id)
         return employee
 
-    async def list_org_agents(self, session: AsyncSession, organization_id: str) -> list[Agent]:
-        result = await session.execute(
+    async def list_org_agents(
+        self,
+        session: AsyncSession,
+        organization_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Agent]:
+        statement = (
             select(Agent)
             .options(selectinload(Agent.mcp_servers))
             .where(Agent.organization_id == organization_id)
-            .order_by(Agent.created_at.asc())
+            .order_by(Agent.created_at.asc(), Agent.id.asc())
         )
+        if limit is not None:
+            statement = statement.limit(limit).offset(offset)
+        result = await session.execute(statement)
         return list(result.scalars().unique().all())
 
     async def list_org_mcp_servers(
@@ -72,12 +86,22 @@ class MappingService:
         )
         return list(result.scalars().unique().all())
 
-    async def list_org_tools(self, session: AsyncSession, organization_id: str) -> list[Tool]:
-        result = await session.execute(
+    async def list_org_tools(
+        self,
+        session: AsyncSession,
+        organization_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Tool]:
+        statement = (
             select(Tool)
             .where(Tool.organization_id == organization_id)
-            .order_by(Tool.name.asc())
+            .order_by(Tool.name.asc(), Tool.id.asc())
         )
+        if limit is not None:
+            statement = statement.limit(limit).offset(offset)
+        result = await session.execute(statement)
         return list(result.scalars().all())
 
     async def require_org_agent(self, session: AsyncSession, user: User, agent_id: str) -> Agent:

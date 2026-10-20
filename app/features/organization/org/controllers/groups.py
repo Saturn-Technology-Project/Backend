@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.features.identity.auth.controllers.deps import ActorDep, CurrentUser, SessionDep, TeamRead, TeamWrite
 from app.features.organization.org.models.group import Group
@@ -23,18 +23,18 @@ class GroupRead(BaseModel):
 
 
 class GroupWrite(BaseModel):
-    name: str
-    description: str = ""
+    name: str = Field(max_length=255)
+    description: str = Field(default="", max_length=20_000)
 
 
 class GroupUpdate(BaseModel):
-    name: str | None = None
-    description: str | None = None
-    status: str | None = None
+    name: str | None = Field(default=None, max_length=255)
+    description: str | None = Field(default=None, max_length=20_000)
+    status: str | None = Field(default=None, max_length=32)
 
 
 class GroupMemberWrite(BaseModel):
-    employee_id: str
+    employee_id: str = Field(max_length=64)
 
 
 def serialize_group(group: Group) -> GroupRead:

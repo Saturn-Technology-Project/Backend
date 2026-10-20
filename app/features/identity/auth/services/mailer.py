@@ -355,3 +355,81 @@ async def _send(email: str, code: str, kind: str, locale: str) -> None:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not send email") from exc
     if response.status_code >= 400:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not send email")
+
+
+_INVITE = {
+    "zh": {
+        "subject": "你受邀加入 Saturn 上的 {org}",
+        "title": "加入 {org}",
+        "body": "{who}邀請你加入 Saturn 上的「{org}」。點下面的按鈕設定密碼並啟用帳號。這個連結 {days} 天內有效，只能使用一次。",
+        "link": "接受邀請",
+        "ignore": "如果你不認識這個組織，可以忽略這封信。",
+    },
+    "en": {
+        "subject": "You're invited to join {org} on Saturn",
+        "title": "Join {org}",
+        "body": "{who} invited you to join “{org}” on Saturn. Use the button below to set a password and activate your account. The link works once and expires in {days} days.",
+        "link": "Accept invite",
+        "ignore": "If you don't recognise this organization, you can ignore this email.",
+    },
+}
+
+
+def invite_link(token: str) -> str:
+    from urllib.parse import quote
+
+    return f"{console_origin()}/accept-invite?token={quote(token, safe='')}"
+
+
+def _invite_message(token: str, org: str, inviter: str, days: int, locale: str) -> tuple[str, str, str]:
+    lang = _copy_language(locale)
+    copy = _INVITE[lang]
+    org_name = org or "Saturn"
+    who = inviter or ("Saturn 管理員" if lang == "zh" else "A Saturn admin")
+    subject = copy["subject"].format(org=org_name)
+    title = copy["title"].format(org=org_name)
+    body = copy["body"].format(who=who, org=org_name, days=days)
+    link = invite_link(token)
+    text = f"{title}\n\n{body}\n\n{copy['link']}: {link}\n\n{copy['ignore']}\n\nSaturn\n"
+    button = (
+        f'<p style="margin:24px 0 0;"><a href="{escape(link)}" style="display:inline-block;padding:10px 16px;'
+        f'background:#111110;color:#ffffff;border-radius:8px;font-size:13px;text-decoration:none;">{escape(copy["link"])}</a></p>'
+    )
+    inner = f"""<h1 style="margin:28px 0 0;font-size:22px;line-height:1.3;font-weight:600;letter-spacing:-0.02em;">{escape(title)}</h1>
+              <p style="margin:22px 0 0;font-size:14px;line-height:1.6;">{escape(body)}</p>
+              {button}
+              <p style="margin:24px 0 0;font-size:12px;line-height:1.6;color:#8a8a84;">{escape(copy["ignore"])}</p>"""
+    return subject, text, _card(normalize_locale(locale), title, inner)
+
+
+async def send_invite(
+    email: str,
+    token: str,
+    *,
+    organization: str,
+    inviter: str = "",
+    days: int = 7,
+    locale: str | None = None,
+) -> None:
+    """Email a one-time invite link. Raises 503 when email is not configured, 502 when sending fails."""
+    settings = get_settings()
+    if not settings.resend_api_key or not settings.resend_from:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Email delivery is not configured")
+    subject, text, html = _invite_message(token, organization, inviter, days, mail_locale(locale))
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+                json={
+                    "from": settings.resend_from,
+                    "to": [email],
+                    "subject": subject,
+                    "text": text,
+                    "html": html,
+                },
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not send email") from exc
+    if response.status_code >= 400:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not send email")

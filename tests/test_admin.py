@@ -144,7 +144,18 @@ async def test_platform_overview_and_org_lifecycle(client):
     assert settings.json()["platform"]["name"] == "Saturn"
 
 
-async def test_admin_can_reset_member_password(client):
+def capture_reset_codes(monkeypatch) -> list[tuple[str, str]]:
+    sent: list[tuple[str, str]] = []
+
+    async def capture(email, code, _locale=None):
+        sent.append((email, code))
+
+    monkeypatch.setattr("app.shared.runtime.email_configured", lambda: True)
+    monkeypatch.setattr("app.features.identity.auth.services.mailer.send_reset_code", capture)
+    return sent
+
+
+async def test_admin_can_reset_member_password(client, monkeypatch):
     created = await client.post(
         "/admin/orgs",
         json={
@@ -166,28 +177,39 @@ async def test_admin_can_reset_member_password(client):
     old_headers = {"Authorization": f"Bearer {login.json()['token']}"}
     assert (await client.get("/auth/me", headers=old_headers)).status_code == 200
 
-    too_short = await client.post(
+    # Without email delivery the reset is refused and nothing changes.
+    unconfigured = await client.post(
         f"/admin/orgs/{org['id']}/members/{member['id']}/password",
-        json={"password": "short"},
+        json={"password": "newpass12"},
     )
-    assert too_short.status_code == 400
+    assert unconfigured.status_code == 503
+    assert (await client.get("/auth/me", headers=old_headers)).status_code == 200
 
+    sent = capture_reset_codes(monkeypatch)
+    # The admin's chosen password is ignored: the user gets a one-time code by email instead.
     reset = await client.post(
         f"/admin/orgs/{org['id']}/members/{member['id']}/password",
         json={"password": "newpass12"},
     )
     assert reset.status_code == 200, reset.text
+    assert [email for email, _code in sent] == ["admin@acme.test"]
 
     assert (await client.get("/auth/me", headers=old_headers)).status_code == 401
-    assert (
-        await client.post(
-            "/auth/login",
-            json={"email": "admin@acme.test", "password": "password1"},
-        )
-    ).status_code == 401
+    for password in ("password1", "newpass12"):
+        assert (
+            await client.post(
+                "/auth/login",
+                json={"email": "admin@acme.test", "password": password},
+            )
+        ).status_code == 401
+    chosen = await client.post(
+        "/auth/reset-password",
+        json={"email": "admin@acme.test", "code": sent[0][1], "password": "chosen-by-user"},
+    )
+    assert chosen.status_code == 204, chosen.text
     again = await client.post(
         "/auth/login",
-        json={"email": "admin@acme.test", "password": "newpass12"},
+        json={"email": "admin@acme.test", "password": "chosen-by-user"},
     )
     assert again.status_code == 200, again.text
 

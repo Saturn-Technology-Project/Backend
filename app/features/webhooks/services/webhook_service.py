@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import random
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,11 +18,24 @@ from app.features.credentials.vault.services.secret_vault import get_secret, put
 from app.features.organization.org.services.plans import PRO_REQUIRED, allows_pro
 from app.models import Organization
 from app.features.webhooks.models.webhook import WebhookAttempt, WebhookDelivery, WebhookEndpoint
-from app.features.webhooks.services.destinations import require_webhook_url
+from app.features.webhooks.services.destinations import pin_webhook_url, require_webhook_url
 from app.features.webhooks.services.signing import SCHEMA, canonical_body, signed_headers
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_EVENTS = ("approval.granted", "approval.rejected", "approval.expired")
 TIMEOUT_SECONDS = 5
+# Whole request, including a server that trickles its response headers.
+TOTAL_TIMEOUT_SECONDS = 10
+# We only need the status code. At most this much of a response body is ever read.
+MAX_RESPONSE_BYTES = 64 * 1024
+MAX_ENDPOINTS_PER_ORG = 20
+# One worker cycle: at most BATCH_LIMIT deliveries, at most PER_ORG_LIMIT from one org, sent
+# CONCURRENCY at a time. A tenant with slow endpoints delays only its own deliveries.
+BATCH_LIMIT = 50
+PER_ORG_LIMIT = 5
+CONCURRENCY = 10
+SCAN_LIMIT = 500
 
 
 def max_attempts() -> int:
@@ -66,17 +82,50 @@ def _public_error(text: str, secret: str) -> str:
     return cleaned[:180]
 
 
+async def _post_pinned(url: str, body: bytes, headers: dict[str, str]) -> int:
+    try:
+        target = await asyncio.to_thread(pin_webhook_url, url)
+    except HTTPException as exc:
+        raise _DestinationRefused() from exc
+    sent_headers = dict(headers)
+    sent_headers["Host"] = target.host
+    async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
+        request = client.build_request(
+            "POST",
+            target.url,
+            content=body,
+            headers=sent_headers,
+            # TLS is negotiated and the certificate verified for the hostname, not the IP.
+            extensions={"sni_hostname": target.host},
+        )
+        response = await client.send(request, stream=True)
+        try:
+            read = 0
+            async for chunk in response.aiter_raw():
+                read += len(chunk)
+                if read >= MAX_RESPONSE_BYTES:
+                    break
+        finally:
+            await response.aclose()
+        return response.status_code
+
+
+class _DestinationRefused(Exception):
+    pass
+
+
 async def send_webhook(url: str, body: bytes, headers: dict[str, str]) -> tuple[int | None, str]:
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, follow_redirects=False) as client:
-            response = await client.post(url, content=body, headers=headers)
-    except httpx.TimeoutException:
+        code = await asyncio.wait_for(_post_pinned(url, body, headers), TOTAL_TIMEOUT_SECONDS)
+    except _DestinationRefused:
+        return None, "destination not allowed"
+    except (httpx.TimeoutException, asyncio.TimeoutError):
         return None, "timeout"
     except Exception as exc:
         return None, type(exc).__name__
-    if 300 <= response.status_code < 400:
-        return response.status_code, "redirect not followed"
-    return response.status_code, ""
+    if 300 <= code < 400:
+        return code, "redirect not followed"
+    return code, ""
 
 
 async def _webhooks_allowed(session: AsyncSession, organization_id: str) -> bool:
@@ -107,6 +156,16 @@ async def create_endpoint(
     url: str,
     events: list[str],
 ) -> tuple[WebhookEndpoint, str]:
+    count = await session.scalar(
+        select(func.count())
+        .select_from(WebhookEndpoint)
+        .where(WebhookEndpoint.organization_id == organization_id)
+    )
+    if int(count or 0) >= MAX_ENDPOINTS_PER_ORG:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"An organization can have at most {MAX_ENDPOINTS_PER_ORG} webhook endpoints",
+        )
     checked = require_webhook_url(url)
     chosen = clean_events(events)
     import secrets
@@ -234,13 +293,41 @@ async def emit(
             "created_at": _iso(utcnow()),
             "data": data,
         }
+        await _enqueue(session, organization_id, endpoint.id, event_type, event_key, event_id, payload)
+
+
+async def _already_queued(session: AsyncSession, endpoint_id: str, event_key: str) -> bool:
+    found = await session.scalar(
+        select(WebhookDelivery.id).where(
+            WebhookDelivery.endpoint_id == endpoint_id,
+            WebhookDelivery.event_key == event_key,
+        )
+    )
+    return found is not None
+
+
+async def _enqueue(
+    session: AsyncSession,
+    organization_id: str,
+    endpoint_id: str,
+    event_type: str,
+    event_key: str,
+    event_id: str,
+    payload: dict,
+) -> None:
+    """Queue one delivery. Only a duplicate (endpoint, event_key) is dropped, on purpose.
+
+    Any other integrity error (an id collision) is retried with fresh ids and, if it keeps
+    failing, logged loudly instead of silently losing the delivery.
+    """
+    for attempt in range(3):
         try:
             async with session.begin_nested():
                 session.add(
                     WebhookDelivery(
                         id=new_id("whd"),
                         organization_id=organization_id,
-                        endpoint_id=endpoint.id,
+                        endpoint_id=endpoint_id,
                         event_type=event_type,
                         event_key=event_key,
                         event_id=event_id,
@@ -254,8 +341,20 @@ async def emit(
                     )
                 )
                 await session.flush()
+            return
         except IntegrityError:
-            continue
+            if await _already_queued(session, endpoint_id, event_key):
+                return
+            event_id = new_id("whe")
+            payload = {**payload, "id": event_id}
+            logger.warning(
+                "Webhook delivery insert collided; retrying with new ids (endpoint=%s, attempt=%d)",
+                endpoint_id,
+                attempt + 1,
+            )
+    logger.error(
+        "Webhook delivery could not be queued (endpoint=%s, event_key=%s)", endpoint_id, event_key
+    )
 
 
 async def send_test(session: AsyncSession, organization_id: str, endpoint_id: str) -> WebhookDelivery:
@@ -338,66 +437,167 @@ def _retryable(code: int | None) -> bool:
     return False
 
 
-async def deliver_due(session: AsyncSession, now: datetime | None = None) -> int:
+@dataclass
+class _Job:
+    row: WebhookDelivery
+    url: str
+    body: bytes
+    headers: dict[str, str]
+    secret: str
+
+
+def _fair_pick(rows: list[WebhookDelivery], *, per_org: int, total: int) -> list[WebhookDelivery]:
+    """Round-robin across organizations, oldest first within each, at most per_org from any one."""
+    queues: dict[str, list[WebhookDelivery]] = {}
+    for row in rows:
+        queues.setdefault(row.organization_id, []).append(row)
+    picked: list[WebhookDelivery] = []
+    taken: dict[str, int] = {}
+    while len(picked) < total:
+        progressed = False
+        for org_id, queue in queues.items():
+            if not queue or taken.get(org_id, 0) >= per_org:
+                continue
+            picked.append(queue.pop(0))
+            taken[org_id] = taken.get(org_id, 0) + 1
+            progressed = True
+            if len(picked) >= total:
+                break
+        if not progressed:
+            break
+    return picked
+
+
+async def deliver_due(
+    session: AsyncSession,
+    now: datetime | None = None,
+    *,
+    organization_id: str | None = None,
+) -> int:
+    """Send due deliveries. With organization_id, only that organization's queue is touched."""
     moment = now or utcnow()
+    scope = []
+    if organization_id is not None:
+        scope.append(WebhookDelivery.organization_id == organization_id)
+    exhausted = list(
+        await session.scalars(
+            select(WebhookDelivery)
+            .where(
+                WebhookDelivery.status.in_(("pending", "failed")),
+                WebhookDelivery.attempt_count >= max_attempts(),
+                *scope,
+            )
+            .limit(SCAN_LIMIT)
+        )
+    )
+    for row in exhausted:
+        row.status = "dead"
+        row.updated_at = moment
+    # Take at most PER_ORG_LIMIT due rows from each organization, so one tenant's backlog
+    # cannot fill the scan and starve everyone else.
+    ranked = (
+        select(
+            WebhookDelivery.id.label("id"),
+            func.row_number()
+            .over(
+                partition_by=WebhookDelivery.organization_id,
+                order_by=(WebhookDelivery.next_attempt_at, WebhookDelivery.id),
+            )
+            .label("rank"),
+        )
+        .where(
+            WebhookDelivery.status.in_(("pending", "failed")),
+            WebhookDelivery.attempt_count < max_attempts(),
+            WebhookDelivery.next_attempt_at <= moment,
+            *scope,
+        )
+        .subquery()
+    )
     rows = list(
         await session.scalars(
             select(WebhookDelivery)
-            .where(WebhookDelivery.status.in_(("pending", "failed")))
-            .order_by(WebhookDelivery.next_attempt_at)
-            .limit(50)
+            .where(
+                WebhookDelivery.id.in_(select(ranked.c.id).where(ranked.c.rank <= PER_ORG_LIMIT))
+            )
+            .order_by(WebhookDelivery.next_attempt_at, WebhookDelivery.id)
+            .limit(SCAN_LIMIT)
+            # Several workers can run at once; each takes rows no other worker holds.
+            .with_for_update(of=WebhookDelivery, skip_locked=True)
         )
     )
-    processed = 0
-    for row in rows:
-        if row.attempt_count >= max_attempts():
-            row.status = "dead"
-            row.updated_at = moment
-            continue
-        due = _as_utc(row.next_attempt_at)
-        if due is not None and due > moment:
-            continue
-        await deliver_one(session, row, moment)
-        processed += 1
-        if processed >= 20:
-            break
-    return processed
+    # SQLite may hand back naive datetimes; keep the Python check as well.
+    rows = [row for row in rows if (_as_utc(row.next_attempt_at) or moment) <= moment]
+    picked = _fair_pick(rows, per_org=PER_ORG_LIMIT, total=BATCH_LIMIT)
+    jobs: list[_Job] = []
+    for row in picked:
+        job = await _prepare(session, row, moment)
+        if job is not None:
+            jobs.append(job)
+    gate = asyncio.Semaphore(CONCURRENCY)
+
+    async def run(job: _Job) -> tuple[int | None, str]:
+        async with gate:
+            return await send_webhook(job.url, job.body, job.headers)
+
+    results = await asyncio.gather(*(run(job) for job in jobs))
+    for job, (code, error) in zip(jobs, results):
+        await _record(session, job, moment, code, error)
+    await session.flush()
+    return len(picked)
 
 
 async def deliver_one(session: AsyncSession, row: WebhookDelivery, now: datetime) -> None:
+    job = await _prepare(session, row, now)
+    if job is None:
+        return
+    code, error = await send_webhook(job.url, job.body, job.headers)
+    await _record(session, job, now, code, error)
+
+
+async def _prepare(session: AsyncSession, row: WebhookDelivery, now: datetime) -> _Job | None:
+    """Check the delivery and build the signed request. Returns None when it was settled here."""
     endpoint = await session.get(WebhookEndpoint, row.endpoint_id)
     if endpoint is None or endpoint.organization_id != row.organization_id:
         row.status = "dead"
         row.last_error = "endpoint missing"
         row.updated_at = now
-        return
+        return None
     if not await _webhooks_allowed(session, row.organization_id):
         row.status = "dead"
         row.last_error = PRO_REQUIRED
         row.updated_at = now
-        return
+        return None
     if not endpoint.enabled and row.event_type != "webhook.test":
         row.next_attempt_at = now + timedelta(seconds=disabled_delay_seconds())
         row.updated_at = now
-        return
+        return None
     secret = ""
     try:
         require_webhook_url(endpoint.url)
         secret = await get_secret(session, endpoint.secret_id, row.organization_id)
     except HTTPException:
         await _finish(session, row, now, None, "destination not allowed", secret, dead=True)
-        return
+        return None
     except Exception:
         await _finish(session, row, now, None, "signing secret unavailable", "", dead=True)
-        return
+        return None
     if not secret:
         await _finish(session, row, now, None, "signing secret unavailable", "", dead=True)
-        return
+        return None
     body = canonical_body(row.payload if isinstance(row.payload, dict) else {})
     timestamp = str(int(_as_utc(now).timestamp()))
     headers = signed_headers(secret, row.event_id, timestamp, body)
-    code, error = await send_webhook(endpoint.url, body, headers)
-    dead = False
+    return _Job(row=row, url=endpoint.url, body=body, headers=headers, secret=secret)
+
+
+async def _record(
+    session: AsyncSession,
+    job: _Job,
+    now: datetime,
+    code: int | None,
+    error: str,
+) -> None:
+    row = job.row
     if code is not None and 200 <= code < 300:
         row.status = "delivered"
         row.last_status_code = code
@@ -415,9 +615,16 @@ async def deliver_one(session: AsyncSession, row: WebhookDelivery, now: datetime
         )
         await session.flush()
         return
-    if not _retryable(code):
-        dead = True
-    await _finish(session, row, now, code, error or (f"http {code}" if code else "delivery failed"), secret, dead=dead)
+    dead = not _retryable(code) or error == "destination not allowed"
+    await _finish(
+        session,
+        row,
+        now,
+        code,
+        error or (f"http {code}" if code else "delivery failed"),
+        job.secret,
+        dead=dead,
+    )
 
 
 async def _finish(
