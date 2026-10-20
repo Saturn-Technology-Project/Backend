@@ -325,7 +325,17 @@ def merge_results(results: list[EvaluationResult]) -> EvaluationResult:
         if get_settings().policy_default_deny:
             return EvaluationResult(decision=PolicyDecision.DENY, reason="沒有適用的 policy")
         return EvaluationResult(decision=PolicyDecision.ALLOW)
-    return max(results, key=lambda item: _RESTRICTIVENESS[item.decision])
+    # Most restrictive wins. Between equally restrictive opinions, one that names
+    # an approval policy beats one that does not, so a generic approval from
+    # another policy cannot drop a stricter linked approval policy.
+    return max(
+        results,
+        key=lambda item: (
+            _RESTRICTIVENESS[item.decision],
+            bool(item.approval_policy_id),
+            bool(item.policy_id),
+        ),
+    )
 
 
 def _policy_applies(policy: Policy, agent: Agent) -> bool:
@@ -366,7 +376,6 @@ class PolicyEngine:
     ) -> EvaluationResult:
         policies = await self._policies(session, organization_id)
         opinions: list[EvaluationResult] = []
-        legacy: list[PolicyRule] = []
         applicable: dict[str, Policy] = {}
         for policy in policies:
             if not _policy_applies(policy, agent):
@@ -386,10 +395,20 @@ class PolicyEngine:
                         policy_version=policy.version or 1,
                     )
                 )
-            else:
-                legacy.extend(tool_rules)
-        if legacy:
-            opinions.append(evaluate_rules(legacy, arguments))
+            elif tool_rules:
+                # Each legacy policy reaches its own decision, first match by
+                # position inside that policy only. Positions are never compared
+                # across policies, so one policy's priority cannot pre-empt
+                # another's rules; the merge below keeps the most restrictive.
+                opinion = evaluate_rules(tool_rules, arguments)
+                opinions.append(
+                    replace(
+                        opinion,
+                        policy_id=opinion.policy_id or policy.id,
+                        policy_name=policy.name,
+                        policy_version=policy.version or 1,
+                    )
+                )
         if not opinions and applicable:
             opinions.append(EvaluationResult(decision=PolicyDecision.DENY, reason="No policy rule"))
         result = merge_results(opinions)

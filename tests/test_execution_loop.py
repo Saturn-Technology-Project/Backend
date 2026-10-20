@@ -1,3 +1,6 @@
+from tests.policy_helpers import activate_created
+
+
 def test_simulator_amount_extraction():
     from app.features.execution.runs.services.simulator import extract_amount, extract_customer
 
@@ -115,6 +118,6 @@ async def test_approve_rechecks_policy(client):
             ],
         },
     )
-    assert tightened.status_code == 201
+    await activate_created(client, tightened)
     response = await client.post(f"/approvals/{approval_id}/approve")
     assert response.status_code == 403

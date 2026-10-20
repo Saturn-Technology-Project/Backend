@@ -7,8 +7,11 @@ stored, so a draft can be saved before it is valid.
 
 from __future__ import annotations
 
+import copy
 from collections import defaultdict
 from typing import Any
+
+from app.features.policy.policies.services.limits import canonical_operator
 
 _NODE_TYPES = {"subject", "tool", "condition", "logic", "decision", "enforcement"}
 _LOGIC = {"and", "or", "not"}
@@ -40,73 +43,148 @@ def normalize_definition(raw: Any) -> dict[str, Any]:
     return body
 
 
-def _ancestors(node_id: str, incoming: dict[str, list[str]]) -> set[str]:
-    seen: set[str] = set()
-    stack = list(incoming.get(node_id, []))
-    while stack:
-        current = stack.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        stack.extend(incoming.get(current, []))
-    return seen
+class PolicyGraphTooLarge(ValueError):
+    """The graph is over a size or complexity limit. The service answers 400."""
 
 
-def _node_expr(
-    node_id: str,
+MAX_NODES = 2_000
+MAX_EDGES = 4_000
+MAX_IN_DEGREE = 128
+MAX_NODE_ID = 128
+# One rule's expression, counted after shared conditions are expanded.
+MAX_EXPRESSION_SIZE = 2_000
+MAX_EXPRESSION_DEPTH = 64
+MAX_TOTAL_EXPRESSION_SIZE = 20_000
+# Agent ids copied from subject nodes into all rules together.
+MAX_TOTAL_SUBJECT_IDS = 20_000
+
+_GATES = {"condition", "logic"}
+_MANY = "__many__"
+
+
+def _data(node: dict[str, Any]) -> dict[str, Any]:
+    data = node.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _topological_order(
+    nodes: dict[str, dict[str, Any]], incoming: dict[str, list[str]], outgoing: dict[str, list[str]]
+) -> list[str] | None:
+    """Kahn's algorithm. None means the graph has a cycle."""
+    pending = {ident: len(incoming.get(ident, [])) for ident in nodes}
+    ready = [ident for ident, count in pending.items() if count == 0]
+    order: list[str] = []
+    while ready:
+        current = ready.pop()
+        order.append(current)
+        for target in outgoing.get(current, []):
+            pending[target] -= 1
+            if pending[target] == 0:
+                ready.append(target)
+    return order if len(order) == len(nodes) else None
+
+
+def _gate_expressions(
+    order: list[str],
     nodes: dict[str, dict[str, Any]],
     incoming: dict[str, list[str]],
-    stack: frozenset[str] = frozenset(),
-) -> dict[str, Any]:
-    if node_id in stack:
-        return {"op": "true"}
-    node = nodes[node_id]
-    kind = node.get("type")
-    data = node.get("data") if isinstance(node.get("data"), dict) else {}
-    stack = stack | {node_id}
-    upstream = [
-        _node_expr(source, nodes, incoming, stack)
-        for source in incoming.get(node_id, [])
-        if (nodes.get(source) or {}).get("type") in {"condition", "logic"}
-    ]
-    if kind == "condition":
-        operator = str(data.get("operator") or "eq").lower()
-        own = {
-            "op": "cmp",
-            "field": str(data.get("field") or "").strip(),
-            "operator": operator if operator in _OPS else "eq",
-            "value": data.get("value"),
-        }
-        if not upstream:
-            return own
-        return {"op": "and", "args": [*upstream, own]}
-    if kind == "logic":
-        op = str(data.get("op") or "and").lower()
-        if op not in _LOGIC:
-            op = "and"
-        return {"op": op, "args": upstream}
-    return {"op": "true"}
+    errors: list[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Build every condition and logic expression once, in topological order.
+
+    Shared upstream gates are built once and reused, and the expanded size and
+    depth are tracked so a fan-in graph cannot grow an exponential rule.
+    """
+    exprs: dict[str, dict[str, Any]] = {}
+    sizes: dict[str, int] = {}
+    depths: dict[str, int] = {}
+    for node_id in order:
+        node = nodes[node_id]
+        kind = node.get("type")
+        if kind not in _GATES:
+            continue
+        data = _data(node)
+        upstream = [source for source in incoming.get(node_id, []) if nodes[source].get("type") in _GATES]
+        upstream_size = sum(sizes[source] for source in upstream)
+        upstream_depth = max((depths[source] for source in upstream), default=0)
+        if kind == "condition":
+            raw_operator = data.get("operator") if data.get("operator") is not None else "eq"
+            operator = canonical_operator(raw_operator)
+            if operator is None:
+                errors.append(f"Unknown operator on condition {str(data.get('field') or node_id)[:64]}")
+                operator = "eq"
+            own = {
+                "op": "cmp",
+                "field": str(data.get("field") or "").strip(),
+                "operator": operator,
+                "value": data.get("value"),
+            }
+            if upstream:
+                expr = {"op": "and", "args": [*(exprs[source] for source in upstream), own]}
+                size = upstream_size + 2
+                depth = max(upstream_depth, 1) + 1
+            else:
+                expr, size, depth = own, 1, 1
+        else:
+            raw_op = data.get("op")
+            op = str(raw_op or "and").lower()
+            if op not in _LOGIC:
+                errors.append(f"Unknown logic operator {str(raw_op)[:32]}")
+                op = "and"
+            expr = {"op": op, "args": [exprs[source] for source in upstream]}
+            size = upstream_size + 1
+            depth = upstream_depth + 1
+        if size > MAX_EXPRESSION_SIZE or depth > MAX_EXPRESSION_DEPTH:
+            raise PolicyGraphTooLarge(
+                "The policy graph is too complex: a decision path may combine at most "
+                f"{MAX_EXPRESSION_SIZE} checks, nested at most {MAX_EXPRESSION_DEPTH} deep"
+            )
+        exprs[node_id] = expr
+        sizes[node_id] = size
+        depths[node_id] = depth
+    return exprs, sizes
 
 
-def _decision_expr(decision_id: str, nodes: dict[str, dict[str, Any]], incoming: dict[str, list[str]]) -> dict[str, Any]:
-    exprs = []
-    for source in incoming.get(decision_id, []):
-        source_node = nodes.get(source)
-        if source_node and source_node.get("type") in {"condition", "logic"}:
-            exprs.append(_node_expr(source, nodes, incoming))
-    if not exprs:
-        return {"op": "true"}
-    if len(exprs) == 1:
-        return exprs[0]
-    return {"op": "and", "args": exprs}
+def _merge_tools(current: Any, more: Any) -> Any:
+    """Track the tool ancestors of a node, stopping at two: only 'exactly one' matters."""
+    if current == _MANY or more == _MANY:
+        return _MANY
+    merged = current | more
+    return _MANY if len(merged) > 1 else merged
 
 
-def compile_definition(definition: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    """Compile decision paths into rules. Structural problems are returned, not raised."""
+def check_definition_limits(document: dict[str, Any]) -> None:
+    if len(document.get("nodes") or []) > MAX_NODES:
+        raise PolicyGraphTooLarge(f"The policy graph is too large: at most {MAX_NODES} nodes")
+    if len(document.get("edges") or []) > MAX_EDGES:
+        raise PolicyGraphTooLarge(f"The policy graph is too large: at most {MAX_EDGES} arrows")
+    for node in document.get("nodes") or []:
+        if len(str(node.get("id"))) > MAX_NODE_ID:
+            raise PolicyGraphTooLarge(f"Node ids must be at most {MAX_NODE_ID} characters")
+
+
+def compile_definition(definition: dict[str, Any], *, strict: bool = False) -> tuple[list[dict[str, Any]], list[str]]:
+    """Compile decision paths into rules. Structural problems are returned, not raised.
+
+    A graph over the size limits compiles to no rules. With strict=True that
+    raises PolicyGraphTooLarge instead, so a save can be refused with 400.
+    """
     document = normalize_definition(definition)
+    try:
+        return _compile(document)
+    except PolicyGraphTooLarge as exc:
+        if strict:
+            raise
+        return [], [str(exc)]
+
+
+def _compile(document: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    check_definition_limits(document)
     nodes = {str(item["id"]): item for item in document["nodes"]}
     incoming: dict[str, list[str]] = defaultdict(list)
+    outgoing: dict[str, list[str]] = defaultdict(list)
     errors: list[str] = []
+    seen_edges: set[tuple[str, str]] = set()
     for edge in document["edges"]:
         source = str(edge["source"])
         target = str(edge["target"])
@@ -116,58 +194,129 @@ def compile_definition(definition: dict[str, Any]) -> tuple[list[dict[str, Any]]
         if source == target:
             errors.append("A node cannot connect to itself")
             continue
+        if (source, target) in seen_edges:
+            continue
+        seen_edges.add((source, target))
         incoming[target].append(source)
+        outgoing[source].append(target)
+        if len(incoming[target]) > MAX_IN_DEGREE:
+            raise PolicyGraphTooLarge(
+                f"The policy graph is too large: a node may have at most {MAX_IN_DEGREE} incoming arrows"
+            )
+
+    order = _topological_order(nodes, incoming, outgoing)
+    if order is None:
+        errors.append("The policy graph has a cycle")
+        return [], errors
+
+    exprs, sizes = _gate_expressions(order, nodes, incoming, errors)
+
+    # Tool and subject ancestors of every node, propagated once in topological order.
+    empty: frozenset[str] = frozenset()
+    tool_ancestors: dict[str, Any] = {}
+    subject_ancestors: dict[str, frozenset[str]] = {}
+    for node_id in order:
+        tools: Any = empty
+        subjects: frozenset[str] = empty
+        for source in incoming.get(node_id, []):
+            source_tools = tool_ancestors[source]
+            if nodes[source].get("type") == "tool":
+                source_tools = _merge_tools(source_tools, frozenset({source}))
+            tools = _merge_tools(tools, source_tools)
+            source_subjects = subject_ancestors[source]
+            if nodes[source].get("type") == "subject":
+                source_subjects = source_subjects | {source}
+            if source_subjects and source_subjects is not subjects:
+                subjects = source_subjects if not subjects else subjects | source_subjects
+        tool_ancestors[node_id] = tools
+        subject_ancestors[node_id] = subjects
+
+    # The first enforcement node, in document order, downstream of each decision.
+    # A node already reached from an earlier enforcement node had all of its
+    # ancestors reached then too, so each node is visited once in total.
+    enforcement_for: dict[str, dict[str, Any]] = {}
+    visited: set[str] = set()
+    for node in nodes.values():
+        if node.get("type") != "enforcement":
+            continue
+        data = _data(node)
+        stack = list(incoming.get(str(node["id"]), []))
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            if nodes[current].get("type") == "decision":
+                enforcement_for.setdefault(current, data)
+            stack.extend(incoming.get(current, []))
 
     rules: list[dict[str, Any]] = []
+    total_size = 0
+    total_subjects = 0
     for decision in (item for item in nodes.values() if item.get("type") == "decision"):
-        ancestors = _ancestors(str(decision["id"]), incoming)
-        tools = [nodes[item] for item in ancestors if nodes[item].get("type") == "tool"]
-        if len(tools) != 1:
+        decision_id = str(decision["id"])
+        tools = tool_ancestors.get(decision_id, empty)
+        if tools == _MANY or len(tools) != 1:
             errors.append("Each decision must connect back to exactly one tool")
             continue
-        data = tools[0].get("data") if isinstance(tools[0].get("data"), dict) else {}
+        data = _data(nodes[next(iter(tools))])
         tool_name = str(data.get("tool") or "").strip()
         if not tool_name:
             errors.append("A tool node is missing its tool name")
             continue
-        subjects: list[str] = []
-        for item_id in ancestors:
-            node = nodes[item_id]
-            if node.get("type") != "subject":
-                continue
-            subject_data = node.get("data") if isinstance(node.get("data"), dict) else {}
-            for agent_id in subject_data.get("agentIds") or []:
-                if isinstance(agent_id, str) and agent_id and agent_id not in subjects:
-                    subjects.append(agent_id)
-        decision_data = decision.get("data") if isinstance(decision.get("data"), dict) else {}
+        agent_ids: dict[str, None] = {}
+        for subject_id in sorted(subject_ancestors.get(decision_id, empty)):
+            for agent_id in _data(nodes[subject_id]).get("agentIds") or []:
+                if isinstance(agent_id, str) and agent_id:
+                    agent_ids.setdefault(agent_id, None)
+        total_subjects += len(agent_ids)
+        if total_subjects > MAX_TOTAL_SUBJECT_IDS:
+            raise PolicyGraphTooLarge(
+                f"The policy graph is too complex: all decisions together may name at most {MAX_TOTAL_SUBJECT_IDS} agents"
+            )
+        decision_data = _data(decision)
         raw_decision = str(decision_data.get("decision") or "deny").strip().lower()
         if raw_decision not in _DECISIONS:
             errors.append(f"Unknown decision on {tool_name}")
             raw_decision = "deny"
         classification = data.get("classification") if isinstance(data.get("classification"), dict) else {}
-        enforcement: dict[str, Any] = {}
-        for node in nodes.values():
-            if node.get("type") != "enforcement":
-                continue
-            if str(decision["id"]) in _ancestors(str(node["id"]), incoming):
-                enforcement = node.get("data") if isinstance(node.get("data"), dict) else {}
-                break
+        enforcement = enforcement_for.get(decision_id, {})
+        gates = [source for source in incoming.get(decision_id, []) if nodes[source].get("type") in _GATES]
+        if not gates:
+            expression: dict[str, Any] = {"op": "true"}
+            size = 1
+        elif len(gates) == 1:
+            expression = exprs[gates[0]]
+            size = sizes[gates[0]]
+        else:
+            expression = {"op": "and", "args": [exprs[source] for source in gates]}
+            size = 1 + sum(sizes[source] for source in gates)
+        if size > MAX_EXPRESSION_SIZE:
+            raise PolicyGraphTooLarge(
+                f"The policy graph is too complex: a decision path may combine at most {MAX_EXPRESSION_SIZE} checks"
+            )
+        total_size += size
+        if total_size > MAX_TOTAL_EXPRESSION_SIZE:
+            raise PolicyGraphTooLarge(
+                "The policy graph is too complex: all decisions together may combine at most "
+                f"{MAX_TOTAL_EXPRESSION_SIZE} checks"
+            )
+        approval_policy = str(
+            decision_data.get("approvalPolicyId") or decision_data.get("approval_policy_id") or ""
+        ).strip()
         rules.append(
             {
                 "id": f"rule_{decision['id']}"[:64],
                 "tool": tool_name,
-                "expression": _decision_expr(str(decision["id"]), nodes, incoming),
+                # A plain tree per rule, so stored rules never alias each other.
+                "expression": copy.deepcopy(expression),
                 "decision": _DECISIONS[raw_decision],
                 "attributes": {
-                    "subjectAgentIds": subjects,
+                    "subjectAgentIds": list(agent_ids),
                     "classification": classification,
                     "enforcement": {key: enforcement[key] for key in ("rateLimit",) if key in enforcement},
                     "nodeId": decision["id"],
-                    **(
-                        {"approvalPolicyId": str(decision_data.get("approvalPolicyId") or decision_data.get("approval_policy_id")).strip()}
-                        if str(decision_data.get("approvalPolicyId") or decision_data.get("approval_policy_id") or "").strip()
-                        else {}
-                    ),
+                    **({"approvalPolicyId": approval_policy} if approval_policy else {}),
                 },
             }
         )
@@ -214,12 +363,58 @@ def _satisfy(expr: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def validate_definition(definition: dict[str, Any], set_tools: list[str]) -> dict[str, Any]:
-    from app.features.policy.policies.services.policy_engine import evaluate_graph_rules
-
     document = normalize_definition(definition)
     rules, errors = compile_definition(document)
-    issues = [{"level": "error", "code": "structure", "message": item} for item in errors]
-    analyses = {str(item.get("tool")): item for item in document["analyses"] if item.get("tool")}
+    return validate_rules(rules, set_tools, analyses=document["analyses"], structure_errors=errors)
+
+
+def _is_open(rule: dict[str, Any]) -> bool:
+    return (rule.get("expression") or {}).get("op") == "true"
+
+
+def _has_subjects(rule: dict[str, Any]) -> bool:
+    attributes = rule.get("attributes") if isinstance(rule.get("attributes"), dict) else {}
+    return bool(attributes.get("subjectAgentIds"))
+
+
+def _shadow_issues(tool: str, group: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """An unconditional allow beside a conditional restriction for the same tool.
+
+    A condition only matches when the call carries that field under exactly
+    that name. A call that leaves the field out, or spells it differently,
+    skips the restriction and falls through to the allow.
+    """
+    open_allow = any(rule["decision"] == "allow" and _is_open(rule) and not _has_subjects(rule) for rule in group)
+    restricted = sorted({rule["decision"] for rule in group if rule["decision"] != "allow" and not _is_open(rule)})
+    if not open_allow or not restricted:
+        return []
+    labels = " and ".join("approval" if item == "approval_required" else item for item in restricted)
+    return [
+        {
+            "level": "warning",
+            "code": "shadowed",
+            "tool": tool,
+            "message": (
+                f"{tool} is allowed without conditions, so its conditional {labels} only applies when a call "
+                "includes those fields with the exact same names. A call that leaves them out is allowed."
+            ),
+        }
+    ]
+
+
+def validate_rules(
+    rules: list[dict[str, Any]],
+    set_tools: list[str],
+    *,
+    analyses: list[dict[str, Any]] | None = None,
+    structure_errors: list[str] | None = None,
+    ordered: bool = False,
+) -> dict[str, Any]:
+    """Check compiled rules. ordered=True checks legacy rules, where the first match by position wins."""
+    from app.features.policy.policies.services.policy_engine import evaluate_graph_rules, evaluate_rules
+
+    issues = [{"level": "error", "code": "structure", "message": item} for item in structure_errors or []]
+    by_tool = {str(item.get("tool")): item for item in analyses or [] if isinstance(item, dict) and item.get("tool")}
     unclassified: list[str] = []
     insufficient: list[str] = []
     covered = {rule["tool"] for rule in rules}
@@ -227,7 +422,7 @@ def validate_definition(definition: dict[str, Any], set_tools: list[str]) -> dic
     for tool in expected_tools:
         if tool not in covered:
             issues.append({"level": "error", "code": "coverage", "tool": tool, "message": f"{tool} has no decision"})
-        analysis = analyses.get(tool)
+        analysis = by_tool.get(tool)
         if not analysis:
             continue
         status = analysis.get("status")
@@ -240,31 +435,47 @@ def validate_definition(definition: dict[str, Any], set_tools: list[str]) -> dic
                     "level": "warning",
                     "code": "insufficient",
                     "tool": tool,
-                    "message": str(analysis.get("rationale") or f"{tool} was not analyzed"),
+                    "message": str(analysis.get("rationale") or f"{tool} was not analyzed")[:1000],
                 }
             )
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for rule in rules:
         grouped[rule["tool"]].append(rule)
     for tool, group in grouped.items():
-        open_rules = [rule for rule in group if (rule.get("expression") or {}).get("op") == "true"]
-        decisions = {rule["decision"] for rule in open_rules}
-        if len(decisions) > 1:
-            issues.append(
-                {
-                    "level": "error",
-                    "code": "conflict",
-                    "tool": tool,
-                    "message": f"{tool} has unconditional decisions that disagree",
-                }
-            )
+        if ordered:
+            group.sort(key=lambda item: item.get("position") or 0)
+            first_open = next((index for index, rule in enumerate(group) if _is_open(rule)), None)
+            if first_open is not None and first_open < len(group) - 1:
+                issues.append(
+                    {
+                        "level": "warning",
+                        "code": "unreachable",
+                        "tool": tool,
+                        "message": f"{tool} has rules after an unconditional rule. They never apply.",
+                    }
+                )
+        else:
+            decisions = {rule["decision"] for rule in group if _is_open(rule)}
+            if len(decisions) > 1:
+                issues.append(
+                    {
+                        "level": "error",
+                        "code": "conflict",
+                        "tool": tool,
+                        "message": f"{tool} has unconditional decisions that disagree",
+                    }
+                )
+        issues.extend(_shadow_issues(tool, group))
     probes = []
     for rule in rules:
         arguments = _satisfy(rule["expression"])
         if arguments is None:
             probes.append({"tool": rule["tool"], "ok": False, "message": "Could not build a test input for this rule"})
             continue
-        result = evaluate_graph_rules([_probe_rule(rule)], arguments, None)
+        if ordered:
+            result = evaluate_rules([_probe_rule(item) for item in grouped[rule["tool"]]], arguments)
+        else:
+            result = evaluate_graph_rules([_probe_rule(rule)], arguments, None)
         expected = rule["decision"]
         actual = result.decision.value
         ok = actual == expected
@@ -278,13 +489,9 @@ def validate_definition(definition: dict[str, Any], set_tools: list[str]) -> dic
                 "message": "Matched" if ok else "Simulation did not return the decision on this node",
             }
         )
-        if not ok:
+        if not ok and not ordered:
             issues.append({"level": "error", "code": "simulation", "tool": rule["tool"], "message": probes[-1]["message"]})
-    analyzed = [
-        tool
-        for tool in expected_tools
-        if analyses.get(tool, {}).get("status") == "analyzed"
-    ]
+    analyzed = [tool for tool in expected_tools if by_tool.get(tool, {}).get("status") == "analyzed"]
     return {
         "ok": not any(item["level"] == "error" for item in issues),
         "toolCount": len(expected_tools),
@@ -308,7 +515,7 @@ def _probe_rule(rule: dict[str, Any]) -> Any:
         expression=rule["expression"],
         decision=rule["decision"],
         attributes=rule.get("attributes") or {},
-        position=0,
+        position=rule.get("position") or 0,
     )
 
 
@@ -414,19 +621,33 @@ def definition_from_analyses(tool_set_id: str, analyses: list[dict[str, Any]]) -
 
 
 def risky_allows(rules: list[Any]) -> list[str]:
-    names: list[str] = []
+    """Tools that activation must confirm: every tool with an allow rule.
+
+    The risk label on a tool comes from the policy model, or from a definition
+    the client sent back after the model edited it. Either way it can be
+    steered by a tool description, so it is advisory and cannot waive the
+    confirmation. Tools labelled high or unknown risk are listed first.
+    """
+    flagged: list[str] = []
+    others: list[str] = []
     for rule in rules:
         decision = str(getattr(rule, "decision", "") or "")
         if decision != "allow":
+            continue
+        tool = str(getattr(rule, "tool", "") or "")
+        if tool in flagged or tool in others:
             continue
         attributes = getattr(rule, "attributes", None)
         classification = attributes.get("classification") if isinstance(attributes, dict) else {}
         if not isinstance(classification, dict):
             classification = {}
-        risk = str(classification.get("risk") or "")
-        if risk in {"high", "unknown"} and getattr(rule, "tool", None) not in names:
-            names.append(str(rule.tool))
-    return names
+        risk = str(classification.get("risk") or "unknown")
+        (others if risk in {"low", "medium"} else flagged).append(tool)
+    for tool in others:
+        if tool in flagged:
+            continue
+        flagged.append(tool)
+    return flagged
 
 
 def _node_brief(node: dict[str, Any]) -> dict[str, Any]:

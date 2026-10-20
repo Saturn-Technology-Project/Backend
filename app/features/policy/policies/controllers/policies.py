@@ -24,7 +24,7 @@ from app.schemas import (
     PolicySimulate,
     PolicyUpdate,
 )
-from app.features.policy.policies.services.policy_service import policy_service, serialize_policy
+from app.features.policy.policies.services.policy_service import enforce_llm_quota, policy_service, serialize_policy
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 
@@ -48,6 +48,7 @@ async def get_policy(policy_id: str, session: SessionDep, user: CurrentUser, _ac
 async def generate_policy(
     body: PolicyGenerate, session: SessionDep, user: CurrentUser, _access: PoliciesWrite, _cloud: SaturnCloud, _pro: ProPlan
 ):
+    enforce_llm_quota(user.id, user.organization_id)
     policy = await policy_service.generate_from_set(
         session, user.organization_id, body.tool_set_id, body.name, body.instructions
     )
@@ -62,6 +63,8 @@ def _sse(payload: dict) -> str:
 async def generate_policy_stream(
     body: PolicyGenerate, session: SessionDep, user: CurrentUser, _access: PoliciesWrite, _cloud: SaturnCloud, _pro: ProPlan
 ):
+    enforce_llm_quota(user.id, user.organization_id)
+
     async def events():
         try:
             async for event in policy_service.iter_generate(
@@ -150,6 +153,7 @@ async def optimize_policy(
     _cloud: SaturnCloud, _pro: ProPlan,
 ):
     policy = await policy_service.get_policy(session, policy_id, user.organization_id)
+    enforce_llm_quota(user.id, user.organization_id)
     return await policy_service.optimize_policy(session, policy, body.definition, body.instructions)
 
 
@@ -163,6 +167,7 @@ async def optimize_policy_stream(
     _cloud: SaturnCloud, _pro: ProPlan,
 ):
     policy = await policy_service.get_policy(session, policy_id, user.organization_id)
+    enforce_llm_quota(user.id, user.organization_id)
 
     async def events():
         try:

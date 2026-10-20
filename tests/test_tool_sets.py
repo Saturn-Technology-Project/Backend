@@ -1,4 +1,5 @@
 from tests.oauth_access import oauth_access
+from tests.policy_helpers import activate_created
 
 
 async def test_each_agent_sees_only_its_own_tool_set(client, monkeypatch):
@@ -227,7 +228,7 @@ async def test_mapped_tool_set_is_what_saturn_mcp_exposes(client, monkeypatch):
             "rules": [{"tool": "repo.read", "condition": "true", "decision": "deny"}],
         },
     )
-    assert denied.status_code == 201, denied.text
+    await activate_created(client, denied)
     blocked = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "repo.read", "arguments": {"repo": "saturn"}}},
