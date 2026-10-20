@@ -29,7 +29,8 @@ async def test_create_policy_with_structured_rules(client):
     assert created.status_code == 201, created.text
     body = created.json()
     assert body["version"] == 1
-    assert body["status"] == "active"
+    # Created as a draft even though nothing asked otherwise; activation goes through validate/activate.
+    assert body["status"] == "draft"
     assert body["agent_ids"] == ["agent_customer_ops"]
     assert [rule["decision"] for rule in body["rules"]] == [
         "allow",

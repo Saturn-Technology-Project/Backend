@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from fastapi import HTTPException, status
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,25 +11,120 @@ from app.core.ids import new_id, utcnow
 from app.models import Agent, Policy, PolicyRule
 from app.shared.models.associations import agent_policies
 from app.schemas import PolicyCreate, PolicyRead, PolicyRuleIn, PolicyRuleRead, PolicyUpdate
-from app.features.policy.policies.services.policy_engine import compile_condition, normalize_decision, parse_condition_string
-from app.features.policy.policies.services.policy_graph import compile_definition, normalize_definition
+from app.features.policy.policies.services.default_policy import MARKER
+from app.features.policy.policies.services.limits import (
+    LLM_ORG_LIMIT,
+    LLM_USER_LIMIT,
+    LLM_WINDOW_SECONDS,
+    MAX_AGENT_IDS,
+    MAX_CONDITION_TEXT,
+    MAX_CONDITIONS_BYTES,
+    MAX_CONDITIONS_PER_RULE,
+    MAX_DEFINITION_BYTES,
+    MAX_DESCRIPTION,
+    MAX_ENVIRONMENT,
+    MAX_ID,
+    MAX_INSTRUCTIONS,
+    MAX_LLM_TOOLS,
+    MAX_NAME,
+    MAX_PRIORITY,
+    MAX_RULES,
+    MAX_TOOL_NAME,
+    bad_request,
+    bounded_text,
+    clean_condition,
+    json_size,
+)
+from app.features.policy.policies.services.policy_engine import (
+    compile_condition,
+    conditions_for,
+    normalize_decision,
+    parse_condition_string,
+)
+from app.features.policy.policies.services.policy_graph import (
+    PolicyGraphTooLarge,
+    compile_definition,
+    normalize_definition,
+)
 
 
 _STATUSES = {"active", "paused", "draft", "validated"}
+_AND_SPLIT = re.compile(r"\s+AND\s+", re.I)
 
 
 def _status(raw: str | None) -> str:
-    value = (raw or "active").strip().lower()
+    value = (raw or "").strip().lower()
     if value not in _STATUSES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown policy status")
+    if value == "validated":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Run validation to mark a policy validated")
     return value
 
 
-def _slug_id(prefix: str, name: str) -> str:
-    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in name).strip("_")
-    while "__" in slug:
-        slug = slug.replace("__", "_")
-    return f"{prefix}_{slug}" if slug else new_id(prefix)
+def _is_default(policy: Policy) -> bool:
+    return (policy.description or "") == MARKER
+
+
+def _description(raw: str | None) -> str:
+    text = bounded_text(raw, MAX_DESCRIPTION, "Description")
+    if text == MARKER:
+        raise bad_request("That description is reserved")
+    return text
+
+
+def _name(raw: str | None) -> str:
+    text = bounded_text(raw, MAX_NAME, "Name")
+    if not text:
+        raise bad_request("Name is required")
+    return text
+
+
+def _environment(raw: str | None) -> str:
+    return bounded_text(raw, MAX_ENVIRONMENT, "Environment").lower() or "production"
+
+
+def _agent_ids(raw: list[str]) -> list[str]:
+    if len(raw) > MAX_AGENT_IDS:
+        raise bad_request(f"A policy can name at most {MAX_AGENT_IDS} agents")
+    return [item for item in raw if isinstance(item, str) and 0 < len(item) <= MAX_ID]
+
+
+def _instructions(raw: str | None) -> str:
+    return bounded_text(raw, MAX_INSTRUCTIONS, "Instructions")
+
+
+def _cap_tools(count: int) -> None:
+    if count > MAX_LLM_TOOLS:
+        raise bad_request(
+            f"The policy model reviews at most {MAX_LLM_TOOLS} tools at a time. Split the capability set and try again."
+        )
+
+
+def _definition(raw: dict | None) -> dict:
+    """Normalize a client definition and refuse one over the size limits."""
+    if json_size(raw) > MAX_DEFINITION_BYTES:
+        raise bad_request(f"The policy graph is too large: at most {MAX_DEFINITION_BYTES // 1000} KB")
+    definition = normalize_definition(raw)
+    try:
+        rules, _errors = compile_definition(definition, strict=True)
+    except PolicyGraphTooLarge as exc:
+        raise bad_request(str(exc)) from exc
+    if any(len(str(rule["tool"])) > MAX_TOOL_NAME for rule in rules):
+        raise bad_request(f"Tool names must be at most {MAX_TOOL_NAME} characters")
+    return definition
+
+
+def enforce_llm_quota(user_id: str, organization_id: str) -> None:
+    """Each call to these endpoints is billed by the model provider. Bound it per user and per organization."""
+    from app.core.rate_limit import allow
+
+    if not allow(f"policy-llm:user:{user_id}", limit=LLM_USER_LIMIT, window=LLM_WINDOW_SECONDS) or not allow(
+        f"policy-llm:org:{organization_id}", limit=LLM_ORG_LIMIT, window=LLM_WINDOW_SECONDS
+    ):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many policy model requests. Try again later.",
+        )
 
 
 def _rule_payload(rule: PolicyRuleIn, fallback_tool: str | None) -> tuple[str, str, list[dict], str, int | None]:
@@ -35,18 +132,36 @@ def _rule_payload(rule: PolicyRuleIn, fallback_tool: str | None) -> tuple[str, s
         decision = normalize_decision(rule.decision).value
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    structured = [item.model_dump() for item in rule.conditions] if rule.conditions else []
-    condition = (rule.condition or "").strip()
+    if len(rule.conditions or []) > MAX_CONDITIONS_PER_RULE:
+        raise bad_request(f"A rule can have at most {MAX_CONDITIONS_PER_RULE} conditions")
+    structured: list[dict] = []
+    for item in rule.conditions or []:
+        cleaned = clean_condition(item.model_dump())
+        if cleaned is None:
+            raise bad_request(
+                "Each condition needs a field, an operator (gt, gte, lt, lte, eq or ne) and a plain value"
+            )
+        structured.append(cleaned)
+    condition = bounded_text(rule.condition, MAX_CONDITION_TEXT, "Condition")
     if structured:
         condition = compile_condition(structured)
-    elif condition:
+    elif condition and condition.lower() not in {"true", "*"}:
         structured = parse_condition_string(condition)
+        if len(structured) != len(_AND_SPLIT.split(condition)):
+            raise bad_request("Could not read the condition. Use field operator value, joined with AND.")
     else:
         condition = "true"
-    tool = (rule.tool or fallback_tool or "").strip()
+    if len(condition) > MAX_CONDITION_TEXT or json_size(structured) > MAX_CONDITIONS_BYTES:
+        raise bad_request("The rule conditions are too large")
+    tool = bounded_text(rule.tool or fallback_tool or "", MAX_TOOL_NAME, "Tool")
     if not tool:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Each rule needs a tool")
-    return tool, condition, structured, decision, rule.priority
+    priority = rule.priority
+    if priority is not None:
+        # Order inside this policy only. Negative values used to jump ahead of
+        # every other policy's rules, so they are clamped.
+        priority = max(0, min(int(priority), MAX_PRIORITY))
+    return tool, condition, structured, decision, priority
 
 
 def _approval_policy_id(rule: PolicyRule) -> str | None:
@@ -92,6 +207,32 @@ def _flat_conditions(expression: dict | None) -> list[dict] | None:
     return None
 
 
+def _legacy_rule(rule: PolicyRule) -> tuple[dict, str | None]:
+    """A stored legacy rule in the shape the validator reads, and a problem with it if any."""
+    conds = conditions_for(rule)
+    text = (rule.condition or "").strip()
+    problem = None
+    if not conds and text and text.lower() not in {"true", "*"}:
+        problem = f"Could not read a condition on {rule.tool}"
+    expression = {"op": "true"} if not conds else {"op": "and", "args": [{"op": "cmp", **item} for item in conds]}
+    try:
+        decision = normalize_decision(rule.decision).value
+    except ValueError:
+        decision = "deny"
+        problem = f"Unknown decision on {rule.tool}"
+    return (
+        {
+            "id": rule.id,
+            "tool": rule.tool,
+            "expression": expression,
+            "decision": decision,
+            "attributes": rule.attributes if isinstance(rule.attributes, dict) else {},
+            "position": rule.position or 0,
+        },
+        problem,
+    )
+
+
 def serialize_policy(policy: Policy) -> PolicyRead:
     rules = sorted(policy.rules, key=lambda item: item.position)
     definition = policy.definition if isinstance(policy.definition, dict) else None
@@ -127,86 +268,190 @@ class PolicyService:
         result = await session.execute(
             select(Policy)
             .options(selectinload(Policy.rules), selectinload(Policy.agents))
-            .where(Policy.id == policy_id)
+            .where(Policy.id == policy_id, Policy.organization_id == organization_id)
+            # Reload rules and agents that an update in this session replaced.
+            .execution_options(populate_existing=True)
         )
         policy = result.scalar_one_or_none()
-        if policy is None or policy.organization_id != organization_id:
+        if policy is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Policy not found")
         return policy
 
     async def delete_policy(self, session: AsyncSession, policy: Policy) -> None:
+        if _is_default(policy):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "The organization default policy cannot be deleted. Change its rules or pause it instead.",
+            )
         await session.execute(delete(agent_policies).where(agent_policies.c.policy_id == policy.id))
         await session.execute(delete(PolicyRule).where(PolicyRule.policy_id == policy.id))
         await session.delete(policy)
         await session.flush()
 
+    async def _own_tool_set(self, session: AsyncSession, organization_id: str, raw: str | None) -> str | None:
+        from app.models import ToolSet
+
+        value = (raw or "").strip()
+        if not value:
+            return None
+        found = None
+        if len(value) <= MAX_ID:
+            found = await session.scalar(
+                select(ToolSet.id).where(ToolSet.id == value, ToolSet.organization_id == organization_id)
+            )
+        if found is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Capability set not found")
+        return found
+
+    async def _check_approval_policies(self, session: AsyncSession, organization_id: str, ids: set[str]) -> set[str]:
+        """Return the ids that are not approval policies of this organization."""
+        from app.models import ApprovalPolicy
+
+        wanted = {item for item in ids if item}
+        if not wanted:
+            return set()
+        candidates = {item for item in wanted if len(item) <= MAX_ID}
+        found: set[str] = set()
+        if candidates:
+            found = set(
+                (
+                    await session.scalars(
+                        select(ApprovalPolicy.id).where(
+                            ApprovalPolicy.id.in_(candidates),
+                            ApprovalPolicy.organization_id == organization_id,
+                        )
+                    )
+                ).all()
+            )
+        return wanted - found
+
+    async def _prepared_rules(
+        self, session: AsyncSession, organization_id: str, rules: list[PolicyRuleIn], fallback_tool: str | None
+    ) -> list[tuple[PolicyRuleIn, tuple[str, str, list[dict], str, int | None]]]:
+        if len(rules) > MAX_RULES:
+            raise bad_request(f"A policy can have at most {MAX_RULES} rules")
+        prepared = [(rule, _rule_payload(rule, fallback_tool)) for rule in rules]
+        linked = {(rule.approval_policy_id or "").strip() for rule in rules}
+        if await self._check_approval_policies(session, organization_id, linked):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Approval policy not found")
+        return prepared
+
     async def create_policy(
         self, session: AsyncSession, organization_id: str, body: PolicyCreate
     ) -> Policy:
-        ident = body.id or _slug_id("policy", body.name)
-        if await session.get(Policy, ident) is not None:
-            ident = new_id("policy")
-        definition = normalize_definition(body.definition) if body.definition is not None else None
+        name = _name(body.name)
+        description = _description(body.description)
+        environment = _environment(body.environment)
+        agent_ids = _agent_ids(body.agent_ids)
+        definition = _definition(body.definition) if body.definition is not None else None
+        tool_set_id = await self._own_tool_set(session, organization_id, body.tool_set_id)
+        if definition is not None and definition.get("toolSetId"):
+            definition_set = await self._own_tool_set(session, organization_id, definition["toolSetId"])
+            tool_set_id = tool_set_id or definition_set
+        prepared = None
+        if definition is None:
+            prepared = await self._prepared_rules(session, organization_id, body.rules, body.tool)
         policy = Policy(
-            id=ident,
+            # Ids are always generated here. A client-chosen id leaked whether
+            # another organization already used it, and could collide.
+            id=new_id("policy"),
             organization_id=organization_id,
-            name=body.name.strip(),
-            description=(body.description or "").strip(),
-            status="draft" if definition is not None else _status(body.status),
+            name=name,
+            description=description,
+            # Every new policy starts as a draft. It applies to agents only
+            # after validate and activate, where allows must be confirmed.
+            status="draft",
             version=1,
-            environment=(body.environment or "production").strip().lower(),
-            tool_set_id=(body.tool_set_id or (definition or {}).get("toolSetId") or None),
+            environment=environment,
+            tool_set_id=tool_set_id,
             definition=definition,
         )
         session.add(policy)
         await session.flush()
-        await self._set_agents(session, policy.id, organization_id, body.agent_ids)
+        await self._set_agents(session, policy.id, organization_id, agent_ids)
         if definition is not None:
             await self._replace_compiled(session, policy.id, definition)
         else:
-            await self._replace_rules(session, policy.id, body.rules, body.tool)
+            await self._replace_rules(session, policy.id, prepared or [], keep_ids=set())
         await session.flush()
         return await self.get_policy(session, policy.id, organization_id)
 
     async def update_policy(
         self, session: AsyncSession, policy: Policy, body: PolicyUpdate
     ) -> Policy:
-        changed = False
-        if body.name is not None:
-            policy.name = body.name.strip()
-            changed = True
+        from app.features.policy.policies.services.policy_graph import risky_allows
+
+        # Check everything before changing anything: the session is committed
+        # even when the request ends in an HTTP error, so a late 400 must not
+        # leave half of an update behind.
+        organization_id = policy.organization_id
+        name = _name(body.name) if body.name is not None else None
+        description = None
         if body.description is not None:
-            policy.description = body.description.strip()
-            changed = True
+            if _is_default(policy):
+                if body.description.strip() != MARKER:
+                    raise bad_request("The organization default policy keeps its description")
+            else:
+                description = _description(body.description)
+        next_status = None
         if body.status is not None and body.definition is None and body.rules is None:
             next_status = _status(body.status)
-            if next_status == "active" and (policy.status or "") != "validated":
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    "Validate the policy before activating it",
-                )
+            if next_status == "active" and (policy.status or "") != "active":
+                if (policy.status or "") != "validated":
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        "Validate the policy before activating it",
+                    )
+                risky = risky_allows(list(policy.rules))
+                if risky:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        f"Confirm high-risk allows: {', '.join(risky)}",
+                    )
+        environment = _environment(body.environment) if body.environment is not None else None
+        tool_set_id = (
+            await self._own_tool_set(session, organization_id, body.tool_set_id) if body.tool_set_id is not None else None
+        )
+        agent_ids = _agent_ids(body.agent_ids) if body.agent_ids is not None else None
+        definition = None
+        definition_set = None
+        prepared = None
+        if body.definition is not None:
+            definition = _definition(body.definition)
+            if definition.get("toolSetId"):
+                definition_set = await self._own_tool_set(session, organization_id, definition["toolSetId"])
+        elif body.rules is not None:
+            prepared = await self._prepared_rules(session, organization_id, body.rules, body.tool)
+
+        changed = False
+        if name is not None:
+            policy.name = name
+            changed = True
+        if description is not None:
+            policy.description = description
+            changed = True
+        if next_status is not None:
             policy.status = next_status
             changed = True
-        if body.environment is not None:
-            policy.environment = body.environment.strip().lower()
+        if environment is not None:
+            policy.environment = environment
             changed = True
         if body.tool_set_id is not None:
-            policy.tool_set_id = body.tool_set_id or None
+            policy.tool_set_id = tool_set_id
             changed = True
-        if body.agent_ids is not None:
-            await self._set_agents(session, policy.id, policy.organization_id, body.agent_ids)
+        if agent_ids is not None:
+            await self._set_agents(session, policy.id, organization_id, agent_ids)
             changed = True
-        if body.definition is not None:
-            definition = normalize_definition(body.definition)
+        if definition is not None:
+            if definition_set and body.tool_set_id is None:
+                policy.tool_set_id = definition_set
             policy.definition = definition
-            if definition.get("toolSetId") and body.tool_set_id is None:
-                policy.tool_set_id = definition["toolSetId"]
             await self._replace_compiled(session, policy.id, definition)
             if policy.status in {"active", "validated"}:
                 policy.status = "draft"
             changed = True
-        elif body.rules is not None:
-            await self._replace_rules(session, policy.id, body.rules, body.tool)
+        elif prepared is not None:
+            await self._replace_rules(session, policy.id, prepared, keep_ids={rule.id for rule in policy.rules})
             if policy.status in {"active", "validated"}:
                 policy.status = "draft"
             changed = True
@@ -214,7 +459,7 @@ class PolicyService:
             policy.version = (policy.version or 1) + 1
             policy.updated_at = utcnow()
             await session.flush()
-        return await self.get_policy(session, policy.id, policy.organization_id)
+        return await self.get_policy(session, policy.id, organization_id)
 
     async def _set_agents(
         self,
@@ -248,17 +493,25 @@ class PolicyService:
         self,
         session: AsyncSession,
         policy_id: str,
-        rules: list[PolicyRuleIn],
-        fallback_tool: str | None,
+        prepared: list[tuple[PolicyRuleIn, tuple[str, str, list[dict], str, int | None]]],
+        *,
+        keep_ids: set[str],
     ) -> None:
         await session.execute(delete(PolicyRule).where(PolicyRule.policy_id == policy_id))
         await session.flush()
-        for index, rule in enumerate(rules):
-            tool, condition, structured, decision, priority = _rule_payload(rule, fallback_tool)
-            attributes = {"approvalPolicyId": rule.approval_policy_id} if rule.approval_policy_id else None
+        used: set[str] = set()
+        for index, (rule, payload) in enumerate(prepared):
+            tool, condition, structured, decision, priority = payload
+            approval_policy_id = (rule.approval_policy_id or "").strip()
+            attributes = {"approvalPolicyId": approval_policy_id} if approval_policy_id else None
+            # A client id is kept only when it already named a rule of this same
+            # policy, so ids stay stable across edits without letting a client
+            # pick, or probe for, a key another organization holds.
+            ident = rule.id if rule.id and rule.id in keep_ids and rule.id not in used else new_id("rule")
+            used.add(ident)
             session.add(
                 PolicyRule(
-                    id=rule.id or new_id("rule"),
+                    id=ident,
                     policy_id=policy_id,
                     tool=tool,
                     condition=condition,
@@ -272,6 +525,8 @@ class PolicyService:
     async def set_inventory(self, session: AsyncSession, organization_id: str, tool_set_id: str):
         from app.models import Tool, ToolSet, ToolSetItem
 
+        if not tool_set_id or len(tool_set_id) > MAX_ID:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Capability set not found")
         result = await session.execute(
             select(ToolSet)
             .options(
@@ -301,30 +556,34 @@ class PolicyService:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "This capability set has no tools")
         return tool_set, inventory
 
+    def _draft_body(self, tool_set, name: str, used_model: bool, definition: dict) -> PolicyCreate:
+        description = (
+            "Draft proposed from the capability set. Review every tool, then validate and activate it."
+            if used_model
+            else "No policy model is configured. Every tool is unclassified and denied until you review it."
+        )
+        return PolicyCreate(
+            name=(name or "").strip()[:MAX_NAME] or f"{tool_set.name} policy"[:MAX_NAME],
+            description=description,
+            status="draft",
+            tool_set_id=tool_set.id,
+            definition=definition,
+        )
+
     async def generate_from_set(
         self, session: AsyncSession, organization_id: str, tool_set_id: str, name: str, instructions: str = ""
     ) -> Policy:
         from app.features.policy.policies.services.policy_graph import definition_from_analyses
         from app.features.policy.policies.services.policy_llm import analyze_tools
 
+        request = _instructions(instructions)
+        bounded_text(name, MAX_NAME, "Name")
         tool_set, inventory = await self.set_inventory(session, organization_id, tool_set_id)
-        analyses, used_model = await analyze_tools(inventory, instructions)
+        _cap_tools(len(inventory))
+        analyses, used_model = await analyze_tools(inventory, request)
         definition = definition_from_analyses(tool_set.id, analyses)
-        description = (
-            "Draft proposed from the capability set. Review every tool, then validate and activate it."
-            if used_model
-            else "No policy model is configured. Every tool is unclassified and denied until you review it."
-        )
         return await self.create_policy(
-            session,
-            organization_id,
-            PolicyCreate(
-                name=(name or f"{tool_set.name} policy").strip(),
-                description=description,
-                status="draft",
-                tool_set_id=tool_set.id,
-                definition=definition,
-            ),
+            session, organization_id, self._draft_body(tool_set, name, used_model, definition)
         )
 
     async def iter_generate(
@@ -333,11 +592,14 @@ class PolicyService:
         from app.features.policy.policies.services.policy_graph import definition_from_analyses
         from app.features.policy.policies.services.policy_llm import iter_tool_analysis
 
+        request = _instructions(instructions)
+        bounded_text(name, MAX_NAME, "Name")
         tool_set, inventory = await self.set_inventory(session, organization_id, tool_set_id)
+        _cap_tools(len(inventory))
         yield {"type": "status", "code": "reading", "name": tool_set.name, "count": len(inventory)}
         analyses = None
         used_model = False
-        async for kind, payload in iter_tool_analysis(inventory, instructions):
+        async for kind, payload in iter_tool_analysis(inventory, request):
             if kind == "think":
                 yield {"type": "think", "text": payload}
             elif kind == "status":
@@ -347,82 +609,44 @@ class PolicyService:
         if analyses is None:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response")
         definition = definition_from_analyses(tool_set.id, analyses)
-        description = (
-            "Draft proposed from the capability set. Review every tool, then validate and activate it."
-            if used_model
-            else "No policy model is configured. Every tool is unclassified and denied until you review it."
-        )
         policy = await self.create_policy(
-            session,
-            organization_id,
-            PolicyCreate(
-                name=(name or f"{tool_set.name} policy").strip(),
-                description=description,
-                status="draft",
-                tool_set_id=tool_set.id,
-                definition=definition,
-            ),
+            session, organization_id, self._draft_body(tool_set, name, used_model, definition)
         )
         await session.commit()
         yield {"type": "policy", "policy": policy}
 
-    async def optimize_policy(
-        self, session: AsyncSession, policy: Policy, definition: dict, instructions: str = ""
-    ) -> dict:
-        from app.features.policy.policies.services.policy_llm import optimize_definition
-
-        set_id = ""
-        if isinstance(definition, dict):
-            set_id = str(definition.get("toolSetId") or definition.get("tool_set_id") or "")
-        set_id = set_id or (policy.tool_set_id or "")
-        inventory: list[dict] = []
-        if set_id:
-            from app.models import Tool, ToolSet, ToolSetItem
-
-            result = await session.execute(
-                select(ToolSet)
-                .options(selectinload(ToolSet.items).selectinload(ToolSetItem.tool).selectinload(Tool.mcp_server))
-                .where(ToolSet.id == set_id, ToolSet.organization_id == policy.organization_id)
-            )
-            tool_set = result.scalar_one_or_none()
-            if tool_set is not None:
-                for item in tool_set.items or []:
-                    tool = item.tool
-                    if tool is None or tool.status != "active":
-                        continue
-                    server = tool.mcp_server
-                    inventory.append(
-                        {
-                            "name": tool.name,
-                            "description": tool.description or "",
-                            "inputSchema": tool.input_schema or {},
-                            "server": server.name if server is not None else "",
-                        }
-                    )
-        optimized, diff = await optimize_definition(definition, inventory, instructions)
-        return {"definition": optimized, "diff": diff}
-
-    async def iter_optimize(self, session: AsyncSession, policy: Policy, definition: dict, instructions: str = ""):
-        from app.features.policy.policies.services.policy_llm import iter_optimize_definition
-
-        set_id = ""
-        if isinstance(definition, dict):
-            set_id = str(definition.get("toolSetId") or definition.get("tool_set_id") or "")
-        set_id = set_id or (policy.tool_set_id or "")
+    async def _optimize_inputs(
+        self, session: AsyncSession, policy: Policy, definition: dict, instructions: str
+    ) -> tuple[dict, list[dict], str]:
+        request = _instructions(instructions)
+        document = _definition(definition)
+        set_id = str(document.get("toolSetId") or "") or (policy.tool_set_id or "")
         inventory: list[dict] = []
         if set_id:
             try:
                 _tool_set, inventory = await self.set_inventory(session, policy.organization_id, set_id)
             except HTTPException:
                 inventory = []
-        tool_count = len(inventory)
-        if tool_count == 0 and isinstance(definition, dict):
-            tool_count = sum(
-                1 for node in definition.get("nodes") or [] if isinstance(node, dict) and node.get("type") == "tool"
-            )
+        _cap_tools(max(len(inventory), sum(1 for node in document.get("nodes") or [] if node.get("type") == "tool")))
+        return document, inventory, request
+
+    async def optimize_policy(
+        self, session: AsyncSession, policy: Policy, definition: dict, instructions: str = ""
+    ) -> dict:
+        from app.features.policy.policies.services.policy_llm import optimize_definition
+
+        document, inventory, request = await self._optimize_inputs(session, policy, definition, instructions)
+        optimized, diff = await optimize_definition(document, inventory, request)
+        return {"definition": optimized, "diff": diff}
+
+    async def iter_optimize(self, session: AsyncSession, policy: Policy, definition: dict, instructions: str = ""):
+        from app.features.policy.policies.services.policy_llm import iter_optimize_definition
+
+        document, inventory, request = await self._optimize_inputs(session, policy, definition, instructions)
+        tool_count = len(inventory) or sum(1 for node in document.get("nodes") or [] if node.get("type") == "tool")
         yield {"type": "status", "code": "optimizing", "total": tool_count}
         outcome = None
-        async for kind, payload in iter_optimize_definition(definition, inventory, instructions):
+        async for kind, payload in iter_optimize_definition(document, inventory, request):
             if kind == "think":
                 yield {"type": "think", "text": payload}
             elif kind == "result":
@@ -450,12 +674,37 @@ class PolicyService:
         )
 
     async def validate_policy(self, session: AsyncSession, policy: Policy) -> dict:
-        from app.features.policy.policies.services.policy_graph import validate_definition
+        from app.features.policy.policies.services.policy_graph import validate_definition, validate_rules
 
         names = []
         if policy.tool_set_id:
             names = await self._set_tool_names(session, policy.organization_id, policy.tool_set_id)
-        report = validate_definition(policy.definition or {"nodes": [], "edges": [], "analyses": []}, names)
+        if isinstance(policy.definition, dict):
+            report = validate_definition(policy.definition, names)
+        else:
+            # Legacy rules: first match by position inside this policy.
+            shaped = [_legacy_rule(rule) for rule in policy.rules]
+            report = validate_rules(
+                [rule for rule, _problem in shaped],
+                names,
+                structure_errors=[problem for _rule, problem in shaped if problem],
+                ordered=True,
+            )
+        linked: dict[str, str] = {}
+        for rule in policy.rules:
+            ident = _approval_policy_id(rule)
+            if ident:
+                linked.setdefault(ident, rule.tool)
+        for ident in sorted(await self._check_approval_policies(session, policy.organization_id, set(linked))):
+            report["issues"].append(
+                {
+                    "level": "error",
+                    "code": "approval_policy",
+                    "tool": linked[ident],
+                    "message": f"{linked[ident]} links an approval policy that does not exist",
+                }
+            )
+            report["ok"] = False
         if report["ok"] and policy.status != "active":
             policy.status = "validated"
             policy.version = (policy.version or 1) + 1
@@ -513,7 +762,10 @@ class PolicyService:
         }
 
     async def _replace_compiled(self, session: AsyncSession, policy_id: str, definition: dict) -> None:
-        compiled, _errors = compile_definition(definition)
+        try:
+            compiled, _errors = compile_definition(definition, strict=True)
+        except PolicyGraphTooLarge as exc:
+            raise bad_request(str(exc)) from exc
         await session.execute(delete(PolicyRule).where(PolicyRule.policy_id == policy_id))
         await session.flush()
         for index, rule in enumerate(compiled):
@@ -521,6 +773,8 @@ class PolicyService:
                 decision = normalize_decision(rule["decision"]).value
             except ValueError as exc:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+            if len(str(rule["tool"])) > MAX_TOOL_NAME:
+                raise bad_request(f"Tool names must be at most {MAX_TOOL_NAME} characters")
             expression = rule.get("expression") if isinstance(rule.get("expression"), dict) else {"op": "true"}
             flat = _flat_conditions(expression)
             structured = flat or []
@@ -529,7 +783,7 @@ class PolicyService:
                 PolicyRule(
                     id=new_id("rule"),
                     policy_id=policy_id,
-                    tool=rule["tool"],
+                    tool=str(rule["tool"]),
                     condition=condition,
                     conditions=structured or None,
                     expression=expression,

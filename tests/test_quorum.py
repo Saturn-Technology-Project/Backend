@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from tests.oauth_access import oauth_access
+from tests.policy_helpers import activate_created
 
 
 async def _people(client):
@@ -83,7 +84,7 @@ async def _quorum_tool(client, monkeypatch, *, expires_minutes=None, allow_reque
             ],
         },
     )
-    assert rule.status_code == 201, rule.text
+    await activate_created(client, rule)
     access = await oauth_access(client, "Pay Agent")
     opened = await client.post(
         "/mcp",
@@ -394,7 +395,7 @@ async def test_payment_needs_finance_and_admin(client, monkeypatch):
             ],
         },
     )
-    assert rule.status_code == 201, rule.text
+    await activate_created(client, rule)
     access = await oauth_access(client, "Pay Agent")
     opened = await client.post(
         "/mcp",

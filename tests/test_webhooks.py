@@ -8,6 +8,7 @@ from app.features.webhooks.services.signing import sign
 from app.features.webhooks.services.webhook_service import _public_error
 from fastapi import HTTPException
 from tests.oauth_access import oauth_access
+from tests.policy_helpers import activate_created
 from tests.test_quorum import _auth, _quorum_tool, _request
 
 
@@ -115,7 +116,7 @@ async def _deferred(client, monkeypatch, *, expires_minutes=None, resubmit_minut
             ],
         },
     )
-    assert rule.status_code == 201, rule.text
+    await activate_created(client, rule)
     access = await oauth_access(client, "Pay Agent")
     opened = await client.post(
         "/mcp",
