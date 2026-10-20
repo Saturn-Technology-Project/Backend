@@ -76,7 +76,9 @@ curl -s -X POST localhost:8000/org/invites \
   -d '{"email":"ops@saturn.ai","name":"Ops","role":"operator"}'
 ```
 
-The invite response includes a one-time `token`. The member sets a password with `POST /auth/accept-invite`. An org must keep at least one admin (`team.write`).
+The invite link is emailed to the invitee. The response includes the one-time `token` only in local development (`IN_PROCESS_RUNTIME=true` without `K_SERVICE`). The member sets a password with `POST /auth/accept-invite`. An org must keep at least one admin (`team.write`).
+
+Accounts with an authenticator app must finish sign-in with `POST /auth/login/totp` when `/auth/login` returns `mfa_required` with `methods` containing `totp`.
 
 ## Platform admin
 

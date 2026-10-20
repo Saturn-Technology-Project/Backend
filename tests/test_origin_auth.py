@@ -25,3 +25,15 @@ async def test_matching_origin_header_is_accepted(client, monkeypatch):
 async def test_healthz_does_not_require_the_origin_header(client, monkeypatch):
     monkeypatch.setenv("ORIGIN_AUTH_SECRET", "expected-value")
     assert (await client.get("/healthz")).status_code == 200
+
+
+def test_previous_origin_secret_still_works_during_rotation(monkeypatch):
+    from app.core.origin_auth import origin_allowed
+
+    monkeypatch.setenv("K_SERVICE", "saturn-backend")
+    monkeypatch.setenv("ORIGIN_AUTH_SECRET", "new-secret")
+    monkeypatch.setenv("ORIGIN_AUTH_SECRET_PREVIOUS", "old-secret")
+    assert origin_allowed("/health", {"X-Saturn-Origin-Auth": "new-secret"})
+    assert origin_allowed("/health", {"X-Saturn-Origin-Auth": "old-secret"})
+    assert not origin_allowed("/health", {"X-Saturn-Origin-Auth": "other"})
+    assert not origin_allowed("/health", {"X-Saturn-Origin-Auth": ""})

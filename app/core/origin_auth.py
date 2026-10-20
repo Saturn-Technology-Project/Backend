@@ -23,11 +23,12 @@ def origin_allowed(path: str, headers) -> bool:
         # Local and tests leave the secret unset. Cloud Run must fail closed.
         return not os.environ.get("K_SERVICE")
     name = os.environ.get("ORIGIN_AUTH_HEADER", DEFAULT_HEADER)
-    presented = headers.get(name, "")
-    return hmac.compare_digest(
-        hashlib.sha256(presented.encode()).digest(),
-        hashlib.sha256(expected.encode()).digest(),
-    )
+    presented = hashlib.sha256(headers.get(name, "").encode()).digest()
+    # During a rotation the previous secret is still accepted, so Cloudflare and Cloud Run
+    # can be updated one after the other without a window of 403s.
+    accepted = [expected, os.environ.get("ORIGIN_AUTH_SECRET_PREVIOUS", "")]
+    matches = [hmac.compare_digest(presented, hashlib.sha256(value.encode()).digest()) for value in accepted if value]
+    return any(matches)
 
 
 class OriginAuthMiddleware(BaseHTTPMiddleware):
