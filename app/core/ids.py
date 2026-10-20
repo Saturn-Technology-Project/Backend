@@ -7,4 +7,5 @@ def utcnow() -> datetime:
 
 
 def new_id(prefix: str) -> str:
-    return f"{prefix}_{secrets.token_hex(4)}"
+    # 128 random bits. Ids are primary keys and appear in links, so they must not collide or be guessable.
+    return f"{prefix}_{secrets.token_hex(16)}"
