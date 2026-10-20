@@ -153,13 +153,17 @@ async def test_github_401_asks_for_sign_in_instead_of_failing(monkeypatch):
         async def __aexit__(self, *args):
             return None
 
-        async def post(self, *args, **kwargs):
+        def build_request(self, method, url, **kwargs):
+            return httpx.Request(method, url, **kwargs)
+
+        async def send(self, request, **kwargs):
             return httpx.Response(
                 401,
                 headers={
                     "www-authenticate": 'Bearer resource_metadata="https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/"'
                 },
                 text="bad request: missing required Authorization header",
+                request=request,
             )
 
     monkeypatch.setattr("app.features.mcp.servers.services.mcp_remote.httpx.AsyncClient", Client)

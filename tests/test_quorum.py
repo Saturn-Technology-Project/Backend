@@ -163,6 +163,8 @@ async def test_two_distinct_approvals_execute_once(client, monkeypatch):
 
     resumed = await _request(client, access, agent_id, {"amount": 900}, run_id=body["error"]["data"]["saturnRunId"])
     assert resumed["result"]["tool"] == "pay.send"
+    # The upstream received the approved arguments, not a digest record.
+    assert resumed["result"]["echo"] == {"amount": 900}
     assert calls["n"] == 1
 
     events = {item["event"] for item in (await client.get("/activity")).json()}
@@ -245,9 +247,12 @@ async def test_expired_and_uncertain_upstream_do_not_retry(client, monkeypatch):
     assert expired.status_code == 409, expired.text
     monkeypatch.setattr(approval_module, "utcnow", real_now)
 
+    from app.features.mcp.servers.services.mcp_remote import McpTimeout
+
     async def timeout(endpoint, name, arguments, authorization=""):
+        # What mcp_remote raises when tools/call was sent but no answer came back.
         calls["n"] += 1
-        raise TimeoutError("upstream timed out")
+        raise McpTimeout("MCP server did not answer (ReadTimeout)")
 
     monkeypatch.setattr("app.features.mcp.saturn.services.saturn_mcp.call_remote_tool", timeout)
     uncertain_body = await _request(client, access, agent_id, {"amount": 9})
@@ -439,6 +444,7 @@ async def test_payment_needs_finance_and_admin(client, monkeypatch):
     assert calls["n"] == 1
     resumed = await _request(client, access, agent_id, {"amount": 900}, run_id=body["error"]["data"]["saturnRunId"])
     assert resumed["result"]["tool"] == "pay.send"
+    assert resumed["result"]["echo"] == {"amount": 900}
     assert calls["n"] == 1
 
 

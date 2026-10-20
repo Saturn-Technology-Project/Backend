@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from app.features.identity.auth.controllers.deps import ActorDep, AgentsRead, AgentsWrite, CurrentUser, SessionDep
+from app.features.organization.org.services.access import may_edit_agent
+from app.models import Agent
 from app.features.identity.auth.services.notices import finish_task_notice
 from app.schemas import ActionRead, RunCreate, RunRead
 from app.features.execution.runs.services.run_service import pending_approval_id, run_service
@@ -38,12 +40,18 @@ async def get_run(run_id: str, session: SessionDep, user: CurrentUser, _access: 
 
 class TaskNotice(BaseModel):
     status: str = Field(pattern="^(completed|failed)$")
-    summary: str = ""
+    summary: str = Field(default="", max_length=240)
 
 
 @router.post("/{run_id}/notice", status_code=204)
-async def finish_task(run_id: str, body: TaskNotice, session: SessionDep, user: CurrentUser, _access: AgentsRead):
-    await finish_task_notice(session, user.organization_id, run_id, body.status, body.summary)
+async def finish_task(run_id: str, body: TaskNotice, session: SessionDep, user: CurrentUser, employee: AgentsRead):
+    # Same access check as GET /runs/{run_id}; this also returns 404 for another org's run.
+    run = await run_service.get_run(session, user, run_id)
+    agent = await session.get(Agent, run.agent_id)
+    owner = agent is not None and (agent.settings or {}).get("registered_user_id") == user.id
+    if not owner and not may_edit_agent(employee, run.agent_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the agent owner or an agent editor can send task notices")
+    await finish_task_notice(session, user.organization_id, run.id, body.status, body.summary)
     return Response(status_code=204)
 
 

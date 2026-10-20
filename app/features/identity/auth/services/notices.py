@@ -47,18 +47,17 @@ async def finish_task_notice(
     requested: str,
     summary: str = "",
 ) -> None:
+    # Only a real run of this organization; ids that appear only in audit payloads are agent-chosen.
     run = await session.get(Run, execution_id)
-    if run is not None and run.organization_id != organization_id:
+    if run is None or run.organization_id != organization_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
-    if run is not None and run.status == RunStatus.WAITING_APPROVAL:
+    if run.status == RunStatus.WAITING_APPROVAL:
         raise HTTPException(status.HTTP_409_CONFLICT, "Task is waiting for approval")
-    if run is not None and run.status in {RunStatus.QUEUED, RunStatus.RUNNING} and requested == "completed":
+    if run.status in {RunStatus.QUEUED, RunStatus.RUNNING} and requested == "completed":
         raise HTTPException(status.HTTP_409_CONFLICT, "Task is still running")
     rows = await _task_rows(session, organization_id, execution_id)
-    if run is None and not rows:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Task not found")
     outcome = requested
-    if run is not None and run.status in {RunStatus.FAILED, RunStatus.CANCELLED}:
+    if run.status in {RunStatus.FAILED, RunStatus.CANCELLED}:
         outcome = "failed"
     if _blocked(rows):
         outcome = "failed"
@@ -69,7 +68,7 @@ async def finish_task_notice(
         outcome,
         rows,
         run,
-        summary=_public_text(summary, 240),
+        summary=_summary_text(summary),
     )
 
 
@@ -452,6 +451,20 @@ def _public_text(value: str, limit: int) -> str:
         return ""
     if len(text) > limit:
         return text[:limit].rstrip() + "…"
+    return text
+
+
+_LINKISH = re.compile(
+    r"(://|www\.|@|\b[a-z0-9-]+\.(?:[a-z]{2,24})(?:/|\b)|[<>\[\]{}`\\])",
+    re.IGNORECASE,
+)
+
+
+def _summary_text(value: str) -> str:
+    """A caller-written summary goes to every member by email, so it may not carry links, addresses or markup."""
+    text = _public_text(value, 240)
+    if not text or _LINKISH.search(text) or any(not char.isprintable() for char in text):
+        return ""
     return text
 
 

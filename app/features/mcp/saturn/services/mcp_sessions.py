@@ -66,16 +66,45 @@ class McpSessionHub:
             await self._redis.aclose()
             self._redis = None
 
-    async def open(self, session_id: str, user_id: str, agent_id: str, client_id: str) -> McpSession:
+    async def open(self, session_id: str, user_id: str, agent_id: str, client_id: str) -> McpSession | None:
+        """Record a session id the server just issued. An id that already exists is never taken over."""
+        if not session_id:
+            return None
         if self._redis is None:
-            return self._open_local(session_id, user_id, agent_id, client_id)
-        owner_key = f"saturn:mcp:owner:{agent_id}:{client_id}"
-        previous = await self._redis.get(owner_key)
-        if previous and previous != session_id:
-            await self._redis.delete(f"saturn:mcp:session:{previous}")
-            self._close_local(previous)
-            await self._redis.publish(CHANNEL, json.dumps({"kind": "close", "session_id": previous}))
-        payload = json.dumps(
+            if session_id in self._items:
+                return self._local_get(session_id, user_id, client_id)
+            self._evict_local(session_id, agent_id, client_id)
+            return self._attach(session_id, user_id, agent_id, client_id)
+        payload = self._record(session_id, user_id, agent_id, client_id)
+        created = await self._redis.set(f"saturn:mcp:session:{session_id}", payload, ex=SESSION_TTL, nx=True)
+        if not created:
+            return await self.get(session_id, user_id, client_id)
+        await self._claim_owner(session_id, agent_id, client_id)
+        return self._attach(session_id, user_id, agent_id, client_id)
+
+    async def bind(self, session_id: str, user_id: str, agent_id: str, client_id: str) -> McpSession | None:
+        """Point an existing session at the agent it now serves. Unknown or foreign ids are ignored."""
+        record = await self.get(session_id, user_id, client_id)
+        if record is None:
+            return None
+        if record.agent_id == agent_id:
+            return record
+        record.agent_id = agent_id
+        if self._redis is None:
+            self._evict_local(session_id, agent_id, client_id)
+            return record
+        await self._redis.set(
+            f"saturn:mcp:session:{session_id}",
+            self._record(session_id, user_id, agent_id, client_id),
+            ex=SESSION_TTL,
+            xx=True,
+        )
+        await self._claim_owner(session_id, agent_id, client_id)
+        return record
+
+    @staticmethod
+    def _record(session_id: str, user_id: str, agent_id: str, client_id: str) -> str:
+        return json.dumps(
             {
                 "session_id": session_id,
                 "user_id": user_id,
@@ -83,9 +112,18 @@ class McpSessionHub:
                 "client_id": client_id,
             }
         )
-        await self._redis.set(f"saturn:mcp:session:{session_id}", payload, ex=SESSION_TTL)
+
+    async def _claim_owner(self, session_id: str, agent_id: str, client_id: str) -> None:
+        assert self._redis is not None
+        if not agent_id:
+            return
+        owner_key = f"saturn:mcp:owner:{agent_id}:{client_id}"
+        previous = await self._redis.get(owner_key)
+        if previous and previous != session_id:
+            await self._redis.delete(f"saturn:mcp:session:{previous}")
+            self._close_local(previous)
+            await self._redis.publish(CHANNEL, json.dumps({"kind": "close", "session_id": previous}))
         await self._redis.set(owner_key, session_id, ex=SESSION_TTL)
-        return self._attach(session_id, user_id, agent_id, client_id)
 
     async def get(self, session_id: str, user_id: str, client_id: str) -> McpSession | None:
         local = self._local_get(session_id, user_id, client_id)
@@ -124,21 +162,21 @@ class McpSessionHub:
         for session_id in list(self._items):
             self._close_local(session_id)
 
-    def _open_local(self, session_id: str, user_id: str, agent_id: str, client_id: str) -> McpSession:
-        current = self._local_get(session_id, user_id, client_id)
-        if current is not None:
-            current.agent_id = agent_id
-            return current
+    def _evict_local(self, session_id: str, agent_id: str, client_id: str) -> None:
+        if not agent_id:
+            return
         for sid, item in list(self._items.items()):
             if sid != session_id and item.agent_id == agent_id and item.client_id == client_id:
                 self._close_local(sid)
-        return self._attach(session_id, user_id, agent_id, client_id)
 
-    def _attach(self, session_id: str, user_id: str, agent_id: str, client_id: str) -> McpSession:
-        current = self._local_get(session_id, user_id, client_id)
-        if current is not None:
-            current.agent_id = agent_id
-            return current
+    def _attach(self, session_id: str, user_id: str, agent_id: str, client_id: str) -> McpSession | None:
+        existing = self._items.get(session_id)
+        if existing is not None:
+            # Another caller's record keeps its owner.
+            if existing.user_id != user_id or existing.client_id != client_id:
+                return None
+            existing.agent_id = agent_id
+            return existing
         record = McpSession(
             session_id=session_id,
             user_id=user_id,
