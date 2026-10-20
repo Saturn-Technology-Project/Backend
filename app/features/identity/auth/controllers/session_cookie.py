@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import Request, Response
 
 from app.core.config import get_settings
@@ -7,12 +9,16 @@ from app.core.config import get_settings
 COOKIE_NAME = "saturn_session"
 
 
-def _secure(request: Request) -> bool:
-    origin = request.headers.get("origin", "")
-    if origin.startswith("http://"):
-        return False
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-    return proto != "http"
+def cookie_secure(request: Request) -> bool:
+    """Secure everywhere except a plain-http local run.
+
+    Production always sets Secure. Request headers (Origin, X-Forwarded-Proto) cannot turn it off there.
+    """
+    if os.environ.get("K_SERVICE", "").strip():
+        return True
+    if request.url.scheme == "https":
+        return True
+    return request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
 
 
 def set_session_cookie(response: Response, request: Request, token: str) -> None:
@@ -21,7 +27,7 @@ def set_session_cookie(response: Response, request: Request, token: str) -> None
         key=COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=_secure(request),
+        secure=cookie_secure(request),
         samesite="lax",
         path="/",
         max_age=settings.session_ttl_days * 24 * 60 * 60,
@@ -33,6 +39,6 @@ def clear_session_cookie(response: Response, request: Request) -> None:
         key=COOKIE_NAME,
         path="/",
         httponly=True,
-        secure=_secure(request),
+        secure=cookie_secure(request),
         samesite="lax",
     )

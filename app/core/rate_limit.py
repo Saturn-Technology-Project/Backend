@@ -1,3 +1,4 @@
+import os
 import time
 from collections import defaultdict
 
@@ -7,15 +8,38 @@ from app.core.config import get_settings
 
 WINDOW_SECONDS = 600
 MAX_HITS = 20
+_PRUNE_EVERY = 1024
 
 _hits: dict[str, list[float]] = defaultdict(list)
+_calls = 0
 _redis = None
+
+# INCR and EXPIRE in one step, so a key can never be left without a TTL.
+_INCR_WITH_TTL = """
+local count = redis.call('INCR', KEYS[1])
+if redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"""
+
+
+def behind_cloudflare() -> bool:
+    """CF-Connecting-IP is only meaningful when every request must carry the Cloudflare origin secret."""
+    return bool(os.environ.get("ORIGIN_AUTH_SECRET", "").strip())
 
 
 def client_ip(request: Request) -> str:
-    cf_ip = request.headers.get("cf-connecting-ip", "").strip()
-    if cf_ip:
-        return cf_ip
+    """The address used for rate limits and throttles.
+
+    Cloudflare overwrites CF-Connecting-IP, so it is trusted only when origin auth proves the request came
+    through Cloudflare. Otherwise the rightmost X-Forwarded-For entry is the one the nearest proxy appended.
+    Any value a client chose itself is never used.
+    """
+    if behind_cloudflare():
+        cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+        if cf_ip:
+            return cf_ip
     forwarded = request.headers.get("x-forwarded-for", "")
     parts = [part.strip() for part in forwarded.split(",") if part.strip()]
     if parts:
@@ -35,12 +59,30 @@ def _redis_client():
     if _redis is None:
         import redis
 
-        _redis = redis.Redis.from_url(get_settings().redis_url)
+        # Short timeouts: the client is synchronous, so a slow Redis must not stall the event loop.
+        _redis = redis.Redis.from_url(
+            get_settings().redis_url,
+            socket_timeout=0.5,
+            socket_connect_timeout=0.5,
+        )
     return _redis
 
 
+def _prune(now: float, window: int) -> None:
+    for key in list(_hits):
+        kept = [stamp for stamp in _hits[key] if now - stamp < max(window, WINDOW_SECONDS)]
+        if kept:
+            _hits[key] = kept
+        else:
+            del _hits[key]
+
+
 def _memory_allow(key: str, *, limit: int, window: int) -> bool:
+    global _calls
     now = time.monotonic()
+    _calls += 1
+    if _calls % _PRUNE_EVERY == 0:
+        _prune(now, window)
     bucket = [stamp for stamp in _hits[key] if now - stamp < window]
     if len(bucket) >= limit:
         _hits[key] = bucket
@@ -52,9 +94,7 @@ def _memory_allow(key: str, *, limit: int, window: int) -> bool:
 
 def _redis_allow(key: str, *, limit: int, window: int) -> bool:
     client = _redis_client()
-    count = int(client.incr(f"saturn:rate:{key}"))
-    if count == 1:
-        client.expire(f"saturn:rate:{key}", window)
+    count = int(client.eval(_INCR_WITH_TTL, 1, f"saturn:rate:{key}", int(window)))
     return count <= limit
 
 
@@ -73,15 +113,29 @@ def registration_allowed(request: Request) -> bool:
     return allow(f"oauth-register:{client_ip(request)}")
 
 
-def login_allowed(request: Request) -> bool:
-    return allow(f"login:{client_ip(request)}")
+def login_allowed(request: Request, email: str | None = None) -> bool:
+    if not allow(f"login:{client_ip(request)}"):
+        return False
+    if email is None:
+        return True
+    # Per account, so rotating addresses does not give unlimited guesses against one user.
+    return allow(f"login-account:{email.strip().lower()}", limit=10, window=WINDOW_SECONDS)
 
 
 def migration_allowed(request: Request) -> bool:
-    return allow(f"login-migration:{client_ip(request)}", limit=8)
+    return allow(f"login-migration:{client_ip(request)}", limit=24)
+
+
+def reauth_allowed(user_id: str) -> bool:
+    return allow(f"reauth:{user_id}", limit=8, window=900)
+
+
+def accept_invite_allowed(request: Request) -> bool:
+    return allow(f"accept-invite:{client_ip(request)}", limit=20)
 
 
 def reset() -> None:
+    global _redis, _calls
     _hits.clear()
-    global _redis
+    _calls = 0
     _redis = None

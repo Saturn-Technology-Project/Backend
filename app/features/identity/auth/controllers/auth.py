@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.features.agent.agents.controllers.agents import serialize_agent
-from app.core.rate_limit import login_allowed, migration_allowed, registration_allowed
+from app.core.rate_limit import (
+    accept_invite_allowed,
+    login_allowed,
+    migration_allowed,
+    reauth_allowed,
+    registration_allowed,
+)
 from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep
 from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME, clear_session_cookie, set_session_cookie
 from app.features.mcp.servers.controllers.mcp_servers import serialize_mcp_server
@@ -69,6 +77,19 @@ from app.features.tooling.tool_sets.services.tool_set_service import tool_set_se
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _bearer = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
+
+
+async def _send_quietly(sender, *args) -> None:
+    """Send after the response. Whether an email exists must not show in the status code or the timing."""
+    try:
+        await sender(*args)
+    except HTTPException as exc:
+        logger.warning("Could not send an account email: %s", exc.detail)
+
+
+def _too_many(retry_after: str = "600") -> HTTPException:
+    return HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts", headers={"Retry-After": retry_after})
 
 
 def serialize_org_user(employee: Employee) -> OrgUserRead:
@@ -184,7 +205,7 @@ async def _begin_mfa(session, user: User, locale: str | None) -> LoginResponse |
 
 
 @router.post("/register/code", status_code=204)
-async def register_code(body: SignupCodeRequest, request: Request, session: SessionDep):
+async def register_code(body: SignupCodeRequest, request: Request, session: SessionDep, background: BackgroundTasks):
     if not registration_allowed(request):
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
@@ -200,11 +221,7 @@ async def register_code(body: SignupCodeRequest, request: Request, session: Sess
     )
     if not code:
         return
-    try:
-        await send_signup_code(body.email.strip().lower(), code, body.locale)
-    except HTTPException:
-        await mfa_service.discard_signup(session, body.email)
-        raise
+    background.add_task(_send_quietly, send_signup_code, body.email.strip().lower(), code, body.locale)
 
 
 @router.post("/register", response_model=LoginResponse, status_code=201)
@@ -242,6 +259,9 @@ async def login_migration(body: LoginRequest, request: Request, session: Session
     normalized = body.email.strip().lower()
     user = await session.scalar(select(User).where(User.email == normalized))
     if user is None or user.status != "active":
+        from app.features.identity.auth.services.auth_service import _DUMMY_HASH
+
+        verify_password(body.password, _DUMMY_HASH)
         return {}
     stored = user.password_hash
     if verify_password(body.password, stored):
@@ -262,7 +282,7 @@ async def login_migration(body: LoginRequest, request: Request, session: Session
 
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest, request: Request, response: Response, session: SessionDep):
-    if not login_allowed(request):
+    if not login_allowed(request, body.email):
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "Too many attempts",
@@ -284,6 +304,17 @@ async def login(body: LoginRequest, request: Request, response: Response, sessio
 @router.post("/login/email", response_model=LoginResponse)
 async def login_email(body: LoginEmailRequest, request: Request, response: Response, session: SessionDep):
     user = await mfa_service.finish_email(session, body.challenge, body.code)
+    return await _issue_login(session, request, response, user)
+
+
+class LoginTotpRequest(BaseModel):
+    challenge: str
+    code: str
+
+
+@router.post("/login/totp", response_model=LoginResponse)
+async def login_totp(body: LoginTotpRequest, request: Request, response: Response, session: SessionDep):
+    user = await mfa_service.finish_totp(session, body.challenge, body.code)
     return await _issue_login(session, request, response, user)
 
 
@@ -430,6 +461,8 @@ async def reauthenticate(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
     token = _presented_token(request, creds)
+    if not reauth_allowed(user.id):
+        raise _too_many("900")
     if body.password:
         if not verify_password(body.password, user.password_hash):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
@@ -529,14 +562,18 @@ async def update_me(
 ):
     pending = False
     next_email = body.email.strip().lower()
-    await auth_service.update_profile(session, user, name=body.name, email=user.email)
-    if next_email != user.email:
+    changing = next_email != user.email
+    if changing:
+        # Check before writing anything: the session commits on HTTPException.
         await auth_service.require_recent_auth(session, _presented_token(request, creds))
+    await auth_service.update_profile(session, user, name=body.name, email=user.email)
+    if changing:
         current_code, next_code = await mfa_service.begin_email_change(session, user, next_email)
         pending = True
         try:
             await send_email_change_code(user.email, current_code, "email_current", user.locale)
-            await send_email_change_code(next_email, next_code, "email_next", user.locale)
+            if next_code is not None:
+                await send_email_change_code(next_email, next_code, "email_next", user.locale)
         except HTTPException:
             await mfa_service.discard_email_change(session, user)
             raise
@@ -549,6 +586,8 @@ async def update_me(
 
 @router.post("/accept-invite", response_model=LoginResponse)
 async def accept_invite(body: AcceptInviteRequest, request: Request, response: Response, session: SessionDep):
+    if not accept_invite_allowed(request):
+        raise _too_many()
     user = await member_service.accept_invite(session, body.token, body.password)
     await mapping_service.bind_workspace(session, user)
     token, user = await auth_service.issue_session(session, user)
@@ -557,16 +596,13 @@ async def accept_invite(body: AcceptInviteRequest, request: Request, response: R
 
 
 @router.post("/forgot-password", status_code=204)
-async def forgot_password(body: ForgotPasswordRequest, request: Request, session: SessionDep):
+async def forgot_password(body: ForgotPasswordRequest, request: Request, session: SessionDep, background: BackgroundTasks):
     code = await auth_service.request_password_reset(session, body.email, request)
     if not code:
         return
     account = await session.scalar(select(User).where(User.email == body.email.strip().lower()))
-    try:
-        await send_reset_code(body.email, code, account.locale if account is not None else body.locale)
-    except HTTPException:
-        await auth_service.discard_password_reset(session, body.email)
-        raise
+    locale = account.locale if account is not None else body.locale
+    background.add_task(_send_quietly, send_reset_code, body.email.strip().lower(), code, locale)
 
 
 @router.post("/reset-password", status_code=204)

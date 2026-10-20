@@ -153,14 +153,18 @@ class MfaService:
         user.email_mfa = False
         await session.flush()
 
-    async def begin_email_change(self, session: AsyncSession, user: User, email: str) -> tuple[str, str]:
+    async def begin_email_change(self, session: AsyncSession, user: User, email: str) -> tuple[str, str | None]:
+        """Returns the code for the current address and, when the new address is free, the code for it.
+
+        A taken address gets no code and no email, but the caller sees the same response, so this
+        cannot be used to find out which addresses have accounts. Confirmation then fails.
+        """
         normalized = _email(email)
         if normalized == user.email:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email is invalid")
         existing = await session.execute(select(User).where(User.email == normalized))
         other = existing.scalar_one_or_none()
-        if other is not None and other.id != user.id:
-            raise HTTPException(status.HTTP_409_CONFLICT, "Email is already used")
+        taken = other is not None and other.id != user.id
         await self._throttle(session, user.email, "email_current")
         await self._close_open(session, user.email, "email_current")
         await self._close_open(session, normalized, "email_next")
@@ -181,6 +185,10 @@ class MfaService:
                 attempts=0,
             )
         )
+        if taken:
+            hash_password(next_code)
+            await session.flush()
+            return current_code, None
         session.add(
             EmailCode(
                 id=new_id("eml"),
@@ -235,8 +243,12 @@ class MfaService:
                     record.used_at = now
             await session.flush()
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        taken = await session.scalar(select(User).where(User.email == pending, User.id != user.id))
         current.used_at = now
         nxt.used_at = now
+        if taken is not None:
+            await session.flush()
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
         user.email = pending
         await session.flush()
 
@@ -278,8 +290,12 @@ class MfaService:
 
     async def factors(self, session: AsyncSession, user: User) -> list[str]:
         methods: list[str] = []
-        if user.email_mfa:
+        totp = bool(user.totp_enabled and user.totp_secret)
+        # An authenticator app replaces the weaker emailed code; it is never offered alongside it.
+        if user.email_mfa and not totp:
             methods.append("email")
+        if totp:
+            methods.append("totp")
         count = await session.scalar(
             select(func.count()).select_from(Passkey).where(Passkey.user_id == user.id)
         )
@@ -291,14 +307,10 @@ class MfaService:
         self,
         session: AsyncSession,
         user: User,
-        *,
-        include_email: bool = False,
     ) -> tuple[str, list[str], str | None] | None:
         methods = await self.factors(session, user)
         if not methods:
             return None
-        if include_email and "email" not in methods:
-            methods = ["email", *methods]
         await self._throttle_login(session, user.id)
         code = _new_code() if "email" in methods else None
         raw = secrets.token_urlsafe(32)
@@ -352,6 +364,25 @@ class MfaService:
             record.used_at = utcnow()
             await session.flush()
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        record.used_at = utcnow()
+        await session.flush()
+        return user
+
+    async def finish_totp(self, session: AsyncSession, token: str, code: str) -> User:
+        from app.features.identity.auth.services.totp import verify_user_totp
+
+        record = await self._live_challenge(session, token)
+        user = await self._user(session, record.user_id)
+        if user is None or not (user.totp_enabled and user.totp_secret):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        try:
+            await verify_user_totp(session, user, code)
+        except HTTPException:
+            record.attempts += 1
+            if record.attempts >= MAX_ATTEMPTS:
+                record.used_at = utcnow()
+            await session.flush()
+            raise
         record.used_at = utcnow()
         await session.flush()
         return user

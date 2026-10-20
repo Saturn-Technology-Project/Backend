@@ -35,6 +35,16 @@ async def oauth_tokens(
         data={**query, "email": email, "password": password},
         follow_redirects=False,
     )
+    if signed.status_code == 200 and 'name="method" value="totp"' in signed.text:
+        from tests.totp_access import SECRETS, next_code
+
+        challenge = re.search(r'name="challenge" value="([^"]+)"', signed.text)
+        assert challenge is not None and email in SECRETS, signed.text
+        signed = await client.post(
+            "/oauth/login/code",
+            data={**query, "challenge": challenge.group(1), "method": "totp", "code": next_code(SECRETS[email])},
+            follow_redirects=False,
+        )
     assert signed.status_code == 303, signed.text
     consent = await client.get(signed.headers["location"])
     csrf = re.search(r'name="csrf" value="([^"]+)"', consent.text)

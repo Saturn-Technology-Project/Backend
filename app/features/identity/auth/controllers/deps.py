@@ -9,6 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.origin_auth import request_path
 from app.db.database import get_session
 from app.models import Employee, Organization, User
 from app.features.organization.org.services.access import allows
@@ -17,6 +18,40 @@ from app.features.organization.org.services.plans import PRO_REQUIRED, allows_pr
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 _bearer = HTTPBearer(auto_error=False)
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _origin_of(value: str) -> str:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(value.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".lower()
+
+
+def _trusted_origins(request: Request) -> set[str]:
+    import os
+
+    from app.core.config import get_settings
+    from app.core.public_origin import configured_origin
+
+    allowed = {_origin_of(item) for item in get_settings().cors_origins.split(",") if item.strip()}
+    if configured_origin():
+        allowed.add(_origin_of(configured_origin()))
+    elif not os.environ.get("K_SERVICE", "").strip():
+        allowed.add(_origin_of(str(request.base_url)))
+    allowed.discard("")
+    return allowed
+
+
+def require_same_origin(request: Request) -> None:
+    """A cookie is sent on cross-site requests too. A state change made with one must come from our own pages."""
+    if request.method.upper() in _SAFE_METHODS:
+        return
+    source = request.headers.get("origin") or request.headers.get("referer") or ""
+    if _origin_of(source) not in _trusted_origins(request):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request blocked")
 
 
 async def get_current_user(
@@ -31,6 +66,8 @@ async def get_current_user(
         token = creds.credentials
     if not token:
         token = request.cookies.get(COOKIE_NAME, "")
+        if token:
+            require_same_origin(request)
     if not token:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
@@ -44,7 +81,7 @@ async def get_current_user(
             "Invalid or expired session",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not _totp_exempt(request.url.path) and await _admin_needs_totp(session, user):
+    if not _totp_exempt(request_path(request)) and await _admin_needs_totp(session, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "MFA setup is required")
     return user
 

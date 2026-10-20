@@ -6,30 +6,50 @@ from pathlib import Path
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import ActorType
 from app.core.http_security import current_csp_nonce
+from app.core.public_origin import public_origin
 from app.core.rate_limit import registration_allowed
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.identity.auth.controllers.deps import SessionDep
-from app.features.identity.auth.services.auth_service import auth_service
+from app.features.identity.auth.controllers.session_cookie import cookie_secure
+from app.features.identity.auth.services.auth_service import OAUTH_SESSION_TTL, auth_service
 from app.features.identity.auth.services.mailer import is_english, normalize_locale, send_login_code
 from app.features.identity.auth.services.mfa import mfa_service
-from app.features.identity.oauth.services.oauth_service import ACCESS_TTL, REFRESH_TTL, SCOPE, oauth_service, redirect_allowed
+from app.features.identity.oauth.services.oauth_service import (
+    ACCESS_TTL,
+    REFRESH_TTL,
+    SCOPE,
+    challenge_valid,
+    oauth_service,
+    redirect_allowed,
+)
 from app.features.organization.org.services.plans import profile_identity
 from app.models import Agent, Policy, ToolSet, ToolSetItem
 
 router = APIRouter(tags=["oauth"])
 COOKIE = "saturn_oauth"
 _ARGON2 = Path(__file__).resolve().parents[1] / "static" / "argon2.umd.min.js"
+_ARGON2_BYTES: bytes | None = None
+_SESSION_PURPOSE = "oauth"
+_NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 
 
 def origin_of(request: Request) -> str:
-    return str(request.base_url).rstrip("/")
+    return public_origin(request)
+
+
+def _request_ok(fields: dict[str, str]) -> bool:
+    return (
+        fields["response_type"] == "code"
+        and fields["code_challenge_method"] == "S256"
+        and challenge_valid(fields["code_challenge"])
+    )
 
 
 def metadata(origin: str) -> dict:
@@ -132,7 +152,7 @@ def _set_cookie(response: Response, request: Request, token: str, csrf: str) -> 
         samesite="lax",
         max_age=3600,
         path="/oauth",
-        secure=request.url.scheme == "https",
+        secure=cookie_secure(request),
     )
 
 
@@ -324,9 +344,13 @@ async def register_client(request: Request, session: SessionDep) -> dict:
 
 
 @router.get("/oauth/argon2.js")
-async def argon2_script() -> FileResponse:
-    return FileResponse(
-        _ARGON2,
+async def argon2_script() -> Response:
+    # A plain response, not FileResponse: no Range parsing on an unauthenticated route.
+    global _ARGON2_BYTES
+    if _ARGON2_BYTES is None:
+        _ARGON2_BYTES = _ARGON2.read_bytes()
+    return Response(
+        _ARGON2_BYTES,
         media_type="text/javascript",
         headers={"Cache-Control": "public, max-age=86400"},
     )
@@ -338,10 +362,11 @@ async def authorize(request: Request, session: SessionDep):
     client = await oauth_service.client_for(session, fields["client_id"])
     if client is None or not oauth_service.matching_redirect(client, fields["redirect_uri"]):
         return _page("Saturn", "<h1>無法連線</h1><p>This agent is not registered, or the redirect URL does not match.</p>", 400)
-    if fields["response_type"] != "code" or fields["code_challenge_method"] != "S256" or not fields["code_challenge"]:
-        return _redirect(fields["redirect_uri"], error="invalid_request", state=fields["state"])
+    if not _request_ok(fields):
+        # Render instead of redirecting: a malformed request must not turn this origin into an open redirect.
+        return _page("Saturn", "<h1>無法連線</h1><p>This sign-in request is invalid. Start again from the agent.</p>", 400)
     token, _csrf = _cookie_parts(request)
-    user = await auth_service.user_from_token(session, token) if token else None
+    user = await auth_service.user_from_token(session, token, purpose=_SESSION_PURPOSE) if token else None
     if user is None or user.organization is None:
         return _page(
             "Connect Agents",
@@ -431,14 +456,48 @@ async def authorize(request: Request, session: SessionDep):
     return page
 
 
+def _code_page(fields: dict[str, str], challenge: str, method: str) -> HTMLResponse:
+    if method == "totp":
+        lead = "Enter the 6-digit code from your authenticator app, or a backup code."
+        label = "驗證器代碼 Authenticator code"
+    else:
+        lead = "We emailed a sign-in code. Enter it to continue."
+        label = "驗證碼 Code"
+    return _page(
+        "Verify sign-in",
+        f"""<h1>驗證登入</h1>
+            <p>{escape(lead)}</p>
+            <form method="post" action="/oauth/login/code">
+              {_hidden(fields)}
+              <input type="hidden" name="challenge" value="{escape(challenge)}">
+              <input type="hidden" name="method" value="{escape(method)}">
+              <label>{escape(label)}<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
+              <div class="row"><button type="submit">繼續 Continue</button></div>
+            </form>""",
+    )
+
+
+async def _consent_redirect(session, request: Request, user, fields: dict[str, str]) -> RedirectResponse:
+    # A short session that only the consent pages accept. It is not a console or API session.
+    token, _user = await auth_service.issue_session(session, user, purpose=_SESSION_PURPOSE, ttl=OAUTH_SESSION_TTL)
+    csrf = secrets.token_urlsafe(18)
+    response = RedirectResponse("/oauth/authorize?" + urlencode(fields), status_code=303)
+    _set_cookie(response, request, token, csrf)
+    return response
+
+
+def _posted_fields(form: dict[str, str]) -> dict[str, str]:
+    return {key: form.get(key, "") for key in ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type")}
+
+
 @router.post("/oauth/login")
 async def oauth_login(request: Request, session: SessionDep):
     from app.core.rate_limit import login_allowed
 
-    if not login_allowed(request):
-        return _page("Connect Agents", "<h1>請稍後再試</h1><p>Too many sign-in attempts.</p>", 429)
     form = await _posted(request)
-    fields = {key: form.get(key, "") for key in ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type")}
+    if not login_allowed(request, form.get("email", "")):
+        return _page("Connect Agents", "<h1>請稍後再試</h1><p>Too many sign-in attempts.</p>", 429)
+    fields = _posted_fields(form)
     try:
         user = await auth_service.authenticate(
             session,
@@ -450,48 +509,44 @@ async def oauth_login(request: Request, session: SessionDep):
     except HTTPException:
         return _page("Connect Agents", "<h1>登入失敗</h1><p>Email or password is incorrect.</p>", 401)
     try:
-        pending = await mfa_service.start_login(session, user, include_email=True)
+        # The same factors as the console sign-in. An emailed code is never added as a fallback.
+        pending = await mfa_service.start_login(session, user)
     except HTTPException as exc:
         return _page("Connect Agents", f"<h1>請稍後再試</h1><p>{escape(str(exc.detail))}</p>", exc.status_code)
-    if pending is not None:
-        challenge, _methods, code = pending
-        if code is not None:
-            try:
-                await send_login_code(user.email, code, user.locale)
-            except HTTPException as exc:
-                await mfa_service.discard_login(session, challenge)
-                return _page("Connect Agents", f"<h1>無法寄信</h1><p>{escape(str(exc.detail))}</p>", exc.status_code)
-        return _page(
-            "Verify sign-in",
-            f"""<h1>驗證登入</h1>
-            <p>We emailed a sign-in code. Enter it to continue.</p>
-            <form method="post" action="/oauth/login/code">
-              {_hidden(fields)}
-              <input type="hidden" name="challenge" value="{escape(challenge)}">
-              <label>驗證碼 Code<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
-              <div class="row"><button type="submit">繼續 Continue</button></div>
-            </form>""",
-        )
-    token, _user = await auth_service.issue_session(session, user)
-    csrf = secrets.token_urlsafe(18)
-    response = RedirectResponse("/oauth/authorize?" + urlencode(fields), status_code=303)
-    _set_cookie(response, request, token, csrf)
-    return response
+    if pending is None:
+        return await _consent_redirect(session, request, user, fields)
+    challenge, methods, code = pending
+    if "totp" in methods:
+        return _code_page(fields, challenge, "totp")
+    if "email" in methods and code is not None:
+        try:
+            await send_login_code(user.email, code, user.locale)
+        except HTTPException as exc:
+            await mfa_service.discard_login(session, challenge)
+            return _page("Connect Agents", f"<h1>無法寄信</h1><p>{escape(str(exc.detail))}</p>", exc.status_code)
+        return _code_page(fields, challenge, "email")
+    # Passkeys belong to the console's origin and cannot be used on this page.
+    await mfa_service.discard_login(session, challenge)
+    return _page(
+        "Connect Agents",
+        "<h1>無法在此頁登入</h1><p>This account signs in with a passkey, which this page cannot use. "
+        "Add an authenticator app in the Saturn console, then connect the agent again.</p>",
+        403,
+    )
 
 
 @router.post("/oauth/login/code")
 async def oauth_login_code(request: Request, session: SessionDep):
     form = await _posted(request)
-    fields = {key: form.get(key, "") for key in ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type")}
+    fields = _posted_fields(form)
     try:
-        user = await mfa_service.finish_email(session, form.get("challenge", ""), form.get("code", ""))
+        if form.get("method", "") == "totp":
+            user = await mfa_service.finish_totp(session, form.get("challenge", ""), form.get("code", ""))
+        else:
+            user = await mfa_service.finish_email(session, form.get("challenge", ""), form.get("code", ""))
     except HTTPException:
         return _page("Connect Agents", "<h1>驗證失敗</h1><p>That code is incorrect or expired.</p>", 400)
-    token, _user = await auth_service.issue_session(session, user)
-    csrf = secrets.token_urlsafe(18)
-    response = RedirectResponse("/oauth/authorize?" + urlencode(fields), status_code=303)
-    _set_cookie(response, request, token, csrf)
-    return response
+    return await _consent_redirect(session, request, user, fields)
 
 
 @router.post("/oauth/consent")
@@ -502,12 +557,22 @@ async def oauth_consent(request: Request, session: SessionDep):
     posted_csrf = form.get("csrf", "")
     if not csrf or len(csrf) != len(posted_csrf) or not secrets.compare_digest(csrf, posted_csrf):
         return _page("Saturn", "<h1>無法連線</h1><p>Sign in again to connect this agent.</p>", 400)
-    user = await auth_service.user_from_token(session, token) if token else None
+    user = await auth_service.user_from_token(session, token, purpose=_SESSION_PURPOSE) if token else None
     client = await oauth_service.client_for(session, fields["client_id"]) if user is not None else None
-    if user is None or client is None or not oauth_service.matching_redirect(client, fields["redirect_uri"]):
+    if (
+        user is None
+        or user.organization is None
+        or client is None
+        or not oauth_service.matching_redirect(client, fields["redirect_uri"])
+        or not _request_ok(fields)
+    ):
         return _page("Saturn", "<h1>無法連線</h1><p>Sign in again to connect this agent.</p>", 400)
+    # One consent per sign-in. The consent session ends here whatever the decision.
+    await auth_service.logout(session, token)
     if form.get("decision", "") != "allow":
-        return _redirect(fields["redirect_uri"], error="access_denied", state=fields["state"])
+        denied = _redirect(fields["redirect_uri"], error="access_denied", state=fields["state"])
+        denied.delete_cookie(COOKIE, path="/oauth")
+        return denied
     scope = await _consent_scope(session, user, client.id)
     identity = profile_identity(user.id, user.organization_id, user.organization.kind, user.organization.plan)
     await audit_service.log(
@@ -532,17 +597,19 @@ async def oauth_consent(request: Request, session: SessionDep):
         redirect_uri=fields["redirect_uri"],
         code_challenge=fields["code_challenge"],
     )
-    return _redirect(fields["redirect_uri"], code=code, state=fields["state"])
+    granted = _redirect(fields["redirect_uri"], code=code, state=fields["state"])
+    granted.delete_cookie(COOKIE, path="/oauth")
+    return granted
 
 
 @router.post("/oauth/token")
-async def oauth_token(request: Request, session: SessionDep) -> dict:
+async def oauth_token(request: Request, session: SessionDep) -> JSONResponse:
     form = await _posted(request)
     grant = form.get("grant_type", "")
     client_id = form.get("client_id", "")
     client = await oauth_service.client_for(session, client_id)
     if client is None:
-        raise HTTPException(400, "invalid_client")
+        raise HTTPException(400, "invalid_client", headers=_NO_STORE)
     if grant == "authorization_code":
         issued = await oauth_service.exchange_code(
             session,
@@ -558,14 +625,17 @@ async def oauth_token(request: Request, session: SessionDep) -> dict:
             client_id=client_id,
         )
     else:
-        raise HTTPException(400, "unsupported_grant_type")
+        raise HTTPException(400, "unsupported_grant_type", headers=_NO_STORE)
     if issued is None:
-        raise HTTPException(400, "invalid_grant")
+        raise HTTPException(400, "invalid_grant", headers=_NO_STORE)
     access, refresh, expires_in = issued
-    return {
-        "access_token": access,
-        "token_type": "Bearer",
-        "expires_in": expires_in,
-        "refresh_token": refresh,
-        "scope": SCOPE,
-    }
+    return JSONResponse(
+        {
+            "access_token": access,
+            "token_type": "Bearer",
+            "expires_in": expires_in,
+            "refresh_token": refresh,
+            "scope": SCOPE,
+        },
+        headers=_NO_STORE,
+    )

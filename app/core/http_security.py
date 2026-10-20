@@ -11,6 +11,14 @@ API_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancest
 _csp_nonce: ContextVar[str] = ContextVar("csp_nonce", default="")
 
 
+# Server-rendered pages that carry their own nonce-tagged scripts and styles.
+_NONCE_PREFIXES = ("/oauth", "/mcp-servers/oauth/callback")
+
+
+def _nonce_page(path: str) -> bool:
+    return path.startswith(_NONCE_PREFIXES)
+
+
 def current_csp_nonce() -> str:
     return _csp_nonce.get()
 
@@ -65,7 +73,7 @@ def apply_security_headers(headers: MutableHeaders, scope: Scope, path: str) -> 
     headers["X-Frame-Options"] = "DENY"
     headers["Referrer-Policy"] = "no-referrer"
     headers["Permissions-Policy"] = PERMISSIONS_POLICY
-    if path.startswith("/oauth"):
+    if _nonce_page(path):
         headers["Content-Security-Policy"] = oauth_csp(_csp_nonce.get())
     else:
         headers["Content-Security-Policy"] = DOCS_CSP if is_api_doc(path) and not api_docs_closed() else API_CSP
@@ -82,7 +90,7 @@ class HttpSecurityMiddleware:
             await self.app(scope, receive, send)
             return
         path = scope.get("path") or ""
-        nonce_token = _csp_nonce.set(secrets.token_urlsafe(16)) if path.startswith("/oauth") else None
+        nonce_token = _csp_nonce.set(secrets.token_urlsafe(16)) if _nonce_page(path) else None
         if api_docs_closed() and is_api_doc(path):
             if nonce_token is not None:
                 _csp_nonce.reset(nonce_token)

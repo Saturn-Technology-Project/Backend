@@ -10,6 +10,11 @@ EXEMPT_PATHS = {"/healthz"}
 DEFAULT_HEADER = "X-Saturn-Origin-Auth"
 
 
+def request_path(request: Request) -> str:
+    """The routed path. request.url is rebuilt from the Host header, which a client controls."""
+    return request.scope.get("path") or "/"
+
+
 def origin_allowed(path: str, headers) -> bool:
     if path in EXEMPT_PATHS:
         return True
@@ -27,6 +32,6 @@ def origin_allowed(path: str, headers) -> bool:
 
 class OriginAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if not origin_allowed(request.url.path, request.headers):
+        if not origin_allowed(request_path(request), request.headers):
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
         return await call_next(request)

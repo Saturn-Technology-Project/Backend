@@ -24,6 +24,11 @@ def test_shared_limit_uses_one_redis_counter(monkeypatch):
         def expire(self, key: str, window: int) -> bool:
             return True
 
+        def eval(self, _script: str, _numkeys: int, key: str, window: int) -> int:
+            # The limiter increments and sets the TTL in one atomic script.
+            assert window == 60
+            return self.incr(key)
+
     fake = Fake()
     monkeypatch.setattr(rate_limit, "_use_redis", lambda: True)
     monkeypatch.setattr(rate_limit, "_redis_client", lambda: fake)
@@ -32,7 +37,10 @@ def test_shared_limit_uses_one_redis_counter(monkeypatch):
     assert fake.values["saturn:rate:shared"] == 2
 
 
-def test_client_ip_prefers_cf_connecting_ip():
+def test_client_ip_prefers_cf_connecting_ip(monkeypatch):
+    # Behind Cloudflare every request carries the origin secret, so CF-Connecting-IP is trustworthy.
+    monkeypatch.setenv("ORIGIN_AUTH_SECRET", "expected-value")
+
     class CfRequest:
         headers = {
             "cf-connecting-ip": "198.51.100.42",
@@ -57,6 +65,9 @@ async def test_redis_outage_rejects_login_and_registration_without_memory_fallba
 
     class DownRedis:
         def incr(self, _key: str) -> int:
+            raise ConnectionError("redis unreachable")
+
+        def eval(self, *_args) -> int:
             raise ConnectionError("redis unreachable")
 
     monkeypatch.setattr(rate_limit, "_use_redis", lambda: True)
@@ -87,3 +98,40 @@ async def test_redis_outage_rejects_login_and_registration_without_memory_fallba
         json={"redirect_uris": ["http://127.0.0.1:8765/callback"]},
     )
     assert oauth_reg_resp.status_code == 429
+
+
+def test_client_ip_ignores_cf_header_without_cloudflare_origin_auth(monkeypatch):
+    # Without the origin secret anyone can reach the app directly and choose CF-Connecting-IP.
+    monkeypatch.delenv("ORIGIN_AUTH_SECRET", raising=False)
+
+    class Request:
+        headers = {"cf-connecting-ip": "6.6.6.6", "x-forwarded-for": "1.1.1.1, 203.0.113.8"}
+        client = None
+
+    assert client_ip(Request()) == "203.0.113.8"
+
+
+def test_throttle_uses_the_same_client_ip_as_rate_limits(monkeypatch):
+    from app.features.identity.auth.services import throttle
+
+    monkeypatch.delenv("ORIGIN_AUTH_SECRET", raising=False)
+
+    class Request:
+        headers = {"x-forwarded-for": "9.9.9.9, 203.0.113.8"}
+        client = None
+
+    # The first X-Forwarded-For entry is whatever the client sent; it must never pick the bucket.
+    assert throttle.client_ip(Request()) == "203.0.113.8"
+
+
+def test_login_is_limited_per_account_across_addresses():
+    from app.core import rate_limit
+
+    class Request:
+        def __init__(self, ip: str) -> None:
+            self.headers = {"x-forwarded-for": ip}
+            self.client = None
+
+    results = [rate_limit.login_allowed(Request(f"10.0.0.{n}"), "victim@example.com") for n in range(12)]
+    assert results[:10] == [True] * 10
+    assert results[10:] == [False, False]

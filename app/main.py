@@ -68,6 +68,9 @@ async def lifespan(_app: FastAPI):
                 async with engine.begin() as connection:
                     await connection.run_sync(Base.metadata.create_all)
             async with SessionLocal() as session:
+                from app.features.identity.auth.services.throttle import purge_expired
+
+                await purge_expired(session)
                 await seed_if_empty(session)
                 from app.features.policy.policies.services.default_policy import log_agents_without_policy
 
@@ -141,7 +144,11 @@ async def root():
 
 @app.get("/healthz")
 async def healthz():
-    return await health()
+    # Open to the internet for probes, so it says only up or down.
+    report = await health()
+    if report["status"] != "ok":
+        return JSONResponse(status_code=503, content={"status": "error"})
+    return {"status": "ok"}
 
 
 @app.get("/health")

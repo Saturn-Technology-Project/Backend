@@ -24,6 +24,9 @@ RECENT_AUTH = timedelta(minutes=10)
 _LOGIN_PREFIX = "v1."
 _LOGIN_LABEL = b"saturn-login-v1\n"
 _hasher = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1, hash_len=32, salt_len=16)
+# Verified against when the email is unknown, so a missing account costs the same time as a wrong password.
+_DUMMY_HASH = _hasher.hash("saturn-missing-account")
+OAUTH_SESSION_TTL = timedelta(minutes=15)
 
 
 def login_secret(password: str) -> str:
@@ -110,7 +113,8 @@ def migration_stage(stored: str, *, legacy_v1: str | None, legacy_password: str 
     if not needs_legacy_migration(stored):
         return None
     if not legacy_password_allowed():
-        return "reset"
+        # After the sunset only a caller who proved the legacy password learns it must reset.
+        return None
     if not legacy_v1 and not legacy_password:
         return "v1"
     if not legacy_password:
@@ -138,20 +142,26 @@ class AuthService:
             .where(User.email == normalized)
         )
         user = result.scalar_one_or_none()
-        stored = user.password_hash if user is not None else ""
+        stored = user.password_hash if user is not None else _DUMMY_HASH
         active = user is not None and user.status == "active"
-        ok = active and verify_password(password, stored)
+        ok = verify_password(password, stored) and active
         if not ok and active and legacy_v1 and verify_password(legacy_v1, stored):
             ok = True
-        if not ok and active and legacy_password_allowed() and legacy_password and _pbkdf2_ok(legacy_password, stored):
+        legacy_match = bool(active and legacy_password and _pbkdf2_ok(legacy_password, stored))
+        if not ok and legacy_match and legacy_password_allowed():
             ok = True
         if not ok or user is None:
-            stage = migration_stage(stored, legacy_v1=legacy_v1, legacy_password=legacy_password) if active else None
-            if stage:
-                message = "請重設密碼。 Reset your password." if stage == "reset" else "Invalid email or password"
+            if legacy_match and not legacy_password_allowed():
+                # The caller proved the legacy password, so telling them to reset reveals nothing new.
                 raise HTTPException(
                     status.HTTP_401_UNAUTHORIZED,
-                    {"message": message, "migration": stage},
+                    {"message": "請重設密碼。 Reset your password.", "migration": "reset"},
+                )
+            stage = migration_stage(stored, legacy_v1=legacy_v1, legacy_password=legacy_password) if active else None
+            if stage:
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED,
+                    {"message": "Invalid email or password", "migration": stage},
                 )
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
         # Only a v2 verifier replaces the stored hash. A v1 sign-in keeps the old hash so the
@@ -165,14 +175,23 @@ class AuthService:
         user = await self.authenticate(session, email, password)
         return await self.issue_session(session, user)
 
-    async def issue_session(self, session: AsyncSession, user: User) -> tuple[str, User]:
+    async def issue_session(
+        self,
+        session: AsyncSession,
+        user: User,
+        *,
+        purpose: str = "",
+        ttl: timedelta | None = None,
+    ) -> tuple[str, User]:
         raw = "sat_" + secrets.token_urlsafe(32)
+        lifetime = ttl if ttl is not None else timedelta(days=settings.session_ttl_days)
         record = AuthSession(
             id=new_id("sess"),
             user_id=user.id,
             token_hash=hash_token(raw),
-            expires_at=utcnow() + timedelta(days=settings.session_ttl_days),
+            expires_at=utcnow() + lifetime,
             authenticated_at=utcnow(),
+            purpose=purpose,
         )
         session.add(record)
         await session.flush()
@@ -205,7 +224,7 @@ class AuthService:
         await session.flush()
         return user
 
-    async def user_from_token(self, session: AsyncSession, token: str) -> User | None:
+    async def user_from_token(self, session: AsyncSession, token: str, *, purpose: str = "") -> User | None:
         result = await session.execute(
             select(AuthSession)
             .options(selectinload(AuthSession.user).selectinload(User.organization))
@@ -219,6 +238,7 @@ class AuthService:
             expires = expires.replace(tzinfo=timezone.utc)
         if (
             record.revoked_at is not None
+            or (record.purpose or "") != purpose
             or expires <= utcnow()
             or record.user is None
             or record.user.status != "active"
@@ -251,6 +271,7 @@ class AuthService:
         await consume(session, request, "reset", normalized)
         user = await self._active_user(session, normalized)
         if user is None:
+            hash_password(f"{secrets.randbelow(1_000_000):06d}")
             return None
         open_codes = await session.execute(
             select(PasswordReset).where(
@@ -334,6 +355,10 @@ class AuthService:
         *,
         keep_token: str | None,
     ) -> None:
+        from app.core.rate_limit import reauth_allowed
+
+        if not reauth_allowed(user.id):
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts", headers={"Retry-After": "900"})
         if not verify_password(current_password, user.password_hash):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
         self._require_password(new_password)
@@ -351,7 +376,7 @@ class AuthService:
             select(AuthSession).where(AuthSession.token_hash == hash_token(token))
         )
         record = result.scalar_one_or_none()
-        if record is None or record.revoked_at is not None:
+        if record is None or record.revoked_at is not None or (record.purpose or "") != "":
             return None
         return record
 
@@ -392,13 +417,18 @@ class AuthService:
     async def ensure_seed_user(self, session: AsyncSession) -> None:
         existing = await session.get(User, settings.default_actor_id)
         if existing is not None:
-            if not existing.is_platform_admin:
-                existing.is_platform_admin = True
-                await session.flush()
+            # Created once. A later demotion or offboarding must stick, so never re-promote here.
             return
         email = (settings.seed_user_email or "").strip().lower()
         password = settings.seed_user_password or ""
         if not email or not password:
+            return
+        import os
+
+        if os.environ.get("K_SERVICE", "").strip() and len(password) < 16:
+            import logging
+
+            logging.getLogger(__name__).error("SEED_USER_PASSWORD must be at least 16 characters; seed admin not created")
             return
         org = await session.get(Organization, settings.default_org_id)
         if org is None:

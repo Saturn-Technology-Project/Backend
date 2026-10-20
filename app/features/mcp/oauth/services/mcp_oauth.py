@@ -23,6 +23,7 @@ from app.features.identity.auth.services.auth_service import hash_token
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.credentials.vault.services.credential_service import open_secret, seal
 from app.features.mcp.servers.services.mcp_grant import read_grant, write_grant
+from app.features.mcp.servers.services import mcp_endpoint as _endpoint_checks
 from app.features.mcp.servers.services.mcp_endpoint import require_mcp_endpoint
 from app.features.mcp.servers.services.mcp_remote import McpUnauthorized, list_remote_tools
 from app.features.identity.oauth.services.oauth_service import pkce_s256
@@ -40,6 +41,7 @@ class Discovery:
     resource: str
     scope: str
     issuer: str
+    endpoint: str = ""
 
 
 def _aware(value):
@@ -49,21 +51,33 @@ def _aware(value):
 
 
 def url_allowed(url: str) -> bool:
+    """Every URL an MCP server's metadata points us at gets the same checks as the endpoint itself.
+
+    HTTPS on the default port, no credentials, no literal or metadata hosts, and every resolved
+    address public. The authorization code and Saturn's client secret are posted to these URLs.
+    """
     parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    if not host or parsed.username or parsed.password:
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host or parsed.username or parsed.password or parsed.scheme != "https":
         return False
-    if host == "metadata.google.internal":
-        return False
-    if parsed.scheme == "http":
-        return host in {"localhost", "127.0.0.1"}
-    if parsed.scheme != "https":
+    if host in _endpoint_checks._METADATA_HOSTS or host.endswith(".internal") or host == "localhost":
         return False
     try:
-        address = ipaddress.ip_address(host)
+        port = parsed.port or 443
     except ValueError:
-        return True
-    return address.is_global
+        return False
+    if port != 443:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return False
+    except ValueError:
+        pass
+    try:
+        found = _endpoint_checks.addresses_for(host, port)
+    except HTTPException:
+        return False
+    return bool(found) and not any(_endpoint_checks.address_blocked(item) for item in found)
 
 
 def metadata_url(header: str) -> str:
@@ -164,6 +178,7 @@ async def discover(endpoint: str, www_authenticate: str) -> Discovery:
         resource=resource,
         scope=scope,
         issuer=issuer_value,
+        endpoint=endpoint,
     )
 
 
@@ -181,9 +196,12 @@ def callback_origin(request_origin: str) -> str:
 
 
 GOOGLE_ISSUER = "https://accounts.google.com"
+GITHUB_ISSUER = "https://github.com/login/oauth"
+# Saturn's own OAuth apps. Each one is used only for the MCP hosts it was registered for, so a server
+# cannot borrow it just by naming that issuer in its metadata.
 _PRESET_CLIENTS = (
-    ("https://github.com/login/oauth", "SATURN_GITHUB_OAUTH_CLIENT_ID", "SATURN_GITHUB_OAUTH_CLIENT_SECRET"),
-    (GOOGLE_ISSUER, "SATURN_GOOGLE_OAUTH_CLIENT_ID", "SATURN_GOOGLE_OAUTH_CLIENT_SECRET"),
+    (GITHUB_ISSUER, "SATURN_GITHUB_OAUTH_CLIENT_ID", "SATURN_GITHUB_OAUTH_CLIENT_SECRET", ("api.githubcopilot.com",)),
+    (GOOGLE_ISSUER, "SATURN_GOOGLE_OAUTH_CLIENT_ID", "SATURN_GOOGLE_OAUTH_CLIENT_SECRET", (".googleapis.com",)),
 )
 _GOOGLE_SCOPES = frozenset(
     {
@@ -194,13 +212,22 @@ _GOOGLE_SCOPES = frozenset(
         "https://www.googleapis.com/auth/calendar.events.readonly",
     }
 )
+# Never requested through Saturn's GitHub app, whatever the server advertises.
+_GITHUB_DENIED_SCOPES = frozenset({"delete_repo", "delete:packages", "site_admin", "admin:enterprise"})
 
 
-def preset_client(issuer: str) -> dict[str, str] | None:
+def _host_matches(endpoint: str, hosts: tuple[str, ...]) -> bool:
+    host = (urlparse(endpoint).hostname or "").lower().rstrip(".")
+    return any(host == item or (item.startswith(".") and host.endswith(item)) for item in hosts)
+
+
+def preset_client(issuer: str, endpoint: str = "") -> dict[str, str] | None:
     normalized = issuer.rstrip("/")
-    for known, client_id_env, client_secret_env in _PRESET_CLIENTS:
+    for known, client_id_env, client_secret_env, hosts in _PRESET_CLIENTS:
         if normalized != known:
             continue
+        if not _host_matches(endpoint, hosts):
+            return None
         client_id = os.environ.get(client_id_env, "").strip()
         if not client_id:
             return None
@@ -210,8 +237,11 @@ def preset_client(issuer: str) -> dict[str, str] | None:
 
 def granted_scope(issuer: str, scopes: list[Any]) -> str:
     chosen = [str(item).strip() for item in scopes if str(item).strip()]
-    if issuer.rstrip("/") == GOOGLE_ISSUER:
+    normalized = issuer.rstrip("/")
+    if normalized == GOOGLE_ISSUER:
         chosen = [item for item in chosen if item in _GOOGLE_SCOPES]
+    elif normalized == GITHUB_ISSUER:
+        chosen = [item for item in chosen if item not in _GITHUB_DENIED_SCOPES and not item.startswith("admin:")]
     return " ".join(chosen)
 
 
@@ -302,14 +332,14 @@ class McpOAuth:
             found = await discover(endpoint, "")
         except HTTPException:
             return False
-        if preset_client(found.issuer) is not None:
+        if preset_client(found.issuer, found.endpoint or endpoint) is not None:
             return True
         if found.issuer == GOOGLE_ISSUER:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "This MCP server does not let Saturn start sign-in")
         return False
 
     async def _register(self, found: Discovery, redirect_uri: str) -> dict[str, str]:
-        preset = preset_client(found.issuer)
+        preset = preset_client(found.issuer, found.endpoint)
         if preset is not None:
             return preset
         if not found.registration_endpoint:
@@ -518,7 +548,11 @@ async def _token(url: str, form: dict[str, str]) -> dict[str, Any]:
 
 
 def _page(ok: bool, nonce: str, error: str) -> HTMLResponse:
-    payload = json.dumps({"type": "saturn-mcp-oauth", "ok": ok, "nonce": nonce, "error": error})
+    from app.core.http_security import current_csp_nonce
+
+    # Escape "<" so text from an upstream error can never close the script element.
+    payload = json.dumps({"type": "saturn-mcp-oauth", "ok": ok, "nonce": nonce, "error": error}).replace("<", "\\u003c")
+    script_nonce = escape(current_csp_nonce())
     title = "Connected" if ok else "Not connected"
     note = "已連線，可以關閉這個視窗。" if ok else escape(error)
     lead = "You can close this window." if ok else ""
@@ -531,7 +565,7 @@ def _page(ok: bool, nonce: str, error: str) -> HTMLResponse:
 <p>{lead}</p>
 <p>{note}</p>
 </main>
-<script>if (window.opener) window.opener.postMessage({payload}, "*"); window.close();</script>
+<script nonce="{script_nonce}">if (window.opener) window.opener.postMessage({payload}, "*"); window.close();</script>
 </body></html>"""
     )
 

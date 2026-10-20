@@ -7,7 +7,7 @@ import secrets
 from datetime import timedelta, timezone
 from urllib.parse import urlparse
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -31,6 +31,19 @@ def _aware(value):
 def pkce_s256(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode("utf-8")).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+_PKCE_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
+
+def challenge_valid(challenge: str) -> bool:
+    """An S256 challenge is the 43-character base64url SHA-256 of the verifier."""
+    value = challenge.rstrip("=")
+    return len(value) == 43 and all(char in _PKCE_CHARS for char in value)
+
+
+def verifier_valid(verifier: str) -> bool:
+    return 43 <= len(verifier) <= 128 and all(char in _PKCE_CHARS for char in verifier)
 
 
 def redirect_allowed(uri: str) -> bool:
@@ -117,11 +130,21 @@ class OAuthService:
             return None
         if grant.redirect_uri != redirect_uri or _aware(grant.expires_at) <= utcnow():
             return None
+        if not verifier_valid(code_verifier):
+            return None
         expected = pkce_s256(code_verifier)
         presented = grant.code_challenge.strip().rstrip("=")
-        if not code_verifier or len(expected) != len(presented) or not hmac.compare_digest(expected, presented):
+        if len(expected) != len(presented) or not hmac.compare_digest(expected, presented):
             return None
-        grant.used_at = utcnow()
+        # Claim the code in one conditional UPDATE so two concurrent exchanges cannot both succeed.
+        claimed = await session.execute(
+            update(OAuthGrant)
+            .where(OAuthGrant.id == grant.id, OAuthGrant.used_at.is_(None))
+            .values(used_at=utcnow())
+            .execution_options(synchronize_session=False)
+        )
+        if claimed.rowcount != 1:
+            return None
         return await self._issue_tokens(session, client_id=client_id, user_id=grant.user_id)
 
     async def refresh(
@@ -135,15 +158,36 @@ class OAuthService:
             select(OAuthAccess).where(OAuthAccess.refresh_hash == hash_token(refresh_token))
         )
         current = result.scalar_one_or_none()
-        if (
-            current is None
-            or current.revoked_at is not None
-            or current.client_id != client_id
-            or _aware(current.refresh_expires_at) <= utcnow()
-        ):
+        if current is None or current.client_id != client_id:
             return None
-        current.revoked_at = utcnow()
+        if current.revoked_at is not None:
+            # A rotated refresh token came back: someone holds a stolen copy. End the whole family.
+            await self._revoke_client_tokens(session, user_id=current.user_id, client_id=client_id)
+            return None
+        if _aware(current.refresh_expires_at) <= utcnow():
+            return None
+        claimed = await session.execute(
+            update(OAuthAccess)
+            .where(OAuthAccess.id == current.id, OAuthAccess.revoked_at.is_(None))
+            .values(revoked_at=utcnow())
+            .execution_options(synchronize_session=False)
+        )
+        if claimed.rowcount != 1:
+            return None
         return await self._issue_tokens(session, client_id=client_id, user_id=current.user_id)
+
+    async def _revoke_client_tokens(self, session: AsyncSession, *, user_id: str, client_id: str) -> None:
+        await session.execute(
+            update(OAuthAccess)
+            .where(
+                OAuthAccess.user_id == user_id,
+                OAuthAccess.client_id == client_id,
+                OAuthAccess.revoked_at.is_(None),
+            )
+            .values(revoked_at=utcnow())
+            .execution_options(synchronize_session=False)
+        )
+        await session.flush()
 
     async def revoke_user_tokens(self, session: AsyncSession, user_id: str) -> None:
         now = utcnow()

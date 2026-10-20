@@ -8,6 +8,7 @@ import hmac
 import secrets
 import struct
 import time
+from datetime import timedelta, timezone
 from urllib.parse import quote
 
 from fastapi import HTTPException, status
@@ -25,6 +26,7 @@ _DIGITS = 6
 _BACKUP_COUNT = 8
 _WINDOW_SECONDS = 90
 MAX_ATTEMPTS = 5
+LOCKOUT = timedelta(minutes=15)
 
 _used_steps: dict[str, int] = {}
 
@@ -121,7 +123,8 @@ async def begin_setup(session: AsyncSession, user: User) -> dict[str, object]:
     user.totp_attempts = 0
     user.totp_last_step = 0
     await session.execute(delete(TotpBackupCode).where(TotpBackupCode.user_id == user.id))
-    codes = [secrets.token_hex(4) for _ in range(_BACKUP_COUNT)]
+    # 64 bits each, so the unsalted digests cannot be reversed by brute force if the table leaks.
+    codes = [secrets.token_hex(8) for _ in range(_BACKUP_COUNT)]
     for code in codes:
         session.add(
             TotpBackupCode(
@@ -179,7 +182,7 @@ async def verify_user_totp(
 ) -> None:
     if not user.totp_enabled or not user.totp_secret:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "MFA is not enabled")
-    if int(user.totp_attempts or 0) >= MAX_ATTEMPTS:
+    if _locked(user):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
     try:
         secret_b32 = open_secret(user.totp_secret, user.organization_id, user.id)
@@ -190,6 +193,7 @@ async def verify_user_totp(
     if step is not None and step > last_step and _claim_step(secret_b32, step):
         user.totp_last_step = step
         user.totp_attempts = 0
+        user.totp_locked_until = None
         await session.flush()
         return
     digest = hash_backup_code(code.strip())
@@ -210,7 +214,23 @@ async def verify_user_totp(
             await session.flush()
             return
     user.totp_attempts = int(user.totp_attempts or 0) + 1
+    if user.totp_attempts >= MAX_ATTEMPTS:
+        user.totp_locked_until = utcnow() + LOCKOUT
     await session.flush()
     if user.totp_attempts >= MAX_ATTEMPTS:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
     raise HTTPException(status.HTTP_400_BAD_REQUEST, "That code did not match")
+
+
+def _locked(user: User) -> bool:
+    """A lockout lasts LOCKOUT, then the counter starts again. It never locks an account for good."""
+    if int(user.totp_attempts or 0) < MAX_ATTEMPTS:
+        return False
+    until = user.totp_locked_until
+    if until is not None and until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    if until is not None and until > utcnow():
+        return True
+    user.totp_attempts = 0
+    user.totp_locked_until = None
+    return False

@@ -33,6 +33,7 @@ class User(Base):
     totp_secret: Mapped[str] = mapped_column(Text, default="", nullable=False)
     totp_last_step: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     totp_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    totp_locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
