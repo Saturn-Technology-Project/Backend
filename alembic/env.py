@@ -1,4 +1,5 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -30,29 +31,35 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def _unblock_postgres(connection: Connection) -> None:
-    """Live App sockets keep a transaction open. ALTER TABLE waits on that lock until Cloud Run kills the new revision."""
+# Any fixed 64-bit key works; it only has to be the same for every runner.
+# int.from_bytes(hashlib.sha256(b"saturn-alembic-upgrade").digest()[:8], "big", signed=True)
+_MIGRATION_LOCK_KEY = 3_886_794_715_833_081_572
+# How long a second runner waits for the first to finish before giving up.
+_MIGRATION_LOCK_WAIT = os.environ.get("MIGRATION_LOCK_WAIT", "300s")
+# How long one DDL statement may wait on a table lock that a live request holds.
+_DDL_LOCK_TIMEOUT = "60s"
+
+
+def _serialise_postgres(connection: Connection) -> None:
+    """Run inside the migration transaction so the lock is released by its commit or rollback.
+
+    Concurrent runners (a Cloud Run Job retry, or several containers that still
+    migrate on start) queue on the advisory lock. The next one then reads the
+    new alembic_version and has nothing to do. Live connections are never
+    terminated: if a request holds a lock longer than the DDL lock timeout, the
+    migration fails and can be retried, instead of breaking traffic.
+    """
     if connection.dialect.name != "postgresql":
         return
-    connection.execute(
-        text(
-            """
-            SELECT pg_terminate_backend(pid)
-            FROM pg_stat_activity
-            WHERE datname = current_database()
-              AND pid <> pg_backend_pid()
-              AND state = 'idle in transaction'
-            """
-        )
-    )
-    connection.execute(text("SET lock_timeout = '60s'"))
-    connection.commit()
+    connection.execute(text("SELECT set_config('lock_timeout', :value, true)"), {"value": _MIGRATION_LOCK_WAIT})
+    connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _MIGRATION_LOCK_KEY})
+    connection.execute(text("SELECT set_config('lock_timeout', :value, true)"), {"value": _DDL_LOCK_TIMEOUT})
 
 
 def do_run_migrations(connection: Connection) -> None:
-    _unblock_postgres(connection)
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
+        _serialise_postgres(connection)
         context.run_migrations()
 
 
