@@ -694,8 +694,13 @@ class ApprovalService:
         employee: Employee,
         actor_id: str,
     ) -> None:
-        if not approval.allow_requester and approval.requester_user_id == actor_id:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Requester cannot approve this request")
+        if approval.requester_user_id == actor_id:
+            if not approval.allow_requester:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Requester cannot approve this request")
+            # Without an approval policy, a request needs a second person whenever one could
+            # decide it. Only a policy that says so lets the requester approve their own agent.
+            if not approval.approval_policy_id and await self._other_approver(session, employee):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Another approver must decide this request")
         specs = _requirement_specs(approval)
         if not specs:
             return
@@ -707,6 +712,18 @@ class ApprovalService:
         )
         if member is None:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Not an eligible approver")
+
+    async def _other_approver(self, session: AsyncSession, employee: Employee) -> bool:
+        from app.features.organization.org.services.access import allows
+
+        result = await session.scalars(
+            select(Employee).where(
+                Employee.organization_id == employee.organization_id,
+                Employee.status == "active",
+                Employee.id != employee.id,
+            )
+        )
+        return any(allows(item.permissions, "approvals", "write") for item in result.all())
 
     async def requirement_progress(self, session: AsyncSession, approval: Approval) -> list[dict]:
         specs = _requirement_specs(approval)

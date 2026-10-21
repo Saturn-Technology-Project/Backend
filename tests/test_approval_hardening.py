@@ -205,7 +205,7 @@ async def test_single_approver_checks_group_and_requester(client, monkeypatch):
 
 async def test_single_approver_claim_is_atomic(client, monkeypatch):
     calls, seen = {"n": 0}, []
-    _people_, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
+    people, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
     body = await _request(client, access, agent_id, {"amount": 5})
     approval_id = body["error"]["data"]["approval_id"]
     from sqlalchemy import update
@@ -230,7 +230,7 @@ async def test_single_approver_claim_is_atomic(client, monkeypatch):
 
     monkeypatch.setattr(module.run_service, "evaluate_action_policy", raced)
     monkeypatch.setattr(audit_service, "log", record)
-    lost = await client.post(f"/approvals/{approval_id}/approve")
+    lost = await client.post(f"/approvals/{approval_id}/approve", headers={"Authorization": f"Bearer {people[0][1]}"})
     assert lost.status_code == 409, lost.text
     assert granted == []
 
@@ -318,7 +318,7 @@ async def test_failure_after_upstream_ran_never_executes_twice(client, monkeypat
 
 async def test_resubmit_failure_after_upstream_ran_is_uncertain(client, monkeypatch):
     calls, seen = {"n": 0}, []
-    _people_, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
+    people, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
     from app.features.execution.activity.services.audit_service import audit_service
 
     original = audit_service.log
@@ -330,7 +330,7 @@ async def test_resubmit_failure_after_upstream_ran_is_uncertain(client, monkeypa
 
     body = await _request(client, access, agent_id, {"amount": 3})
     run_id = body["error"]["data"]["saturnRunId"]
-    assert (await client.post(f"/approvals/{body['error']['data']['approval_id']}/approve")).status_code == 200
+    assert (await client.post(f"/approvals/{body['error']['data']['approval_id']}/approve", headers={"Authorization": f"Bearer {people[0][1]}"})).status_code == 200
     monkeypatch.setattr(audit_service, "log", broken)
     first = await _request(client, access, agent_id, {"amount": 3}, run_id=run_id)
     assert first["error"]["message"] == "execution_uncertain"
@@ -345,7 +345,7 @@ async def test_resubmit_failure_after_upstream_ran_is_uncertain(client, monkeypa
 
 async def test_resubmit_timeout_is_uncertain_not_claimed(client, monkeypatch):
     calls, seen = {"n": 0}, []
-    _people_, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
+    people, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
     from app.features.mcp.servers.services.mcp_remote import McpTimeout
 
     async def slow(endpoint, name, arguments, authorization=""):
@@ -355,7 +355,7 @@ async def test_resubmit_timeout_is_uncertain_not_claimed(client, monkeypatch):
     monkeypatch.setattr("app.features.mcp.saturn.services.saturn_mcp.call_remote_tool", slow)
     body = await _request(client, access, agent_id, {"amount": 4})
     approval_id = body["error"]["data"]["approval_id"]
-    assert (await client.post(f"/approvals/{approval_id}/approve")).status_code == 200
+    assert (await client.post(f"/approvals/{approval_id}/approve", headers={"Authorization": f"Bearer {people[0][1]}"})).status_code == 200
     first = await _request(client, access, agent_id, {"amount": 4}, run_id=body["error"]["data"]["saturnRunId"])
     assert first["error"]["message"] == "execution_uncertain"
     assert (await client.get(f"/approvals/{approval_id}")).json()["execution_state"] == "uncertain"
@@ -366,10 +366,10 @@ async def test_resubmit_timeout_is_uncertain_not_claimed(client, monkeypatch):
 
 async def test_resubmit_after_policy_turns_to_deny_closes_the_approval(client, monkeypatch):
     calls, seen = {"n": 0}, []
-    _people_, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
+    people, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
     body = await _request(client, access, agent_id, {"amount": 6})
     approval_id = body["error"]["data"]["approval_id"]
-    assert (await client.post(f"/approvals/{approval_id}/approve")).status_code == 200
+    assert (await client.post(f"/approvals/{approval_id}/approve", headers={"Authorization": f"Bearer {people[0][1]}"})).status_code == 200
     from app.features.policy.policies.services import policy_engine as engine_module
     from app.features.policy.policies.services.policy_engine import EvaluationResult
     from app.core.enums import PolicyDecision
@@ -678,3 +678,35 @@ def test_keyed_digest_accepts_legacy_rows():
     assert digest_matches("org_saturn", legacy_digest(arguments), arguments)
     assert not digest_matches("org_saturn", keyed, {"amount": 43, "to": "acct_1"})
     assert not digest_matches("org_other", keyed, arguments)
+
+
+async def test_requester_needs_a_second_person_when_one_exists(client, monkeypatch):
+    calls, seen = {"n": 0}, []
+    people, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
+    body = await _request(client, access, agent_id, {"amount": 7})
+    approval_id = body["error"]["data"]["approval_id"]
+
+    own = await client.post(f"/approvals/{approval_id}/approve")
+    assert own.status_code == 403, own.text
+    assert calls["n"] == 0
+    other = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[0][1]))
+    assert other.status_code == 200, other.text
+
+
+async def test_requester_alone_in_the_org_can_still_approve(client, monkeypatch):
+    async def listed(endpoint, authorization=""):
+        return [{"name": "pay.send", "description": "Send", "inputSchema": {"type": "object", "properties": {}}}]
+
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
+    connected = await client.post(
+        "/mcp-servers", json={"name": "Payments", "endpoint": "https://mcp.stripe.com/mcp", "authorization": "t"}
+    )
+    tool_id = connected.json()["catalog"][0]["id"]
+    created = await client.post("/tool-sets", json={"name": "Payments", "items": [{"tool_id": tool_id, "approval": True}]})
+    access = await oauth_access(client, "Solo Agent")
+    await client.post("/mcp", headers=_auth(access), json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    agent_id = next(item["id"] for item in (await client.get("/agents")).json() if item["name"] == "Solo Agent")
+    await client.patch(f"/agents/{agent_id}", json={"tool_set_id": created.json()["id"]})
+    body = await _request(client, access, agent_id, {"amount": 7})
+    approved = await client.post(f"/approvals/{body['error']['data']['approval_id']}/approve")
+    assert approved.status_code == 200, approved.text
