@@ -82,3 +82,10 @@ async def test_changing_the_endpoint_does_not_forward_the_saved_token(client, mo
     )
     assert blocked.status_code == 400
     assert len(seen) == 3
+
+
+def test_etherfi_cash_endpoint_is_approved():
+    # ether.fi's read-only Cash connector (help.ether.fi, "AI connections").
+    assert require_mcp_endpoint("https://mcp.ether.fi/mcp") == "https://mcp.ether.fi/mcp"
+    with pytest.raises(HTTPException):
+        require_mcp_endpoint("https://evil.ether.fi.example/mcp")

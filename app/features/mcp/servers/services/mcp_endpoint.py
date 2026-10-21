@@ -12,6 +12,7 @@ ALLOWED_MCP_HOSTS = frozenset(
         "gmailmcp.googleapis.com",
         "calendarmcp.googleapis.com",
         "mcp.mercury.com",
+        "mcp.ether.fi",
         "api.ibkr.com",
         "mcp.dukascopy.com",
         "mcp.app.carta.com",
