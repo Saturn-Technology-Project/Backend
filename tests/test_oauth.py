@@ -63,6 +63,8 @@ async def test_agent_registers_with_oauth_and_binds_its_profile(client):
     assert "Policy：" not in consent.text
     assert 'type="checkbox"' not in consent.text
     assert "服務條款" in consent.text
+    # Browsers check form-action on the 303 that follows the submit, so the agent's origin must be listed.
+    assert "form-action 'self' http://127.0.0.1:8765;" in consent.headers["content-security-policy"]
     csrf = re.search(r'name="csrf" value="([^"]+)"', consent.text)
     assert csrf is not None
     allowed = await client.post(

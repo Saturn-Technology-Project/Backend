@@ -1,5 +1,7 @@
 import pytest
 
+from app.core.http_security import _form_targets, allow_form_redirect, oauth_csp
+
 DOC_PATHS = ("/docs", "/redoc", "/openapi.json")
 
 
@@ -31,6 +33,39 @@ async def test_oauth_pages_use_a_script_nonce(client):
     assert "unsafe-inline" not in policy
     assert "'nonce-" in policy
     assert "nonce=" in response.text
+
+
+async def test_oauth_sign_in_page_posts_only_to_itself(client):
+    response = await client.get("/oauth/authorize")
+    assert "form-action 'self';" in response.headers["content-security-policy"]
+
+
+@pytest.mark.parametrize(
+    ("uri", "source"),
+    [
+        ("https://claude.ai/api/mcp/auth_callback?x=1", "https://claude.ai"),
+        ("http://user:pw@127.0.0.1:8765/callback", "http://127.0.0.1:8765"),
+        ("cursor://anysphere.cursor-mcp/oauth/callback", "cursor:"),
+    ],
+)
+def test_form_redirect_adds_only_the_origin(uri, source):
+    token = _form_targets.set([])
+    try:
+        allow_form_redirect(uri)
+        assert oauth_csp("n", _form_targets.get()).endswith(f"form-action 'self' {source}; frame-ancestors 'none'")
+    finally:
+        _form_targets.reset(token)
+
+
+def test_form_redirect_ignores_a_value_that_would_break_the_policy():
+    token = _form_targets.set([])
+    try:
+        allow_form_redirect("https://evil.example;script-src *")
+        allow_form_redirect("javascript:alert(1) 'unsafe-inline'")
+        policy = oauth_csp("n", _form_targets.get())
+        assert policy.endswith("form-action 'self'; frame-ancestors 'none'")
+    finally:
+        _form_targets.reset(token)
 
 
 async def test_security_headers_on_api_responses(client):

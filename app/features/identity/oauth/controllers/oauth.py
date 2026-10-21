@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.enums import ActorType
-from app.core.http_security import current_csp_nonce
+from app.core.http_security import allow_form_redirect, current_csp_nonce
 from app.core.public_origin import public_origin
 from app.core.rate_limit import registration_allowed
 from app.features.execution.activity.services.audit_service import audit_service
@@ -446,6 +446,8 @@ async def authorize(request: Request, session: SessionDep):
     csrf = secrets.token_urlsafe(18)
     scope = await _consent_scope(session, user, client.id)
     locale = normalize_locale(user.locale)
+    # Both answers to this form are a 303 to the registered redirect_uri.
+    allow_form_redirect(fields["redirect_uri"])
     page = _page(
         "Authorize agent" if is_english(locale) else "授權代理人",
         _consent_body(locale, client.name, client.id, identity, scope, fields, csrf),
