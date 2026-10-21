@@ -334,3 +334,19 @@ async def test_google_without_an_oauth_client_asks_for_a_pasted_token(client, mo
     )
     assert started.status_code == 400
     assert started.json()["detail"] == "This MCP server does not let Saturn start sign-in"
+
+
+async def test_authorization_requests_connect_to_the_checked_address(monkeypatch):
+    from app.features.mcp.oauth.services import mcp_oauth
+
+    seen = {}
+
+    async def fake_request(self, method, url, **kwargs):
+        seen.update(method=method, url=url, headers=kwargs.get("headers"), extensions=kwargs.get("extensions"))
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    await mcp_oauth._request("POST", "https://auth.example.com/token?x=1", data={"a": "b"})
+    assert seen["url"] == "https://1.1.1.1/token?x=1"
+    assert seen["headers"]["Host"] == "auth.example.com"
+    assert seen["extensions"] == {"sni_hostname": "auth.example.com"}

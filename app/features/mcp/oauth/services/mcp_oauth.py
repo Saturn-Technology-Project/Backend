@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import os
@@ -116,9 +117,25 @@ def authorization_candidates(issuer: str) -> list[str]:
 async def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     if not url_allowed(url):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP authorization URL is not allowed")
+    from app.features.webhooks.services.destinations import pin_webhook_url
+
+    # Connect to the address that was checked. Resolving again when connecting would let a
+    # DNS answer change in between and send the code and client secret to an internal host.
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
-            return await client.request(method, url, **kwargs)
+        target = await asyncio.to_thread(pin_webhook_url, url)
+    except HTTPException as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP authorization URL is not allowed") from exc
+    headers = dict(kwargs.pop("headers", None) or {})
+    headers["Host"] = target.host
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
+            return await client.request(
+                method,
+                target.url,
+                headers=headers,
+                extensions={"sni_hostname": target.host},
+                **kwargs,
+            )
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not reach the MCP authorization server") from exc
 
