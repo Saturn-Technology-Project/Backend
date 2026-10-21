@@ -215,8 +215,17 @@ async def _consent_scope(session, user, client_id: str) -> dict:
     }
 
 
+def _destination(redirect_uri: str) -> str:
+    parsed = urlparse(redirect_uri)
+    if parsed.scheme in {"http", "https"}:
+        return parsed.netloc.rsplit("@", 1)[-1]
+    return f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else f"{parsed.scheme}:"
+
+
 def _consent_body(locale: str, client_name: str, client_id: str, identity: str, scope: dict, fields: dict[str, str], csrf: str) -> str:
     terms, privacy = _legal_links(locale)
+    # The name is whatever the client registered; where the code goes is what identifies it.
+    destination = _destination(fields["redirect_uri"])
     hours = max(1, int(ACCESS_TTL.total_seconds() // 3600))
     days = REFRESH_TTL.days
     set_name = scope["set_name"]
@@ -241,7 +250,7 @@ def _consent_body(locale: str, client_name: str, client_id: str, identity: str, 
         return f"""<p class="kicker">Connect to Saturn</p>
         <h1>Agent authorization request</h1>
         <h2>Requesting agent</h2>
-        <div class="card"><strong>{escape(client_name)}</strong><p>Name supplied by the agent developer. Client {escape(client_id)}</p></div>
+        <div class="card"><strong>{escape(client_name)}</strong><p>Name supplied by the agent developer. Client {escape(client_id)}</p><p>After you decide, you return to <code>{escape(destination)}</code>. If you do not recognize it, deny.</p></div>
         <h2>Access requested</h2>
         {access}
         <h2>Before you connect</h2>
@@ -277,7 +286,7 @@ def _consent_body(locale: str, client_name: str, client_id: str, identity: str, 
     return f"""<p class="kicker">連接 Saturn</p>
     <h1>代理人授權請求</h1>
     <h2>申請連線的代理人</h2>
-    <div class="card"><strong>{escape(client_name)}</strong><p>由代理人開發者提供的名稱。識別碼 {escape(client_id)}</p></div>
+    <div class="card"><strong>{escape(client_name)}</strong><p>由代理人開發者提供的名稱。識別碼 {escape(client_id)}</p><p>按下後會回到 <code>{escape(destination)}</code>。如果你不認得這個網址，請拒絕。</p></div>
     <h2>要求的存取</h2>
     {access}
     <h2>連線之前</h2>
