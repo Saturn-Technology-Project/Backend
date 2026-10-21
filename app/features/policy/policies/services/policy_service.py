@@ -408,6 +408,16 @@ class PolicyService:
                         status.HTTP_409_CONFLICT,
                         f"Confirm high-risk allows: {', '.join(risky)}",
                     )
+                # PATCH cannot carry a confirmation, so a draft with flagged tools goes through activate.
+                set_tools = (
+                    await self._set_tool_names(session, organization_id, policy.tool_set_id) if policy.tool_set_id else []
+                )
+                flagged = [item["tool"] for item in (await self._review(session, policy, set_tools))["flagged_tools"]]
+                if flagged:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        f"Review tools with untrusted descriptions: {', '.join(flagged)}",
+                    )
         environment = _environment(body.environment) if body.environment is not None else None
         tool_set_id = (
             await self._own_tool_set(session, organization_id, body.tool_set_id) if body.tool_set_id is not None else None
@@ -705,6 +715,7 @@ class PolicyService:
                 }
             )
             report["ok"] = False
+        report["review"] = await self._review(session, policy, names)
         if report["ok"] and policy.status != "active":
             policy.status = "validated"
             policy.version = (policy.version or 1) + 1
@@ -717,6 +728,35 @@ class PolicyService:
             await session.flush()
         return report
 
+    async def _review(self, session: AsyncSession, policy: Policy, set_tools: list[str]) -> dict:
+        """What activation will enforce, for a person to read before confirming.
+
+        A draft may come from the policy model, which read each tool's description. A description
+        that was cut short or carried hidden characters is where an injected instruction would sit,
+        so those tools are named here and activation asks for confirmation.
+        """
+        from app.features.policy.policies.services.policy_graph import risky_allows
+        from app.features.policy.policies.services.policy_llm import PROMPT_DESCRIPTION_LIMIT, hidden_characters
+        from app.models import Tool
+
+        approvals = sorted({rule.tool for rule in policy.rules if rule.decision == "approval_required"})
+        names = sorted({rule.tool for rule in policy.rules} | set(set_tools))
+        flagged = []
+        if names:
+            tools = await session.scalars(
+                select(Tool).where(Tool.organization_id == policy.organization_id, Tool.name.in_(names))
+            )
+            for tool in sorted(tools.all(), key=lambda item: item.name):
+                description = tool.description or ""
+                reasons = []
+                if len(" ".join(description.split())) > PROMPT_DESCRIPTION_LIMIT:
+                    reasons.append("description_truncated")
+                if hidden_characters(description):
+                    reasons.append("hidden_characters")
+                if reasons:
+                    flagged.append({"tool": tool.name, "reasons": reasons})
+        return {"allows": risky_allows(list(policy.rules)), "approvals": approvals, "flagged_tools": flagged}
+
     async def activate_policy(self, session: AsyncSession, policy: Policy, confirm: bool) -> Policy:
         from app.features.policy.policies.services.policy_graph import risky_allows
 
@@ -728,6 +768,12 @@ class PolicyService:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 f"Confirm high-risk allows: {', '.join(risky)}",
+            )
+        flagged = [item["tool"] for item in report["review"]["flagged_tools"]]
+        if flagged and not confirm:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Review tools with untrusted descriptions: {', '.join(flagged)}",
             )
         policy.status = "active"
         policy.version = (policy.version or 1) + 1

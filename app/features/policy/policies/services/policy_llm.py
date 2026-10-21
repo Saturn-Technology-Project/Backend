@@ -34,6 +34,16 @@ UNTRUSTED_NOTE = (
 )
 
 
+# How much of a tool description the policy model sees. A longer one is cut, and activation
+# names that tool for review (policy_service._review).
+PROMPT_DESCRIPTION_LIMIT = 500
+
+
+def hidden_characters(raw: Any) -> bool:
+    # A carriage return is ordinary line-ending noise, not something meant to be unseen.
+    return bool(_HIDDEN.search(str(raw or "").replace("\r", "")))
+
+
 def _untrusted(raw: Any, limit: int) -> str:
     """Flatten third-party or model text to one plain line of at most limit characters."""
     text = _HIDDEN.sub(" ", str(raw or ""))
@@ -302,7 +312,7 @@ def _prompt_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         brief.append(
             {
                 "name": str(tool.get("name") or ""),
-                "description": _untrusted(tool.get("description"), 500),
+                "description": _untrusted(tool.get("description"), PROMPT_DESCRIPTION_LIMIT),
                 "inputSchema": _schema_brief(tool.get("inputSchema")),
                 "server": _untrusted(tool.get("server"), 120),
             }
