@@ -569,6 +569,12 @@ def _page(ok: bool, nonce: str, error: str) -> HTMLResponse:
 
     # Escape "<" so text from an upstream error can never close the script element.
     payload = json.dumps({"type": "saturn-mcp-oauth", "ok": ok, "nonce": nonce, "error": error}).replace("<", "\\u003c")
+    # Only the console that opened this window may read the result. postMessage takes one target
+    # origin, so it is sent once per allowed console origin and the others are dropped by the browser.
+    from app.core.config import get_settings
+
+    origins = [item.strip() for item in get_settings().cors_origins.split(",") if item.strip() and item.strip() != "*"]
+    targets = json.dumps(origins).replace("<", "\\u003c")
     script_nonce = escape(current_csp_nonce())
     title = "Connected" if ok else "Not connected"
     note = "已連線，可以關閉這個視窗。" if ok else escape(error)
@@ -582,7 +588,7 @@ def _page(ok: bool, nonce: str, error: str) -> HTMLResponse:
 <p>{lead}</p>
 <p>{note}</p>
 </main>
-<script nonce="{script_nonce}">if (window.opener) window.opener.postMessage({payload}, "*"); window.close();</script>
+<script nonce="{script_nonce}">if (window.opener) {{ for (const origin of {targets}) {{ try {{ window.opener.postMessage({payload}, origin); }} catch (e) {{}} }} }} window.close();</script>
 </body></html>"""
     )
 

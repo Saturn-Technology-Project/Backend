@@ -113,6 +113,11 @@ def registration_allowed(request: Request) -> bool:
     return allow(f"oauth-register:{client_ip(request)}")
 
 
+def signup_allowed(request: Request) -> bool:
+    """Account sign-up. Its own budget, so agent client registrations cannot use it up."""
+    return allow(f"signup:{client_ip(request)}")
+
+
 def login_allowed(request: Request, email: str | None = None) -> bool:
     if not allow(f"login:{client_ip(request)}"):
         return False

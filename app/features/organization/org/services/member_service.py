@@ -376,6 +376,15 @@ class MemberService:
             if cleaned not in {"active", "disabled"}:
                 raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Status must be active or disabled")
             next_status = cleaned
+            # Disabling a member disables the whole user, so an org admin must not be able
+            # to lock a platform admin out of the platform.
+            if (
+                next_status == "disabled"
+                and employee.user is not None
+                and employee.user.is_platform_admin
+                and not actor.is_platform_admin
+            ):
+                raise HTTPException(http_status.HTTP_403_FORBIDDEN, "A platform admin cannot be disabled here")
 
         losing_admin = is_org_admin(employee.permissions) and (
             next_status != "active" or not is_org_admin(next_perms)

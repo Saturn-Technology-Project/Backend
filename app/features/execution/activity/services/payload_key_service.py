@@ -759,7 +759,7 @@ async def add_envelope(
 ) -> MemberKeyEnvelope:
     actor = await _member(session, actor_user_id, organization_id)
     key = await active_key(session, organization_id)
-    if key is None or actor.user_id != key.owner_user_id and actor.role != "admin":
+    if key is None or actor.user_id != key.owner_user_id and not _is_key_admin(actor):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an organization admin can grant payload access")
     recipient = await _member(session, user_id, organization_id)
     member_key = await session.get(MemberPayloadKey, member_key_id)
@@ -814,7 +814,7 @@ async def own_envelope(session: AsyncSession, *, organization_id: str, user_id: 
 async def revoke_member(session: AsyncSession, *, organization_id: str, actor_user_id: str, user_id: str) -> dict:
     actor = await _member(session, actor_user_id, organization_id)
     key = await active_key(session, organization_id)
-    if key is None or actor.role != "admin":
+    if key is None or not _is_key_admin(actor):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only an organization admin can revoke payload access")
     rows = list(
         await session.scalars(

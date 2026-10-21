@@ -15,6 +15,10 @@ EMAIL_LIMIT = 1
 EMAIL_WINDOW = timedelta(seconds=60)
 CLIENT_LIMIT = 8
 CLIENT_WINDOW = timedelta(minutes=10)
+# Each code allows 5 guesses and a new one every minute, so without a daily cap one address
+# could be guessed against around the clock.
+EMAIL_DAILY_LIMIT = 10
+EMAIL_DAILY_WINDOW = timedelta(days=1)
 _WAIT = "Wait a minute before requesting another code"
 
 
@@ -40,6 +44,7 @@ async def consume(session: AsyncSession, request: Request, purpose: str, email: 
     ip = client_ip(request)
     device = _device(request)
     await _hit(session, f"email:{purpose}:{email}", limit=EMAIL_LIMIT, window=EMAIL_WINDOW)
+    await _hit(session, f"email-day:{purpose}:{email}", limit=EMAIL_DAILY_LIMIT, window=EMAIL_DAILY_WINDOW)
     await _hit(session, f"ip:{purpose}:{ip}", limit=CLIENT_LIMIT, window=CLIENT_WINDOW)
     await _hit(session, f"device:{purpose}:{device}", limit=CLIENT_LIMIT, window=CLIENT_WINDOW)
     await maybe_purge(session)

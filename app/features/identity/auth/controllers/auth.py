@@ -13,7 +13,7 @@ from app.core.rate_limit import (
     login_allowed,
     migration_allowed,
     reauth_allowed,
-    registration_allowed,
+    signup_allowed,
 )
 from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep
 from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME, clear_session_cookie, set_session_cookie
@@ -206,7 +206,7 @@ async def _begin_mfa(session, user: User, locale: str | None) -> LoginResponse |
 
 @router.post("/register/code", status_code=204)
 async def register_code(body: SignupCodeRequest, request: Request, session: SessionDep, background: BackgroundTasks):
-    if not registration_allowed(request):
+    if not signup_allowed(request):
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "Too many attempts",
@@ -226,7 +226,7 @@ async def register_code(body: SignupCodeRequest, request: Request, session: Sess
 
 @router.post("/register", response_model=LoginResponse, status_code=201)
 async def register(body: RegisterRequest, request: Request, response: Response, session: SessionDep):
-    if not registration_allowed(request):
+    if not signup_allowed(request):
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "Too many attempts",
