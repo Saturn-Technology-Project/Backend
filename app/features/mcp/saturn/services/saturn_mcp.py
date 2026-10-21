@@ -138,6 +138,18 @@ def _approval_expired(request_id: Any, approval: Approval, phase: str, tool_name
     )
 
 
+def _redirect_hosts(client: Any) -> set[str]:
+    from urllib.parse import urlparse
+
+    hosts = set()
+    for uri in client.redirect_uris or []:
+        parsed = urlparse(str(uri))
+        host = (parsed.hostname or "").lower() or parsed.scheme.lower()
+        if host:
+            hosts.add(host)
+    return hosts
+
+
 def rpc_error(request_id: Any, code: int, message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     error: dict[str, Any] = {"code": code, "message": message}
     if data:
@@ -315,12 +327,18 @@ class SaturnMcp:
         if existing is not None and not self._owns(existing, user, client_id):
             return ""
         agent = existing or await self._find_client_agent(session, user, profile_id, name, client_id)
+        if agent is not None and not await self._may_inherit(session, agent, client_id):
+            # Same name, different app: never hand over another client's tool set and policies.
+            agent = None
         if agent is None:
             refused = await self._over_agent_limit(session, user, client_id)
             if refused:
                 return refused
+            ident = self._stable_id(profile_id, user.id, name)
+            if await session.get(Agent, ident) is not None:
+                ident = self._legacy_id(profile_id, name, client_id)
             agent = Agent(
-                id=self._stable_id(profile_id, user.id, name),
+                id=ident,
                 organization_id=user.organization_id,
                 name=name,
                 description="",
@@ -345,6 +363,24 @@ class SaturnMcp:
         agent.last_seen_at = utcnow()
         await session.flush()
         return ""
+
+    async def _may_inherit(self, session: AsyncSession, agent: Agent, client_id: str) -> bool:
+        """A new OAuth client takes over an agent only when it is the same app reconnecting.
+
+        The agent name and clientInfo come from the client, so they prove nothing. Claude
+        re-registers on reconnect (a new client id, sometimes a new loopback port), but it keeps
+        its registered name and its redirect host. A client with another host is another app.
+        """
+        current = str((agent.settings or {}).get("client_id") or "")
+        if not current or current == client_id:
+            return True
+        from app.features.identity.oauth.models.oauth import OAuthClient
+
+        before = await session.get(OAuthClient, current)
+        after = await session.get(OAuthClient, client_id)
+        if before is None or after is None or before.name != after.name:
+            return False
+        return bool(_redirect_hosts(before) & _redirect_hosts(after))
 
     async def _over_agent_limit(self, session: AsyncSession, user: User, client_id: str) -> str:
         result = await session.execute(select(Agent).where(Agent.organization_id == user.organization_id))
@@ -373,18 +409,24 @@ class SaturnMcp:
         name: str,
         client_id: str,
     ) -> Agent | None:
+        matches: list[Agent] = []
         for ident in (self._stable_id(profile_id, user.id, name), self._legacy_id(profile_id, name, client_id)):
             direct = await session.get(Agent, ident)
-            if self._same_client(direct, user, profile_id, name):
-                return direct
-        matches = [
-            agent
-            for agent in await self._profile_agents(session, user, profile_id)
-            if self._same_client(agent, user, profile_id, name)
-        ]
+            if self._same_client(direct, user, profile_id, name) and direct not in matches:
+                matches.append(direct)
+        for agent in await self._profile_agents(session, user, profile_id):
+            if self._same_client(agent, user, profile_id, name) and agent not in matches:
+                matches.append(agent)
         if not matches:
             return None
-        matches.sort(key=lambda agent: (agent.tool_set_id is None, agent.created_at))
+        # This client's own agent first, so a refused takeover still finds the agent it was given.
+        matches.sort(
+            key=lambda agent: (
+                (agent.settings or {}).get("client_id") != client_id,
+                agent.tool_set_id is None,
+                agent.created_at,
+            )
+        )
         return matches[0]
 
     def _same_client(self, agent: Agent | None, user: User, profile_id: str, name: str) -> bool:

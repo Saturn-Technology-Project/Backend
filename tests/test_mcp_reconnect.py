@@ -79,3 +79,48 @@ async def test_claude_reconnect_reuses_the_client_and_the_agent(client):
     assert record is not None
     queued = record.queue.get_nowait()
     assert queued == {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+
+
+@pytest.mark.asyncio
+async def test_another_app_with_the_same_name_gets_its_own_empty_agent(client):
+    owner = await oauth_tokens(client, "Claude", redirect_uri="https://claude.ai/api/mcp/auth_callback")
+    first = await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {owner[0]}"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "Claude"}}},
+    )
+    assert first.status_code == 200, first.text
+    agent_id = _claude((await client.get("/agents")).json())[0]["id"]
+    created = await client.post(
+        "/tool-sets",
+        json={"name": "Phone", "items": [{"tool_id": "tool_crm_get_customer", "approval": False}]},
+    )
+    assert (await client.patch(f"/agents/{agent_id}", json={"tool_set_id": created.json()["id"]})).status_code == 200
+
+    # Same registered name and clientInfo, but its redirect goes to another host.
+    intruder = await oauth_tokens(client, "Claude", redirect_uri="https://attacker.example/callback")
+    assert intruder[2] != owner[2]
+    joined = await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {intruder[0]}"},
+        json={"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"clientInfo": {"name": "Claude"}}},
+    )
+    assert joined.status_code == 200, joined.text
+    listed = await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {intruder[0]}"},
+        json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
+    )
+    assert listed.json()["result"]["tools"] == []
+
+    agents = _claude((await client.get("/agents")).json())
+    assert len(agents) == 2
+    original = next(item for item in agents if item["id"] == agent_id)
+    assert original["client_id"] == owner[2]
+    assert original["tool_set_id"] == created.json()["id"]
+    still = await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {owner[0]}"},
+        json={"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
+    )
+    assert [tool["name"] for tool in still.json()["result"]["tools"]] == ["crm.get_customer"]
