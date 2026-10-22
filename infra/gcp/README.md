@@ -57,10 +57,10 @@ Use one identity per job, each bound to one repo only:
 
 | Identity | Used by | Roles |
 |---|---|---|
-| `github-deployer-backend` | backend `deploy-cloud-run.yml` | `roles/run.developer` (project), `roles/run.admin` on the `saturn-backend` service (lets `--allow-unauthenticated` set the invoker policy), `roles/vpcaccess.user` (project), `roles/artifactregistry.writer` on the `saturn` repository, `roles/iam.serviceAccountUser` on `saturn-runtime` only |
+| `github-deployer-backend` | backend `deploy-cloud-run.yml` | `roles/run.developer` (project), `roles/run.admin` on the `saturn-backend` and `saturn-worker` services (lets the deploy set their invoker policy), `roles/vpcaccess.user` (project), `roles/artifactregistry.writer` on the `saturn` repository, `roles/iam.serviceAccountUser` on `saturn-runtime` only |
 | `github-provisioner` | backend `provision-gcp.yml` | `roles/cloudsql.admin`, `roles/redis.admin`, `roles/compute.networkAdmin`, `roles/vpcaccess.admin`, `roles/artifactregistry.admin`, `roles/serviceusage.serviceUsageAdmin` |
 | `saturn-runtime` | the API, the worker and the migration job at runtime | see [Runtime service account](#runtime-service-account) |
-| one deployer per frontend repo | `saturn-frontend`, `saturn-dashboard` | `roles/run.developer` plus `roles/run.admin` on its own service, `roles/artifactregistry.writer`, `roles/iam.serviceAccountUser` on its own runtime SA |
+| one deployer per other repo | `saturn-frontend`, `saturn-dashboard`, `acme-demo` (repo `demosystem`) | `roles/run.developer` plus `roles/run.admin` on its own service, `roles/artifactregistry.writer` on its registry, `roles/iam.serviceAccountUser` on its own runtime SA |
 
 No identity holds `roles/iam.serviceAccountUser` on the whole project. That role on the project
 lets the holder deploy a service that runs as *any* service account. The frontend repos cannot
@@ -281,8 +281,8 @@ Redis needs no IAM: access is by network plus AUTH.
    ```bash
    GCP_PROJECT_ID=saturn-prod \
    SATURN_KMS_KEY=projects/saturn-prod/locations/asia-east1/keyRings/saturn/cryptoKeys/kem-root/cryptoKeyVersions/1 \
-   DEPLOYER_SA=github-deployer@saturn-prod.iam.gserviceaccount.com \
-   bash infra/gcp/runtime-service-account.sh
+   DEPLOYER_SA=github-deployer-backend@saturn-prod.iam.gserviceaccount.com \
+   bash infra/gcp/runtime-service-account.sh   # from the Backend repo root
    ```
 
    Add `RUNTIME_SECRETS="... REDIS_URL_TLS REDIS_CA"` (the defaults plus any extra names) when you
@@ -303,7 +303,13 @@ project-wide.
 
 ### Split and narrow the deploy identities
 
-Today one `github-deployer` is shared by all three repos. It holds project-wide `run.admin`,
+`split-deploy-identities.sh` does steps 1-4 (it only adds accounts and bindings, and prints the
+GitHub commands), and `retire-shared-deployer.sh` does step 5 and [Bind tokens to main](#bind-tokens-to-main).
+The second script refuses to run while any service still runs as the default compute account or
+was last deployed by the shared deployer. It also takes the default compute account's access to
+runtime secrets, the KMS key and Cloud SQL.
+
+Before the split, one `github-deployer` was shared by every repo. It holds project-wide `run.admin`,
 `iam.serviceAccountUser`, `cloudsql.admin`, `redis.admin`, `compute.networkAdmin` and
 `vpcaccess.admin`, so a compromised frontend CI can redeploy the backend with any identity. Move to
 the identities in [Identities](#identities):
@@ -379,6 +385,8 @@ REGION=asia-east1
 NEW=saturn-redis-tls
 ```
 
+`redis-tls.sh` does steps 1-4 and 6.
+
 1. Create the instance:
 
    ```bash
@@ -449,7 +457,9 @@ gcloud sql instances patch "$INSTANCE" --ssl-mode ENCRYPTED_ONLY
 For high availability, also run `--availability-type regional` (this roughly doubles the cost).
 
 Earlier versions of `bootstrap.sh` passed `CLOUD_SQL_PASSWORD` as a command-line argument on the CI
-runner. To rotate it without putting the new value on a command line, use
+runner. `rotate-db-password.sh` rotates it end to end: a new `DATABASE_URL` version, the password set
+through the Admin API, the API and worker rolled onto the new version, and the GitHub secret. By
+hand, use
 `gcloud sql users set-password saturn --instance saturn-pg --prompt-for-password` at an interactive
 terminal. Then update the `DATABASE_URL` secret and redeploy.
 
@@ -459,6 +469,8 @@ The API currently accepts traffic on its `*.run.app` URL from anywhere. The only
 request that bypasses Cloudflare (WAF, bot rules, rate rules) is the static `ORIGIN_AUTH_SECRET`
 header. The target setup is Cloudflare → Google external Application Load Balancer, with Cloud Armor
 allowing only Cloudflare IPs → Cloud Run with ingress `internal-and-cloud-load-balancing`.
+
+`cloudflare-ingress.sh` does steps 1 and 2 from the Origin CA certificate files.
 
 1. Load balancer in front of the service. Use a Cloudflare Origin CA certificate: a Google-managed
    certificate cannot validate while Cloudflare proxies the hostname.
