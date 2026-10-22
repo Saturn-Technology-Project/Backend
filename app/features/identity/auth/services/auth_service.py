@@ -27,6 +27,10 @@ _hasher = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1, hash_len
 # Verified against when the email is unknown, so a missing account costs the same time as a wrong password.
 _DUMMY_HASH = _hasher.hash("saturn-missing-account")
 OAUTH_SESSION_TTL = timedelta(minutes=15)
+# A console session ends after this long without a request, even before its fixed expiry.
+IDLE_TIMEOUT = timedelta(hours=24)
+# last_seen_at is written at most this often, so most requests do not write the row.
+SEEN_EVERY = timedelta(minutes=5)
 
 
 def login_secret(password: str) -> str:
@@ -244,6 +248,16 @@ class AuthService:
             or record.user.status != "active"
         ):
             return None
+        if not purpose:
+            now = utcnow()
+            seen = record.last_seen_at or record.authenticated_at or record.created_at
+            if seen is not None and seen.tzinfo is None:
+                seen = seen.replace(tzinfo=timezone.utc)
+            if seen is not None and now - seen > IDLE_TIMEOUT:
+                return None
+            if record.last_seen_at is None or seen is None or now - seen > SEEN_EVERY:
+                record.last_seen_at = now
+                await session.flush()
         return record.user
 
     async def revoke_user_sessions(

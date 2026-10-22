@@ -76,3 +76,19 @@ async def test_oauth_pages_submit_each_form_once(client):
     assert "f.dataset.busy==='1'" in page.text
     nonce = page.headers["content-security-policy"].split("'nonce-", 1)[1].split("'", 1)[0]
     assert f'<script nonce="{nonce}">document.addEventListener(\'submit\'' in page.text
+
+
+async def test_console_session_ends_after_a_day_without_use(client):
+    from sqlalchemy import update
+
+    from app.features.identity.auth.models.session import AuthSession
+
+    assert (await client.get("/auth/me")).status_code == 200
+    override = await _session_factory()
+    gen = override()
+    session = await gen.__anext__()
+    stale = utcnow() - timedelta(hours=25)
+    await session.execute(update(AuthSession).values(last_seen_at=stale, authenticated_at=stale))
+    await session.commit()
+    await gen.aclose()
+    assert (await client.get("/auth/me")).status_code == 401
