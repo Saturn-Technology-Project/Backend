@@ -41,14 +41,15 @@ gcloud redis instances describe "${NEW}" --project "${GCP_PROJECT_ID}" --region 
 
 HOST=$(gcloud redis instances describe "${NEW}" --project "${GCP_PROJECT_ID}" --region "${REGION}" --format='value(host)')
 PORT=$(gcloud redis instances describe "${NEW}" --project "${GCP_PROJECT_ID}" --region "${REGION}" --format='value(port)')
-gcloud redis instances get-auth-string "${NEW}" --project "${GCP_PROJECT_ID}" --region "${REGION}" --format='value(authString)' |
-  HOST="${HOST}" PORT="${PORT}" python3 -c '
+AUTH="$(gcloud redis instances get-auth-string "${NEW}" --project "${GCP_PROJECT_ID}" --region "${REGION}" --format='value(authString)')"
+export AUTH HOST PORT
+python3 - <<'PY' | put_secret REDIS_URL_TLS
 import os, sys
 from urllib.parse import quote
-auth = sys.stdin.read().strip()
-sys.stdout.write(f"rediss://:{quote(auth, safe=\"\")}@{os.environ[\"HOST\"]}:{os.environ[\"PORT\"]}/0"
-                 "?ssl_cert_reqs=required&ssl_ca_certs=/etc/secrets/redis-ca/ca.pem")' |
-  put_secret REDIS_URL_TLS
+sys.stdout.write("rediss://:" + quote(os.environ["AUTH"].strip(), safe="") + "@" + os.environ["HOST"] + ":" + os.environ["PORT"]
+                 + "/0?ssl_cert_reqs=required&ssl_ca_certs=/etc/secrets/redis-ca/ca.pem")
+PY
+unset AUTH
 
 echo "Pointing the next Backend deploy at ${NEW}"
 gh variable set REDIS_URL_SECRET -R "${REPO}" --body REDIS_URL_TLS

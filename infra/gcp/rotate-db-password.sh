@@ -20,18 +20,19 @@ NEW_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export NEW_PASSWORD DB_USER
 
 echo "Writing ${SECRET} with the new password"
-gcloud secrets versions access latest --secret "${SECRET}" --project "${GCP_PROJECT_ID}" |
-  python3 -c '
+CURRENT_URL="$(gcloud secrets versions access latest --secret "${SECRET}" --project "${GCP_PROJECT_ID}")"
+export CURRENT_URL
+python3 - <<'PY' | gcloud secrets versions add "${SECRET}" --project "${GCP_PROJECT_ID}" --data-file - >/dev/null
 import os, sys
 from urllib.parse import quote, urlsplit, urlunsplit
-url = urlsplit(sys.stdin.read().strip())
+url = urlsplit(os.environ["CURRENT_URL"].strip())
 user = url.username or os.environ["DB_USER"]
-host = url.hostname or ""
-netloc = f"{quote(user, safe=\"\")}:{quote(os.environ[\"NEW_PASSWORD\"], safe=\"\")}@{host}"
+netloc = quote(user, safe="") + ":" + quote(os.environ["NEW_PASSWORD"], safe="") + "@" + (url.hostname or "")
 if url.port:
-    netloc += f":{url.port}"
-sys.stdout.write(urlunsplit((url.scheme, netloc, url.path, url.query, url.fragment)))' |
-  gcloud secrets versions add "${SECRET}" --project "${GCP_PROJECT_ID}" --data-file - >/dev/null
+    netloc += ":" + str(url.port)
+sys.stdout.write(urlunsplit((url.scheme, netloc, url.path, url.query, url.fragment)))
+PY
+unset CURRENT_URL
 
 echo "Setting the password on ${DB_USER}"
 python3 -c 'import json, os; print(json.dumps({"name": os.environ["DB_USER"], "password": os.environ["NEW_PASSWORD"]}))' |
