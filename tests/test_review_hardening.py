@@ -68,3 +68,11 @@ async def test_mcp_sign_in_result_goes_only_to_console_origins(client):
     assert page.status_code == 200
     assert '"*"' not in page.text
     assert "https://dashboard.saturn-core.com" in page.text
+
+
+async def test_oauth_pages_submit_each_form_once(client):
+    client.headers.pop("Authorization", None)
+    page = await client.get("/oauth/authorize")
+    assert "f.dataset.busy==='1'" in page.text
+    nonce = page.headers["content-security-policy"].split("'nonce-", 1)[1].split("'", 1)[0]
+    assert f'<script nonce="{nonce}">document.addEventListener(\'submit\'' in page.text

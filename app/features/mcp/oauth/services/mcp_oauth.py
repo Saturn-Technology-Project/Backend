@@ -387,14 +387,20 @@ class McpOAuth:
         pending = await session.scalar(select(McpOAuthPending).where(McpOAuthPending.state_hash == hash_token(state)))
         if pending is None or _aware(pending.expires_at) <= utcnow():
             return _page(False, "", "This sign-in expired. Close the window and connect again.")
+        # Claim the sign-in before using its code. A browser can load this callback twice; only
+        # one load may exchange the code, and the other must not tell the console it failed.
+        claimed = await session.execute(
+            delete(McpOAuthPending)
+            .where(McpOAuthPending.id == pending.id)
+            .execution_options(synchronize_session=False)
+        )
+        if claimed.rowcount != 1:
+            return _page(False, "", "", notify=False)
+        session.expunge(pending)
         nonce = pending.nonce
         if error:
-            await session.delete(pending)
-            await session.flush()
             return _page(False, nonce, "The MCP provider did not grant access.")
         if not code:
-            await session.delete(pending)
-            await session.flush()
             return _page(False, nonce, "The MCP provider did not return an authorization code.")
         from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect
 
@@ -418,11 +424,8 @@ class McpOAuth:
                 authorization=token["access_token"],
             )
             await self._remember(session, server, pending, token, secret)
-            await session.delete(pending)
             await session.flush()
         except HTTPException as exc:
-            await session.delete(pending)
-            await session.flush()
             detail = exc.detail if isinstance(exc.detail, str) else "Could not finish sign-in."
             return _page(False, nonce, detail)
         return _page(True, nonce, "")
@@ -564,7 +567,7 @@ async def _token(url: str, form: dict[str, str]) -> dict[str, Any]:
     return body or {}
 
 
-def _page(ok: bool, nonce: str, error: str) -> HTMLResponse:
+def _page(ok: bool, nonce: str, error: str, *, notify: bool = True) -> HTMLResponse:
     from app.core.http_security import current_csp_nonce
 
     # Escape "<" so text from an upstream error can never close the script element.
@@ -588,7 +591,7 @@ def _page(ok: bool, nonce: str, error: str) -> HTMLResponse:
 <p>{lead}</p>
 <p>{note}</p>
 </main>
-<script nonce="{script_nonce}">if (window.opener) {{ for (const origin of {targets}) {{ try {{ window.opener.postMessage({payload}, origin); }} catch (e) {{}} }} }} window.close();</script>
+<script nonce="{script_nonce}">if ({"true" if notify else "false"} && window.opener) {{ for (const origin of {targets}) {{ try {{ window.opener.postMessage({payload}, origin); }} catch (e) {{}} }} }} window.close();</script>
 </body></html>"""
     )
 

@@ -75,6 +75,19 @@ def protected_resource(origin: str) -> dict:
     }
 
 
+# One submit per form. iOS submits a one-time-code field when it autofills it, and a tap on the
+# button then sends a second request; the first one's redirect is dropped and the second fails
+# because its challenge or consent session is already used. Captured first, so a form's own
+# submit handler never runs for the repeat. Back/forward cache restores reset it.
+_ONE_SUBMIT = (
+    "document.addEventListener('submit',function(e){var f=e.target;"
+    "if(f.dataset.busy==='1'){e.preventDefault();e.stopImmediatePropagation();return;}"
+    "f.dataset.busy='1';},true);"
+    "window.addEventListener('pageshow',function(e){if(e.persisted){"
+    "document.querySelectorAll('form').forEach(function(f){f.dataset.busy='0';});}});"
+)
+
+
 def _page(title: str, body: str, status_code: int = 200, *, wide: bool = False, lang: str = "zh-Hant") -> HTMLResponse:
     from app.core.http_security import current_csp_nonce
 
@@ -108,7 +121,8 @@ def _page(title: str, body: str, status_code: int = 200, *, wide: bool = False, 
     code {{ display: block; margin-top: 8px; padding: 8px 10px; border: 1px solid #e6e6e1; border-radius: 8px; background: #fff; word-break: break-all; color: #111110; }}
   </style>
 </head>
-<body><main>{body}</main></body>
+<body><main>{body}</main>
+<script nonce="{nonce}">{_ONE_SUBMIT}</script></body>
 </html>"""
     return HTMLResponse(html, status_code=status_code)
 
@@ -429,6 +443,7 @@ async def authorize(request: Request, session: SessionDep):
                   event.preventDefault();
                   const note = document.getElementById('login-error');
                   if (note) note.textContent = '無法完成登入。請重新整理後再試。 Sign-in could not finish. Reload the page and try again.';
+                  form.dataset.busy = '0';
                   return;
                 }}
                 const probe = async (extra) => {{

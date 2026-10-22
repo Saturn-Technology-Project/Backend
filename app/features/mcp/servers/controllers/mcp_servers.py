@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Request
+import logging
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from app.core.public_origin import public_origin
@@ -13,6 +16,7 @@ from app.features.credentials.vault.services.secret_vault import reconnect_statu
 from app.features.mcp.servers.services.mcp_gateway import mcp_gateway
 
 router = APIRouter(prefix="/mcp-servers", tags=["mcp-servers"])
+logger = logging.getLogger(__name__)
 
 
 def serialize_mcp_server(server: McpServer, *, secret_status: str = "ok") -> McpServerRead:
@@ -57,14 +61,24 @@ async def start_mcp_oauth(
     _access: TeamWrite,
     _cloud: SaturnCloud,
 ):
-    result = await mcp_oauth.begin(
-        session,
-        user,
-        name=body.name,
-        endpoint=body.endpoint,
-        origin=callback_origin(public_origin(request)),
-        nonce=body.nonce,
-    )
+    try:
+        result = await mcp_oauth.begin(
+            session,
+            user,
+            name=body.name,
+            endpoint=body.endpoint,
+            origin=callback_origin(public_origin(request)),
+            nonce=body.nonce,
+        )
+    except HTTPException as exc:
+        # The access log shows only the status. Say which step refused and for which host.
+        logger.warning(
+            "MCP sign-in start refused: %s %s (host=%s)",
+            exc.status_code,
+            exc.detail,
+            urlsplit(body.endpoint.strip()).hostname or "",
+        )
+        raise
     if result.get("authorization_url"):
         return McpOAuthStart(authorization_url=result["authorization_url"])
     return McpOAuthStart(server=serialize_mcp_server(result["server"]))
