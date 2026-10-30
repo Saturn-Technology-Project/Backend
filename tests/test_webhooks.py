@@ -422,7 +422,7 @@ async def test_concurrent_resubmit_executes_once(client, monkeypatch):
     assert len(successes) >= 1
 
 
-async def test_free_plan_cannot_manage_webhooks(client):
+async def test_free_plan_manages_webhooks(client):
     created = await client.post(
         "/admin/orgs",
         json={
@@ -440,14 +440,14 @@ async def test_free_plan_cannot_manage_webhooks(client):
     from tests.totp_access import finish_totp
 
     await finish_totp(client, headers)
-    blocked = await client.post(
+    made = await client.post(
         "/org/webhooks",
         headers=headers,
         json={"url": "https://hooks.example.com/saturn", "events": ["approval.granted"]},
     )
-    assert blocked.status_code == 403
-    assert blocked.json()["detail"] == "This feature requires Pro"
+    assert made.status_code == 201, made.text
     listed = await client.get("/org/webhooks", headers=headers)
-    assert listed.status_code == 403
+    assert listed.status_code == 200
+    assert [item["url"] for item in listed.json()] == ["https://hooks.example.com/saturn"]
     window = await client.get("/org/approval-window", headers=headers)
     assert window.status_code == 200, window.text

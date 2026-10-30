@@ -23,13 +23,14 @@ PRO_REQUIRED = "This feature requires Pro"
 GROUPS_REQUIRED = "Groups and multi-member approval require Team"
 
 
+# Saturn is free: every plan gets every feature. The plan names and these checks stay so that
+# stored plans keep parsing and a paid tier can come back by changing these two functions.
 def allows_pro(plan: str | None) -> bool:
-    return canonical_plan(plan) in {"pro", "team", "enterprise"}
+    return canonical_plan(plan) in PLANS
 
 
 def allows_groups(plan: str | None) -> bool:
-    """Team and Enterprise are the multi-member plans. Pro stays single approval."""
-    return canonical_plan(plan) in {"team", "enterprise"}
+    return canonical_plan(plan) in PLANS
 
 
 def allows_saturn_cloud(plan: str | None) -> bool:

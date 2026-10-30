@@ -5,22 +5,19 @@ from tests.oauth_access import oauth_access
 from tests.totp_access import finish_totp
 
 
-def test_unknown_plan_keeps_the_gateway_and_denies_pro():
-    assert allows_saturn_cloud(None) is True
-    assert allows_saturn_cloud("nope") is True
-    assert allows_pro(None) is False
-    assert allows_pro("") is False
-    assert allows_pro("nope") is False
-    assert allows_pro("trial") is False
-    assert allows_pro("starter") is True
-    assert allows_pro("enterprise") is True
+def test_every_plan_gets_every_feature():
+    # Saturn is free; an unknown or missing plan reads as free and gets the same.
+    for plan in (None, "", "nope", "trial", "free", "starter", "pro", "team", "enterprise"):
+        assert allows_saturn_cloud(plan) is True
+        assert allows_pro(plan) is True
     free = entitlements("free")
     assert free["tool_set_limit"] is None
-    assert free["policies"] is False
-    assert free["webhooks"] is False
+    assert free["policies"] is True
+    assert free["webhooks"] is True
+    assert free["groups"] is True
     assert free["audit"] == "full"
     assert free["audit_days"] is None
-    assert entitlements(None)["policies"] is False
+    assert entitlements(None)["policies"] is True
     assert entitlements("enterprise")["tool_set_limit"] is None
     assert entitlements("enterprise")["audit"] == "full"
     assert entitlements("enterprise")["audit_days"] is None
@@ -60,7 +57,7 @@ async def test_seed_org_is_pro(client):
 
 
 @pytest.mark.asyncio
-async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monkeypatch):
+async def test_free_connects_tool_sets_and_uses_every_api(client, monkeypatch):
     async def listed(endpoint, authorization=""):
         return [
             {"name": "repo.read", "description": "Read", "inputSchema": {"type": "object"}},
@@ -168,7 +165,9 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
     )
     assert hidden.json()["error"]["message"] == "Agent is not allowed to call this tool"
 
-    assert (await client.get("/policies", headers=headers)).json() == []
+    # Policies are open on every plan, so the organization's default policy is listed.
+    listed = (await client.get("/policies", headers=headers)).json()
+    assert [item["description"] for item in listed] == ["saturn-default-v1"]
     for path, body in (
         ("/policies", {"name": "Hidden", "rules": []}),
         ("/policies/generate", {"tool_set_id": tool_set_id, "name": "Draft"}),
@@ -177,8 +176,7 @@ async def test_free_connects_one_shared_set_and_cannot_use_pro_apis(client, monk
         ("/policies/pol_missing/optimize", {"definition": {"nodes": []}}),
     ):
         response = await client.post(path, headers=headers, json=body)
-        assert response.status_code == 403, path
-        assert response.json()["detail"] == "This feature requires Pro"
+        assert response.json().get("detail") != "This feature requires Pro", path
 
     activity = await client.get("/activity", headers=headers)
     assert activity.status_code == 200
@@ -296,7 +294,7 @@ async def test_plan_does_not_cross_organizations(client):
     )
     assert created.status_code == 201, created.text
     stolen = await client.get(f"/policies/{created.json()['id']}", headers=_auth(free))
-    assert stolen.status_code == 403
+    assert stolen.status_code == 404
     missing = await client.get(f"/policies/{created.json()['id']}", headers=_auth(other))
     assert missing.status_code == 200
     outsider = await _onboard(client, name="Third", email="third-pro@example.com", plan="pro")

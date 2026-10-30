@@ -271,7 +271,7 @@ async def test_expired_and_uncertain_upstream_do_not_retry(client, monkeypatch):
     assert calls["n"] == 1
 
 
-async def test_groups_are_an_enterprise_or_team_capability(client):
+async def test_groups_work_on_every_plan_and_stay_in_their_org(client):
     owned = await client.post("/org/groups", json={"name": "Finance Approvers"})
     assert owned.status_code == 201, owned.text
     other = await client.post(
@@ -299,17 +299,17 @@ async def test_groups_are_an_enterprise_or_team_capability(client):
     assert hidden.status_code == 404
     assert (await client.get("/approvals", headers=foreign_headers)).json() == []
 
-    blocked = await client.patch("/admin/orgs/org_saturn", json={"plan": "pro"})
-    assert blocked.status_code == 200, blocked.text
+    moved = await client.patch("/admin/orgs/org_saturn", json={"plan": "pro"})
+    assert moved.status_code == 200, moved.text
     org = await client.get("/org")
-    assert org.json()["organization"]["entitlements"]["groups"] is False
+    assert org.json()["organization"]["entitlements"]["groups"] is True
     assert org.json()["organization"]["entitlements"]["policies"] is True
-    created = await client.post("/org/groups", json={"name": "Nope"})
-    assert created.status_code == 403, created.text
+    created = await client.post("/org/groups", json={"name": "Also"})
+    assert created.status_code == 201, created.text
     single = await client.post("/org/approval-policies", json={"name": "Solo", "required_count": 1})
     assert single.status_code == 201, single.text
     quorum = await client.post("/org/approval-policies", json={"name": "Pair", "required_count": 2})
-    assert quorum.status_code == 403, quorum.text
+    assert quorum.status_code == 201, quorum.text
     both = await client.post(
         "/org/approval-policies",
         json={
@@ -320,7 +320,8 @@ async def test_groups_are_an_enterprise_or_team_capability(client):
             ],
         },
     )
-    assert both.status_code == 403, both.text
+    # Another organization's group is not found here, whatever the plan.
+    assert both.status_code == 404, both.text
 
 
 async def test_payment_needs_finance_and_admin(client, monkeypatch):

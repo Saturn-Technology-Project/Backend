@@ -43,8 +43,8 @@ async def test_free_is_personal_and_pro_can_use_saturn_mcp(client):
     org = await client.get("/org", headers=headers)
     assert org.status_code == 200
     assert org.json()["organization"]["entitlements"]["gateway"] is True
-    assert org.json()["organization"]["entitlements"]["policies"] is False
-    assert org.json()["organization"]["entitlements"]["webhooks"] is False
+    assert org.json()["organization"]["entitlements"]["policies"] is True
+    assert org.json()["organization"]["entitlements"]["webhooks"] is True
     assert org.json()["organization"]["entitlements"]["tool_set_limit"] is None
     assert org.json()["organization"]["entitlements"]["audit"] == "full"
     assert org.json()["organization"]["entitlements"]["audit_days"] is None
