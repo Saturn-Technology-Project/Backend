@@ -195,3 +195,36 @@ async def test_public_register_creates_a_personal_org(client, monkeypatch):
         },
     )
     assert mismatch.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_public_register_with_an_organization_creates_a_team(client, monkeypatch):
+    sent = {}
+
+    async def capture(_email, code, _locale=None):
+        sent["code"] = code
+
+    monkeypatch.setattr("app.features.identity.auth.controllers.auth.send_signup_code", capture)
+    payload = {"name": "Ola", "email": "ola@team.test", "password": "password1"}
+    requested = await client.post("/auth/register/code", json=payload)
+    assert requested.status_code == 204, requested.text
+    created = await client.post(
+        "/auth/register", json={**payload, "code": sent["code"], "organization": "  Ola Labs  "}
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    org = body["user"]["organization"]
+    assert org["kind"] == "organization"
+    assert org["plan"] == "team"
+    assert org["name"] == "Ola Labs"
+    assert body["user"]["profile_id"] == f"{org['id']}:{body['user']['id']}"
+
+    # A team can invite members; like every organization, only after its admin sets up MFA.
+    headers = {"Authorization": f"Bearer {body['token']}"}
+    invited = await client.post(
+        "/org/invites",
+        headers=headers,
+        json={"email": "pat@team.test", "name": "Pat"},
+    )
+    assert invited.status_code == 403
+    assert invited.json()["detail"] == "MFA setup is required"

@@ -663,19 +663,24 @@ class AdminService:
             )
         return created
 
-    async def register_personal(
+    async def register_self(
         self,
         session: AsyncSession,
         *,
         name: str,
         email: str,
         password: str,
+        organization: str | None = None,
     ) -> User:
+        """Public sign-up. With an organization name the account is a team the new user owns;
+        otherwise it is personal."""
+        org_name = (organization or "").strip()
+        kind, plan = ("organization", "team") if org_name else ("personal", "free")
         employee = await self.create_member(
             session,
             organization=None,
-            org_name=name.strip() or "Personal",
-            plan="free",
+            org_name=org_name or name.strip() or "Personal",
+            plan=plan,
             email=email,
             name=name,
             password=password,
@@ -685,7 +690,7 @@ class AdminService:
             status="active",
             agent_ids=[],
             mcp_server_ids=[],
-            kind="personal",
+            kind=kind,
             self_service=True,
         )
         user = employee.user
@@ -701,7 +706,7 @@ class AdminService:
             actor_type=ActorType.USER,
             actor_id=account.id,
             organization_id=account.organization_id,
-            payload={"kind": "personal", "plan": "free"},
+            payload={"kind": kind, "plan": plan},
         )
         return account
 

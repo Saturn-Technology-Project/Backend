@@ -757,6 +757,8 @@ class RegisterRequest(BaseModel):
     password: str = Field(max_length=PASSWORD_LEN)
     code: str = Field(max_length=CODE_LEN)
     locale: str | None = Field(default=None, max_length=LOCALE_LEN)
+    # Set to sign up as a team: an organization account with this name, owned by the new user.
+    organization: str | None = Field(default=None, max_length=NAME_LEN)
 
 
 class LocaleUpdate(BaseModel):

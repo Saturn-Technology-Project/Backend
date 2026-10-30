@@ -238,11 +238,12 @@ async def register(body: RegisterRequest, request: Request, response: Response, 
         password=body.password,
         code=body.code,
     )
-    user = await admin_service.register_personal(
+    user = await admin_service.register_self(
         session,
         name=name,
         email=email,
         password=password,
+        organization=body.organization,
     )
     user.locale = normalize_locale(body.locale)
     return await _issue_login(session, request, response, user)
