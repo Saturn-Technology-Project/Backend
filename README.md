@@ -137,3 +137,7 @@ uvicorn does not trust `X-Forwarded-*` from any peer but 127.0.0.1.
 Cloud Run + Cloud SQL + Memorystore. GitHub Actions on `main`, through the `production` environment.
 
 See [`infra/gcp/README.md`](infra/gcp/README.md) for setup, every deploy variable, and the hardening runbooks (runtime service account, migration job, Redis TLS, ingress).
+
+## License
+
+[FSL-1.1-ALv2](LICENSE.md). Copyright Rick Weng. You may read, audit, modify and self-host this code for any purpose except offering a competing commercial service. Two years after each version is released, it also becomes available under Apache 2.0.
