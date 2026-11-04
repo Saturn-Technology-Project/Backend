@@ -214,7 +214,7 @@ curl -s localhost:8000/admin/users -H "Authorization: Bearer $TOKEN"
 
 把 API 的 `/mcp` URL 交給 MCP 用戶端。用戶端第一次請求會收到 `401`，`WWW-Authenticate` 標頭指向 protected-resource metadata；用戶端接著在 `/oauth/register` 註冊自己，並把成員導向 `/oauth/authorize`（登入與同意頁面由這個 API 提供）取得 token。metadata、連結與 callback URL 都取自 `PUBLIC_WS_URL`，不取自請求的 `Host` 標頭。
 
-`initialize` 時，用戶端會成為該成員擁有的 Agent。不同的 OAuth 用戶端無法接管既有的 Agent，除非是同一個 App 重新連線。`tools/list` 回傳 Agent 的工具集；`tools/call` 執行[執行迴圈](#執行迴圈)。
+`initialize` 時，用戶端會成為該成員擁有的 Agent。使用相同 OAuth client ID 重新連線會沿用原本的 Agent；新的 client ID 會建立獨立 Agent，即使註冊名稱或回呼網域相同，也必須在主控台重新分配工具權限。`tools/list` 回傳 Agent 的工具集；`tools/call` 執行[執行迴圈](#執行迴圈)。
 
 ### 上游 MCP 伺服器
 

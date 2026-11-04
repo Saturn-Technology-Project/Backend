@@ -138,18 +138,6 @@ def _approval_expired(request_id: Any, approval: Approval, phase: str, tool_name
     )
 
 
-def _redirect_hosts(client: Any) -> set[str]:
-    from urllib.parse import urlparse
-
-    hosts = set()
-    for uri in client.redirect_uris or []:
-        parsed = urlparse(str(uri))
-        host = (parsed.hostname or "").lower() or parsed.scheme.lower()
-        if host:
-            hosts.add(host)
-    return hosts
-
-
 def rpc_error(request_id: Any, code: int, message: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     error: dict[str, Any] = {"code": code, "message": message}
     if data:
@@ -327,8 +315,9 @@ class SaturnMcp:
         if existing is not None and not self._owns(existing, user, client_id):
             return ""
         agent = existing or await self._find_client_agent(session, user, profile_id, name, client_id)
-        if agent is not None and not await self._may_inherit(session, agent, client_id):
-            # Same name, different app: never hand over another client's tool set and policies.
+        if agent is not None and not self._owns(agent, user, client_id):
+            # Registration names and redirect URIs are self-reported, not proof of app identity.
+            # A new client must receive its own agent and explicit tool assignments.
             agent = None
         if agent is None:
             refused = await self._over_agent_limit(session, user, client_id)
@@ -363,24 +352,6 @@ class SaturnMcp:
         agent.last_seen_at = utcnow()
         await session.flush()
         return ""
-
-    async def _may_inherit(self, session: AsyncSession, agent: Agent, client_id: str) -> bool:
-        """A new OAuth client takes over an agent only when it is the same app reconnecting.
-
-        The agent name and clientInfo come from the client, so they prove nothing. Claude
-        re-registers on reconnect (a new client id, sometimes a new loopback port), but it keeps
-        its registered name and its redirect host. A client with another host is another app.
-        """
-        current = str((agent.settings or {}).get("client_id") or "")
-        if not current or current == client_id:
-            return True
-        from app.features.identity.oauth.models.oauth import OAuthClient
-
-        before = await session.get(OAuthClient, current)
-        after = await session.get(OAuthClient, client_id)
-        if before is None or after is None or before.name != after.name:
-            return False
-        return bool(_redirect_hosts(before) & _redirect_hosts(after))
 
     async def _over_agent_limit(self, session: AsyncSession, user: User, client_id: str) -> str:
         result = await session.execute(select(Agent).where(Agent.organization_id == user.organization_id))

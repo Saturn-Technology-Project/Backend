@@ -50,6 +50,16 @@ def test_mcp_endpoint_requires_an_approved_public_https_host(monkeypatch):
     assert require_mcp_endpoint("https://mcp.notion.com/mcp") == "https://mcp.notion.com/mcp"
 
 
+@pytest.mark.parametrize("endpoint", ["https://mcp.ether.fi/mcp", "https://agents.coinbase.com/mcp"])
+def test_finance_marketplace_endpoints_still_reject_private_dns(endpoint, monkeypatch):
+    assert require_mcp_endpoint(endpoint) == endpoint
+    monkeypatch.setattr(
+        "app.features.mcp.servers.services.mcp_endpoint.addresses_for",
+        lambda _host, _port: ["1.1.1.1", "127.0.0.1"],
+    )
+    assert _status(endpoint) == 400
+
+
 @pytest.mark.asyncio
 async def test_changing_the_endpoint_does_not_forward_the_saved_token(client, monkeypatch):
     seen: list[tuple[str, str]] = []

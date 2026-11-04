@@ -21,8 +21,8 @@ async def test_claude_reconnect_reuses_the_client_and_the_agent(client):
     assert second.json()["client_id"] == first.json()["client_id"]
 
     phone = await oauth_tokens(client, "Claude", redirect_uri="http://127.0.0.1:8765/callback")
-    again = await oauth_tokens(client, "Claude", redirect_uri="http://127.0.0.1:9876/callback")
-    assert phone[2] != again[2]
+    again = await oauth_tokens(client, "Claude", redirect_uri="http://127.0.0.1:8765/callback")
+    assert phone[2] == again[2]
 
     opened = await client.post(
         "/mcp",
@@ -52,6 +52,7 @@ async def test_claude_reconnect_reuses_the_client_and_the_agent(client):
         },
     )
     assert reconnected.status_code == 200, reconnected.text
+    session_id = reconnected.headers["mcp-session-id"]
     still = _claude((await client.get("/agents")).json())
     assert [item["id"] for item in still] == [agent_id]
 
@@ -75,15 +76,31 @@ async def test_claude_reconnect_reuses_the_client_and_the_agent(client):
     assert saved.status_code == 200, saved.text
     from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 
-    record = await mcp_sessions.get(session_id, (await client.get("/auth/me")).json()["id"], phone[2])
+    record = await mcp_sessions.get(session_id, (await client.get("/auth/me")).json()["id"], again[2])
     assert record is not None
     queued = record.queue.get_nowait()
     assert queued == {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
 
 
 @pytest.mark.asyncio
-async def test_another_app_with_the_same_name_gets_its_own_empty_agent(client):
-    owner = await oauth_tokens(client, "Claude", redirect_uri="https://claude.ai/api/mcp/auth_callback")
+@pytest.mark.parametrize(
+    ("owner_redirect", "new_redirect", "extra_redirects"),
+    [
+        ("https://claude.ai/api/mcp/auth_callback", "https://other.example/callback", []),
+        (
+            "https://claude.ai/api/mcp/auth_callback",
+            "https://other.example/callback",
+            ["https://claude.ai/api/mcp/auth_callback"],
+        ),
+        ("https://app.example/first", "https://app.example/second", []),
+        ("http://127.0.0.1:8765/callback", "http://127.0.0.1:9876/callback", []),
+    ],
+    ids=["different-host", "overlapping-redirects", "same-host", "different-loopback-port"],
+)
+async def test_another_app_with_the_same_name_gets_its_own_empty_agent(
+    client, owner_redirect, new_redirect, extra_redirects
+):
+    owner = await oauth_tokens(client, "Claude", redirect_uri=owner_redirect)
     first = await client.post(
         "/mcp",
         headers={"Authorization": f"Bearer {owner[0]}"},
@@ -97,8 +114,13 @@ async def test_another_app_with_the_same_name_gets_its_own_empty_agent(client):
     )
     assert (await client.patch(f"/agents/{agent_id}", json={"tool_set_id": created.json()["id"]})).status_code == 200
 
-    # Same registered name and clientInfo, but its redirect goes to another host.
-    intruder = await oauth_tokens(client, "Claude", redirect_uri="https://attacker.example/callback")
+    # A different client ID cannot inherit assignments, even with overlapping redirect hosts.
+    intruder = await oauth_tokens(
+        client,
+        "Claude",
+        redirect_uri=new_redirect,
+        redirect_uris=[new_redirect, *extra_redirects],
+    )
     assert intruder[2] != owner[2]
     joined = await client.post(
         "/mcp",

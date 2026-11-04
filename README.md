@@ -214,7 +214,7 @@ curl -s localhost:8000/admin/users -H "Authorization: Bearer $TOKEN"
 
 An MCP client is given the API's `/mcp` URL. On its first request it gets `401` with a `WWW-Authenticate` header pointing at the protected-resource metadata, registers itself at `/oauth/register`, and sends the member through `/oauth/authorize` (sign-in and consent pages served by this API) to obtain a token. Metadata, links and callback URLs come from `PUBLIC_WS_URL`, never from the request's `Host` header.
 
-On `initialize` the client becomes an agent owned by that member. A different OAuth client cannot take over an existing agent unless it is the same app reconnecting. `tools/list` returns the agent's tool set; `tools/call` runs the [execution loop](#execution-loop).
+On `initialize` the client becomes an agent owned by that member. Reconnecting with the same OAuth client ID reuses its agent. A new client ID creates a separate agent whose tools must be assigned in the console, even when the registered name or callback host matches. `tools/list` returns the agent's tool set; `tools/call` runs the [execution loop](#execution-loop).
 
 ### Upstream MCP servers
 

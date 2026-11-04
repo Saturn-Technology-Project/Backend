@@ -6,6 +6,8 @@
 #     --generate-hashes --exclude-newer "$EXCLUDE_NEWER" -o requirements.txt
 #   uv pip compile requirements-dev.in --universal --python-version 3.12 \
 #     --generate-hashes --exclude-newer "$EXCLUDE_NEWER" -o requirements-dev.txt
+# For the pyasn1 security fix released within that window, include
+# `--exclude-newer-package pyasn1=2026-11-04T00:00:00Z` in both commands.
 #
 # Install with `pip install --require-hashes -r requirements.txt`.
 # Test-only packages live in requirements-dev.in.
@@ -29,3 +31,7 @@ webauthn==3.0.1
 google-cloud-secret-manager==2.31.0
 google-cloud-kms==3.5.1
 redis==5.2.1
+# Security fixes for shared TLS trust and parsers used by transitive dependencies.
+certifi==2026.10.19
+opentelemetry-api==1.45.1
+pyasn1==0.6.5
