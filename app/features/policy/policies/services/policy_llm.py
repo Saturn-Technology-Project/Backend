@@ -1,4 +1,4 @@
-"""Ask a configured model to propose one rule per tool.
+"""Ask Claude (the configured policy model) to propose one rule per tool.
 
 The model cannot activate a policy. Tools it omits, and tools it cannot
 classify, stay denied. Name-only guesses are rejected by the prompt and by
@@ -11,7 +11,8 @@ import json
 import re
 from typing import Any
 
-import httpx
+import anthropic
+from anthropic import AsyncAnthropic
 from fastapi import HTTPException, status
 
 from app.core.config import get_settings
@@ -23,6 +24,10 @@ _OPERATIONS = {"read", "create", "update", "delete", "transfer", "execute", "pub
 _RISKS = {"low", "medium", "high", "unknown"}
 _SIDE_EFFECTS = {"none", "reversible", "irreversible", "unknown"}
 _MAX_RATIONALE = 1_000
+# Claude Messages API settings for the policy model (claude-sonnet-5-5 by default).
+_MAX_TOKENS = 16_000
+_EFFORT = "medium"
+_TIMEOUT = 180.0
 # Control and bidirectional-override characters, which can hide text from a reviewer.
 _HIDDEN = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")
 
@@ -250,30 +255,51 @@ def _marker_prefix(text: str) -> int:
     return 0
 
 
-async def _chat(messages: list[dict[str, str]]) -> dict[str, Any]:
+def _client() -> AsyncAnthropic:
     settings = get_settings()
-    base = settings.policy_llm_base_url.rstrip("/")
-    payload = {"model": settings.policy_llm_model, "temperature": 0, "max_tokens": 4096, "messages": messages}
-    try:
-        async with httpx.AsyncClient(timeout=90) as client:
-            response = await client.post(
-                f"{base}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.policy_llm_api_key}"},
-                json=payload,
-            )
-    except httpx.HTTPError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model request failed") from exc
-    if response.status_code >= 400:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model request failed")
-    body = response.json()
-    try:
-        message = body["choices"][0]["message"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response") from exc
-    if not isinstance(message, dict):
+    return AsyncAnthropic(
+        api_key=settings.policy_llm_api_key,
+        base_url=settings.policy_llm_base_url or None,
+        timeout=anthropic.Timeout(_TIMEOUT, connect=20.0),
+    )
+
+
+def _request(messages: list[dict[str, str]]) -> dict[str, Any]:
+    """Messages API arguments. Claude takes the system prompt apart from the turns."""
+    system = "\n\n".join(item["content"] for item in messages if item["role"] == "system")
+    turns = [{"role": item["role"], "content": item["content"]} for item in messages if item["role"] != "system"]
+    return {
+        "model": get_settings().policy_llm_model,
+        "max_tokens": _MAX_TOKENS,
+        "system": system,
+        "messages": turns,
+        # Thinking is always on for this model; a readable summary feeds the live view.
+        "thinking": {"type": "adaptive", "display": "summarized"},
+        "output_config": {"effort": _EFFORT},
+    }
+
+
+def _check_stop(message: Any) -> None:
+    if message.stop_reason == "refusal":
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model declined the request")
+    if message.stop_reason == "max_tokens":
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response")
+
+
+async def _chat(messages: list[dict[str, str]]) -> dict[str, Any]:
+    if not _configured():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No policy model is configured")
     try:
-        return _parse_model_text(_as_text(message.get("content")), _as_text(message.get("reasoning_content") or message.get("reasoning")))
+        # Streamed even here: a long thinking turn would otherwise risk an HTTP timeout.
+        async with _client().messages.stream(**_request(messages)) as stream:
+            message = await stream.get_final_message()
+    except anthropic.APIError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model request failed") from exc
+    _check_stop(message)
+    content = "".join(block.text for block in message.content if block.type == "text")
+    reasoning = "".join(block.thinking for block in message.content if block.type == "thinking")
+    try:
+        return _parse_model_text(content, reasoning)
     except (ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model returned an unreadable response") from exc
 
@@ -321,56 +347,21 @@ def _prompt_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def _iter_deltas(messages: list[dict[str, str]]):
-    settings = get_settings()
     if not _configured():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No policy model is configured")
-    payload = {
-        "model": settings.policy_llm_model,
-        "temperature": 0,
-        "max_tokens": 4096,
-        "stream": True,
-        "messages": messages,
-    }
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=20.0)) as client:
-            async with client.stream(
-                "POST",
-                f"{settings.policy_llm_base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.policy_llm_api_key}"},
-                json=payload,
-            ) as response:
-                if response.status_code >= 400:
-                    await response.aread()
-                    raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model request failed")
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        if data == "[DONE]":
-                            break
-                        continue
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    choices = chunk.get("choices") if isinstance(chunk, dict) else None
-                    if not isinstance(choices, list) or not choices:
-                        continue
-                    delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
-                    if not isinstance(delta, dict):
-                        continue
-                    message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
-                    reasoning = _as_text(delta.get("reasoning_content") or delta.get("reasoning") or message.get("reasoning_content"))
-                    content = _as_text(delta.get("content") or message.get("content"))
-                    if reasoning:
-                        yield "reasoning", reasoning
-                    if content:
-                        yield "content", content
-    except HTTPException:
-        raise
-    except httpx.HTTPError as exc:
+        async with _client().messages.stream(**_request(messages)) as stream:
+            async for event in stream:
+                if event.type != "content_block_delta":
+                    continue
+                if event.delta.type == "thinking_delta" and event.delta.thinking:
+                    yield "reasoning", event.delta.thinking
+                elif event.delta.type == "text_delta" and event.delta.text:
+                    yield "content", event.delta.text
+            message = await stream.get_final_message()
+    except anthropic.APIError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Policy model request failed") from exc
+    _check_stop(message)
 
 
 def _as_text(value: Any) -> str:
@@ -415,7 +406,7 @@ async def _complete(tools: list[dict[str, Any]], instructions: str = "") -> dict
 async def analyze_tools(tools: list[dict[str, Any]], instructions: str = "") -> tuple[list[dict[str, Any]], bool]:
     """Return one analysis per tool and whether a model was actually called."""
     settings = get_settings()
-    configured = bool(settings.policy_llm_base_url and settings.policy_llm_api_key and settings.policy_llm_model)
+    configured = bool(settings.policy_llm_api_key and settings.policy_llm_model)
     if not configured:
         return (
             [_insufficient(tool, "No policy model is configured. This tool was not analyzed.") for tool in tools],
@@ -538,7 +529,7 @@ def _analysis_messages(tools: list[dict[str, Any]], instructions: str) -> list[d
 
 def _configured() -> bool:
     settings = get_settings()
-    return bool(settings.policy_llm_base_url and settings.policy_llm_api_key and settings.policy_llm_model)
+    return bool(settings.policy_llm_api_key and settings.policy_llm_model)
 
 
 def _tool_names(definition: dict[str, Any]) -> set[str]:

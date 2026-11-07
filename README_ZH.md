@@ -243,7 +243,7 @@ curl -s -X POST localhost:8000/mcp-servers \
 
 工具集中標記為需要核准的項目，不論政策怎麼說都需要核准。建立組織時產生的預設政策，允許權限為唯讀的工具，`write`、`admin` 與 `mutate` 則需要核准；連接伺服器時會把新工具的規則加進去。既有組織不會被改寫。
 
-`/policies/{id}/validate`、`/simulate` 與 `/activate` 用來在政策生效前檢查它。`/policies/generate` 與 `/policies/{id}/optimize`（各自也有 `/stream` 版本）會請 `POLICY_LLM_BASE_URL` 上的模型為每個工具提出一條規則。模型無法啟用政策，它沒有分類的工具維持拒絕，而且這些路由每小時每位成員限 20 次、每個組織限 60 次。
+`/policies/{id}/validate`、`/simulate` 與 `/activate` 用來在政策生效前檢查它。`/policies/generate` 與 `/policies/{id}/optimize`（各自也有 `/stream` 版本）會請 Claude（`POLICY_LLM_MODEL`，預設為 Claude Sonnet 5.5）為每個工具提出一條規則。模型無法啟用政策，它沒有分類的工具維持拒絕，而且這些路由每小時每位成員限 20 次、每個組織限 60 次。
 
 ### 核准
 
@@ -286,7 +286,9 @@ Agent 錢包與 x402 付款已經移除（遷移 `039_drop_wallets_x402`）。
 | `SATURN_EMBED_WORKER` | `true` | 在 API 行程中執行核准到期與 Webhook 的 worker |
 | `SATURN_SECRET_PROJECT` | 空 | 用於 Secret Manager 的 Google Cloud 專案；留空則把密封的秘密存在資料庫 |
 | `RESEND_API_KEY` / `RESEND_FROM` | 空 | 寄送邀請、驗證碼與通知的 Email 服務 |
-| `POLICY_LLM_BASE_URL` / `POLICY_LLM_API_KEY` / `POLICY_LLM_MODEL` | 空 | 用於草擬政策規則、相容 OpenAI 的 `/chat/completions` 端點 |
+| `POLICY_LLM_API_KEY` | 空 | 草擬政策規則所用 Claude 模型的 Anthropic API 金鑰；留空時不啟用草擬 |
+| `POLICY_LLM_MODEL` | `claude-sonnet-5-5` | 草擬政策規則所用的 Claude 模型 |
+| `POLICY_LLM_BASE_URL` | 空 | 覆寫 Claude API 的 base URL（Messages API 閘道）；使用 Claude API 時留空 |
 | `LEGACY_PASSWORD_UNTIL` | 空 | ISO 日期，過了這天舊版（argon2 之前）密碼就不能再使用；留空表示沒有期限 |
 
 直接從行程環境讀取：

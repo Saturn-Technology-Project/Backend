@@ -22,9 +22,11 @@ class Settings(BaseSettings):
     saturn_secret_project: str = ""
     resend_api_key: str = ""
     resend_from: str = ""
+    # The policy model is Claude, called through the Anthropic SDK. Leave the base URL
+    # empty for the Claude API; set it only for a Messages-API-compatible gateway.
     policy_llm_base_url: str = ""
     policy_llm_api_key: str = ""
-    policy_llm_model: str = ""
+    policy_llm_model: str = "claude-sonnet-5-5"
     # ISO date (YYYY-MM-DD). After this day, a legacy password can no longer sign in.
     legacy_password_until: str = ""
 

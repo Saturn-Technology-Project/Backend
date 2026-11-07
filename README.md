@@ -243,7 +243,7 @@ How a decision is reached:
 
 A tool set item marked for approval requires approval whatever the policy says. The default policy created at onboarding allows tools whose permissions are read-only and requires approval for `write`, `admin` and `mutate`; connecting a server adds rules for its new tools to it. Existing organizations are not rewritten.
 
-`/policies/{id}/validate`, `/simulate` and `/activate` check a policy before it takes effect. `/policies/generate` and `/policies/{id}/optimize` (each also as `/stream`) ask a model at `POLICY_LLM_BASE_URL` to propose one rule per tool. The model cannot activate a policy, tools it does not classify stay denied, and the routes are limited to 20 calls per member and 60 per organization per hour.
+`/policies/{id}/validate`, `/simulate` and `/activate` check a policy before it takes effect. `/policies/generate` and `/policies/{id}/optimize` (each also as `/stream`) ask Claude (`POLICY_LLM_MODEL`, Claude Sonnet 5.5 by default) to propose one rule per tool. The model cannot activate a policy, tools it does not classify stay denied, and the routes are limited to 20 calls per member and 60 per organization per hour.
 
 ### Approvals
 
@@ -286,7 +286,9 @@ Settings come from the environment (or `.env`); see `.env.example`. App settings
 | `SATURN_EMBED_WORKER` | `true` | Run the approval-expiry and webhook worker in the API process |
 | `SATURN_SECRET_PROJECT` | empty | Google Cloud project for Secret Manager; empty keeps sealed secrets in the database |
 | `RESEND_API_KEY` / `RESEND_FROM` | empty | Email delivery for invites, codes and notices |
-| `POLICY_LLM_BASE_URL` / `POLICY_LLM_API_KEY` / `POLICY_LLM_MODEL` | empty | OpenAI-compatible `/chat/completions` endpoint for drafted policy rules |
+| `POLICY_LLM_API_KEY` | empty | Anthropic API key for the Claude model that drafts policy rules; drafting is off while it is empty |
+| `POLICY_LLM_MODEL` | `claude-sonnet-5-5` | Claude model for drafted policy rules |
+| `POLICY_LLM_BASE_URL` | empty | Override for the Claude API base URL (a Messages-API gateway); leave empty for the Claude API |
 | `LEGACY_PASSWORD_UNTIL` | empty | ISO date after which legacy (pre-argon2) passwords stop working; empty means no end date |
 
 Read directly from the process environment:

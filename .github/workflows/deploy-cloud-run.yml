@@ -172,9 +172,7 @@ jobs:
           api="${api},SATURN_GOOGLE_OAUTH_CLIENT_ID=SATURN_GOOGLE_OAUTH_CLIENT_ID:latest"
           api="${api},SATURN_GOOGLE_OAUTH_CLIENT_SECRET=SATURN_GOOGLE_OAUTH_CLIENT_SECRET:latest"
           api="${api},RESEND_API_KEY=RESEND_API_KEY:latest,RESEND_FROM=RESEND_FROM:latest"
-          api="${api},POLICY_LLM_BASE_URL=POLICY_LLM_BASE_URL:latest"
           api="${api},POLICY_LLM_API_KEY=POLICY_LLM_API_KEY:latest"
-          api="${api},POLICY_LLM_MODEL=POLICY_LLM_MODEL:latest"
           api="${api},ORIGIN_AUTH_SECRET=ORIGIN_AUTH_SECRET:latest"
           if [ "${SEED_ON_DEPLOY}" = "true" ]; then
             api="${api},SEED_USER_EMAIL=SEED_USER_EMAIL:latest,SEED_USER_PASSWORD=SEED_USER_PASSWORD:latest"
