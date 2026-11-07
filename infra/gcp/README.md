@@ -188,8 +188,9 @@ Shared by all three repos:
 | `GCP_PROJECT_ID` | variable | all |
 | `GCP_REGION` | variable | all |
 | `GAR_LOCATION` | variable | all |
-| `GAR_REPOSITORY` | variable | all |
-| `BACKEND_PUBLIC_URL` | variable | frontend, dashboard, backend (`PUBLIC_WS_URL`) |
+| `GAR_REPOSITORY` | variable | all (default `saturn`) |
+| `RUNTIME_SERVICE_ACCOUNT` | variable | all (unset: each service keeps its current identity) |
+| `MAX_INSTANCES` | variable | all (default `10`) |
 
 Backend only:
 
@@ -198,9 +199,9 @@ Backend only:
 | `BACKEND_CLOUD_RUN_SERVICE` | variable, e.g. `saturn-backend` | `saturn-backend` |
 | `CLOUD_SQL_INSTANCE_CONNECTION_NAME` | variable | required |
 | `SERVERLESS_VPC_CONNECTOR` | variable | required |
-| `SATURN_KMS_KEY` | variable, full `cryptoKeyVersions/N` name of the MAC key | required |
+| `SATURN_KMS_KEY` | variable, full `cryptoKeyVersions/N` name of the MAC key (a resource name, not key material; read by deploy and provisioning) | required |
+| `CLOUD_SQL_PASSWORD` | secret, read only by provisioning; `rotate-db-password.sh` keeps it current | required to provision |
 | `GCP_PROVISION_SERVICE_ACCOUNT_EMAIL` | secret | provisioning uses `GCP_SERVICE_ACCOUNT_EMAIL` |
-| `RUNTIME_SERVICE_ACCOUNT` | variable, e.g. `saturn-runtime@PROJECT.iam.gserviceaccount.com` | services keep their current identity (the default compute SA) |
 | `CLOUD_RUN_INGRESS` | variable: `all`, `internal`, `internal-and-cloud-load-balancing` | the API keeps its current ingress |
 | `MIGRATIONS_JOB` | variable, `true` to run migrations in a Cloud Run Job | each container migrates on start |
 | `MIGRATIONS_JOB_NAME` | variable | `saturn-migrate` |
@@ -211,11 +212,32 @@ Backend only:
 | `REDIS_CA_SECRET` | variable, secret name holding the Memorystore server CA (PEM) | no CA mounted |
 | `LEGACY_PASSWORD_UNTIL` | variable, `YYYY-MM-DD` | legacy passwords accepted with no end date |
 | `IMAGE_ATTESTATIONS` | variable, `true` for provenance and SBOM | no attestations |
-| `MAX_INSTANCES` | variable | `10` |
-| `DATABASE_URL`, `REDIS_URL` | Secret Manager | required |
-| `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` | Secret Manager | only read when `SEED_ON_DEPLOY=true` |
-| `ORIGIN_AUTH_SECRET` | Secret Manager | required on Cloud Run |
-| `CORS_ORIGINS` | variable, optional, comma-separated browser origins if the API is called cross-origin | |
+| `DEFAULT_ORG_ID`, `DEFAULT_ACTOR_ID` | variable | `org_saturn`, `user_operator` |
+| `SEED_USER_NAME` | variable | `Admin` |
+| `SESSION_TTL_DAYS` | variable | `7` |
+| Provisioning: `CLOUD_SQL_*`, `REDIS_INSTANCE`, `REDIS_TIER`, `REDIS_SIZE_GB`, `VPC_NETWORK`, `SERVERLESS_VPC_CONNECTOR_RANGE`, `SETUP_RUNTIME_SERVICE_ACCOUNT` | variable | see [Provision data plane](#provision-data-plane) |
+
+The public origins are fixed in the workflows, not read from GitHub: the backend sets
+`PUBLIC_WS_URL=https://api.saturn-core.com` and `CORS_ORIGINS=https://dashboard.saturn-core.com`, and the
+frontend builds with `API_URL=https://api.saturn-core.com`. Change them in the workflow files.
+
+Runtime secrets live in **Secret Manager**, not GitHub. Cloud Run mounts them directly (see the
+table below), so the deploy job never reads their values:
+
+| Secret Manager secret | Required |
+|---|---|
+| `DATABASE_URL`, `REDIS_URL` | yes |
+| `ORIGIN_AUTH_SECRET` | yes on Cloud Run |
+| `SATURN_GITHUB_OAUTH_CLIENT_ID` / `_SECRET`, `SATURN_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | for social sign-in |
+| `RESEND_API_KEY`, `RESEND_FROM` | for email |
+| `POLICY_LLM_API_KEY` | an Anthropic API key; policy drafting is off without it |
+| `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` | only read when `SEED_ON_DEPLOY=true` |
+
+GitHub repository secrets with those names are left over from before the move to Secret Manager.
+Nothing reads them; delete them. The same goes for the `POLICY_LLM_BASE_URL` and `POLICY_LLM_MODEL`
+Secret Manager secrets (the model is `claude-sonnet-5-5` in code) and for `SATURN_KEM_SEED`, which the
+app stopped reading when tenant keys moved to Cloud KMS. Delete `SATURN_KEM_SEED` only after every
+stored value has been re-sealed under the KMS key.
 
 Frontend / Dashboard:
 
@@ -224,7 +246,9 @@ Frontend / Dashboard:
 | `FRONTEND_CLOUD_RUN_SERVICE` | variable, e.g. `saturn-frontend` |
 | `DASHBOARD_CLOUD_RUN_SERVICE` | variable, e.g. `saturn-dashboard` |
 
-`BACKEND_PUBLIC_URL` is the public API origin, for example `https://api.saturn-core.com`. Frontend and Dashboard bake this into the `/saturn-api` HTTP rewrite. Backend sets `PUBLIC_WS_URL` to that origin so MCP OAuth callbacks use `${PUBLIC_WS_URL}/mcp-servers/oauth/callback`.
+The public API origin is `https://api.saturn-core.com`. The frontend bakes it into the `/saturn-api`
+HTTP rewrite, and the backend sets `PUBLIC_WS_URL` to it so MCP OAuth callbacks use
+`${PUBLIC_WS_URL}/mcp-servers/oauth/callback`. A `BACKEND_PUBLIC_URL` variable is no longer read.
 
 ### Secrets per service
 
@@ -237,7 +261,7 @@ unmounted.
 | `REDIS_URL` (or `REDIS_URL_SECRET`), `REDIS_CA_SECRET` | yes | yes | no |
 | `RESEND_API_KEY`, `RESEND_FROM` | yes | yes (approval expiry sends the task-outcome email) | no |
 | `SATURN_GITHUB_OAUTH_*`, `SATURN_GOOGLE_OAUTH_*` | yes | no | no |
-| `POLICY_LLM_*` | yes | no | no |
+| `POLICY_LLM_API_KEY` | yes | no | no |
 | `ORIGIN_AUTH_SECRET` | yes | no (internal ingress; fails closed) | no |
 | `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` | only with `SEED_ON_DEPLOY=true` | no | no |
 
@@ -246,9 +270,8 @@ unmounted.
 Frontend and backend go to Cloud Run only through GitHub Actions. Do not deploy them with a local `docker push` or `gcloud run` unless that path is explicitly requested.
 
 1. Run **Provision Google Cloud Resources** once from the backend repo.
-2. Push `main` on backend. Actions tests the commit, waits for the `production` environment's reviewers, builds `linux/amd64` and deploys that image digest. If `MIGRATIONS_JOB=true`, it runs `alembic upgrade head` once in the migration job before deploying either service. Environment variables come from this repo's GitHub secrets and variables, and that file replaces the Cloud Run environment.
-3. Copy the Cloud Run URL into `BACKEND_PUBLIC_URL` when that URL changes.
-4. Push `main` on frontend, then dashboard. Deploy backend before frontend, because the frontend bakes `BACKEND_PUBLIC_URL` into the image.
+2. Push `main` on backend. Actions tests the commit, waits for the `production` environment's reviewers, builds `linux/amd64` and deploys that image digest. If `MIGRATIONS_JOB=true`, it runs `alembic upgrade head` once in the migration job before deploying either service. Environment variables come from this repo's GitHub variables and the workflow, secrets from Secret Manager, and that file replaces the Cloud Run environment.
+3. Push `main` on frontend, then dashboard. Deploy backend before frontend, because the frontend calls the new API as soon as it starts.
 
 Each deploy workflow also has **Run workflow** for a manual release. It deploys only when run on `main`.
 
