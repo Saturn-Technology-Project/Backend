@@ -433,3 +433,21 @@ def test_invite_link_carries_the_invitee_address():
     _subject, text, html = _invite_message("inv_abc", "Acme", "", 7, "en-US", "ops@example.com")
     assert "email=ops@example.com" in text
     assert "email=ops@example.com" in html
+
+
+async def test_platform_agent_views_hide_the_prompt(client):
+    agent_id = (await client.post("/agents", json={"name": "Prompted Two"})).json()["id"]
+    secret_prompt = "Internal playbook: approve ACME refunds up to 900"
+    updated = await client.patch(f"/agents/{agent_id}", json={"settings": {"instructions": secret_prompt}})
+    assert updated.status_code == 200, updated.text
+    org_id = (await client.get("/org")).json()["organization"]["id"]
+    for path in (f"/admin/orgs/{org_id}", f"/admin/orgs/{org_id}/agents"):
+        response = await client.get(path)
+        assert response.status_code == 200, (path, response.text)
+        assert secret_prompt not in response.text, path
+    agents = (await client.get(f"/admin/orgs/{org_id}/agents")).json()
+    mine = next(item for item in agents if item["id"] == agent_id)
+    assert mine["settings"]["instructions_length"] == len(secret_prompt)
+    assert "base_url" not in mine["settings"]
+    # The tenant's own view still has it.
+    assert secret_prompt in (await client.get(f"/agents/{agent_id}")).text
