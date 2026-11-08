@@ -60,8 +60,9 @@ async def test_seed_org_is_pro(client):
 async def test_free_connects_tool_sets_and_uses_every_api(client, monkeypatch):
     async def listed(endpoint, authorization=""):
         return [
-            {"name": "repo.read", "description": "Read", "inputSchema": {"type": "object"}},
-            {"name": "repo.delete", "description": "Delete", "inputSchema": {"type": "object"}},
+            # What list_remote_tools returns for a tool annotated readOnlyHint: true.
+            {"name": "repo.read", "description": "Read", "inputSchema": {"type": "object"}, "permissions": ["read"]},
+            {"name": "repo.delete", "description": "Delete", "inputSchema": {"type": "object"}, "permissions": ["write"]},
         ]
 
     async def called(endpoint, name, arguments, authorization=""):
