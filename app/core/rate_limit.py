@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import ipaddress
 import os
 import time
 from collections import defaultdict
@@ -29,13 +32,46 @@ def behind_cloudflare() -> bool:
     return bool(os.environ.get("ORIGIN_AUTH_SECRET", "").strip())
 
 
+CONSOLE_AUTH_HEADER = "x-saturn-console-auth"
+CONSOLE_CLIENT_IP_HEADER = "x-saturn-client-ip"
+
+
+def _console_secret_ok(presented: str) -> bool:
+    accepted = [
+        os.environ.get("CONSOLE_PROXY_SECRET", "").strip(),
+        os.environ.get("CONSOLE_PROXY_SECRET_PREVIOUS", "").strip(),
+    ]
+    digest = hashlib.sha256(presented.encode()).digest()
+    return any(hmac.compare_digest(digest, hashlib.sha256(value.encode()).digest()) for value in accepted if value)
+
+
+def console_client_ip(request: Request) -> str:
+    """The browser's address as the console proxy reported it, or "" when it cannot be trusted.
+
+    Every console request reaches the API from the console's own address, so Cloudflare's
+    CF-Connecting-IP names the console, not the browser. The console sends the browser's address
+    with a secret only it holds; without that secret the header is ignored.
+    """
+    presented = request.headers.get(CONSOLE_AUTH_HEADER, "")
+    if not presented or not _console_secret_ok(presented):
+        return ""
+    value = request.headers.get(CONSOLE_CLIENT_IP_HEADER, "").strip()
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return ""
+
+
 def client_ip(request: Request) -> str:
     """The address used for rate limits and throttles.
 
-    Cloudflare overwrites CF-Connecting-IP, so it is trusted only when origin auth proves the request came
-    through Cloudflare. Otherwise the rightmost X-Forwarded-For entry is the one the nearest proxy appended.
-    Any value a client chose itself is never used.
+    The console proxy's report wins when its secret matches. Cloudflare overwrites CF-Connecting-IP, so it
+    is trusted only when origin auth proves the request came through Cloudflare. Otherwise the rightmost
+    X-Forwarded-For entry is the one the nearest proxy appended. Any value a client chose itself is never used.
     """
+    console = console_client_ip(request)
+    if console:
+        return console
     if behind_cloudflare():
         cf_ip = request.headers.get("cf-connecting-ip", "").strip()
         if cf_ip:
