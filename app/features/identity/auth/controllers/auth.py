@@ -66,6 +66,7 @@ from app.features.identity.auth.services.mailer import (
     normalize_locale,
     send_email_change_code,
     send_login_code,
+    send_factor_added,
     send_reauth_code,
     send_reset_code,
     send_signup_code,
@@ -377,19 +378,44 @@ class TotpConfirmRequest(BaseModel):
     code: str
 
 
+async def _require_step_up(
+    request: Request, session: SessionDep, creds: HTTPAuthorizationCredentials | None
+) -> None:
+    """Adding a factor needs the same fresh sign-in as removing one.
+
+    Without it a stolen session could enrol its own authenticator and lock the owner out.
+    """
+    await auth_service.require_recent_auth(session, _presented_token(request, creds))
+
+
 @router.post("/totp/setup", response_model=TotpSetupRead)
-async def totp_setup(user: CurrentUser, session: SessionDep):
+async def totp_setup(
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
     from app.features.identity.auth.services.totp import begin_setup
 
+    await _require_step_up(request, session, creds)
     return await begin_setup(session, user)
 
 
 @router.post("/totp/confirm", status_code=204)
-async def totp_confirm(body: TotpConfirmRequest, request: Request, user: CurrentUser, session: SessionDep):
+async def totp_confirm(
+    body: TotpConfirmRequest,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    background: BackgroundTasks,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
     from app.features.identity.auth.services.totp import confirm_setup
 
     _require_code_check(request, user.id)
+    await _require_step_up(request, session, creds)
     await confirm_setup(session, user, body.code)
+    background.add_task(send_factor_added, user.email, "totp", user.locale)
 
 
 @router.post("/totp/verify", status_code=204)
@@ -441,7 +467,13 @@ async def mfa_email_disable(
 
 
 @router.post("/passkeys/options")
-async def passkey_options(request: Request, user: CurrentUser, session: SessionDep):
+async def passkey_options(
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    await _require_step_up(request, session, creds)
     return await passkey_service.registration_options(session, request, user)
 
 
@@ -451,8 +483,12 @@ async def create_passkey(
     request: Request,
     user: CurrentUser,
     session: SessionDep,
+    background: BackgroundTasks,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
+    await _require_step_up(request, session, creds)
     record = await passkey_service.register(session, request, user, body.credential)
+    background.add_task(send_factor_added, user.email, "passkey", user.locale)
     return PasskeyRead(id=record.id, created_at=record.created_at)
 
 
