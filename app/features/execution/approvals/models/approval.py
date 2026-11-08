@@ -60,7 +60,7 @@ class ApprovalPolicy(Base):
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     required_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     group_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    allow_requester: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    allow_requester: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     expires_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     resubmit_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

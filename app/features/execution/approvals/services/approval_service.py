@@ -314,8 +314,22 @@ class ApprovalService:
             or policy.organization_id != organization_id
             or policy.status != "active"
         ):
+            # The rule names an approval policy that is gone or turned off. Fall back to one
+            # approver who is not the requester when anyone else can decide, and say so.
+            approval.allow_requester = False
             await arm_pending(session, approval, organization_id)
             await session.flush()
+            await audit_service.log(
+                session,
+                event=AuditEvent.APPROVAL_REQUESTED,
+                actor_type=ActorType.SYSTEM,
+                actor_id="saturn",
+                organization_id=organization_id,
+                run_id=approval.run_id,
+                action_id=approval.action_id,
+                result="approval_policy_unavailable",
+                payload={"approval_id": approval.id, "approval_policy_id": policy_id},
+            )
             return
         approval.approval_policy_id = policy.id
         approval.approval_policy_version = policy.version or 1

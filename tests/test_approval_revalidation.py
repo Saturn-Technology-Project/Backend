@@ -119,3 +119,27 @@ async def test_single_approver_unchanged_policy_still_approves(client, monkeypat
     resumed = await _request(client, access, agent_id, {"amount": 6}, run_id=body["error"]["data"]["saturnRunId"])
     assert resumed["result"]["tool"] == "pay.send"
     assert calls["n"] == 1
+
+
+async def test_approval_policies_default_to_a_second_person(client):
+    created = await client.post("/org/approval-policies", json={"name": "Default", "required_count": 1})
+    assert created.status_code == 201, created.text
+    assert created.json()["allow_requester"] is False
+
+
+async def test_a_disabled_approval_policy_still_needs_a_second_person(client, monkeypatch):
+    def body(groups):
+        return {"name": "Self OK", "required_count": 1, "allow_requester": True}
+
+    calls, seen = {"n": 0}, []
+    people, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen, policy_body=body)
+    approval_policy_id = (await client.get("/org/approval-policies")).json()[0]["id"]
+    disabled = await client.patch(f"/org/approval-policies/{approval_policy_id}", json={"status": "disabled"})
+    assert disabled.status_code == 200, disabled.text
+    held = await _request(client, access, agent_id, {"amount": 7})
+    approval_id = held["error"]["data"]["approval_id"]
+    # The admin who owns the agent asked; with the linked policy off they cannot approve it themselves.
+    own = await client.post(f"/approvals/{approval_id}/approve")
+    assert own.status_code == 403, own.text
+    other = await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[0][1]))
+    assert other.status_code == 200, other.text
