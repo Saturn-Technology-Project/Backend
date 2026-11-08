@@ -19,3 +19,9 @@ description = "RFC 6238 sample TOTP secret in the admin TOTP test"
 condition = "AND"
 paths = ['''^tests/test_admin_totp\.py$''']
 regexes = ['''^JBSWY3DPEHPK3PXP$''']
+
+[[allowlists]]
+description = "Fake API key in the endpoint-URL key test"
+condition = "AND"
+paths = ['''^tests/test_mcp_endpoint\.py$''']
+regexes = ['''^sk-live-1234567890$''']
