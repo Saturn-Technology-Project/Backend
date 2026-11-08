@@ -1,16 +1,23 @@
 import logging
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 
 from app.core.public_origin import public_origin
+from app.features.identity.auth.controllers.session_cookie import cookie_secure
 from app.features.identity.auth.controllers.deps import AgentsRead, CurrentUser, SaturnCloud, SessionDep, TeamWrite
 from app.models import McpServer
 from app.schemas import McpConnect, McpOAuthBegin, McpOAuthStart, McpServerRead, McpToolRead
 from app.features.organization.org.services.mapping_service import mapping_service
 from app.features.mcp.servers.services.mcp_connect import mcp_connect_service
-from app.features.mcp.oauth.services.mcp_oauth import callback_origin, mcp_oauth
+from app.features.mcp.oauth.services.mcp_oauth import (
+    CALLBACK_PATH,
+    PENDING_TTL,
+    browser_cookie_domain,
+    callback_origin,
+    mcp_oauth,
+)
 from app.features.organization.org.services.removal_service import removal_service
 from app.features.credentials.vault.services.secret_vault import reconnect_status
 from app.features.mcp.servers.services.mcp_gateway import mcp_gateway
@@ -56,6 +63,7 @@ async def list_mcp_servers(session: SessionDep, user: CurrentUser, _access: Agen
 async def start_mcp_oauth(
     body: McpOAuthBegin,
     request: Request,
+    response: Response,
     session: SessionDep,
     user: CurrentUser,
     _access: TeamWrite,
@@ -80,6 +88,19 @@ async def start_mcp_oauth(
         )
         raise
     if result.get("authorization_url"):
+        binding = result["binding"]
+        origin = callback_origin(public_origin(request))
+        # Only this browser can finish the sign-in: the callback must present this cookie.
+        response.set_cookie(
+            key=binding.name,
+            value=binding.value,
+            max_age=int(PENDING_TTL.total_seconds()),
+            path=CALLBACK_PATH,
+            domain=browser_cookie_domain(request.headers.get("origin", ""), origin),
+            httponly=True,
+            secure=cookie_secure(request),
+            samesite="lax",
+        )
         return McpOAuthStart(authorization_url=result["authorization_url"])
     return McpOAuthStart(server=serialize_mcp_server(result["server"]))
 
@@ -91,6 +112,7 @@ async def finish_mcp_oauth(request: Request, session: SessionDep) -> HTMLRespons
         code=request.query_params.get("code", ""),
         state=request.query_params.get("state", ""),
         error=request.query_params.get("error", ""),
+        cookies=dict(request.cookies),
     )
 
 

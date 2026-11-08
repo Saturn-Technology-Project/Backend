@@ -27,6 +27,7 @@ from app.features.organization.org.services.access import permissions_for_role, 
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.identity.auth.services.auth_service import hash_password
 from app.features.mcp.servers.services.mcp_gateway import mcp_gateway
+from app.features.mcp.servers.services.mcp_remote import redact_url
 from app.features.identity.auth.services import mailer
 from app.features.organization.org.services.member_service import (
     member_service,
@@ -456,7 +457,7 @@ class AdminService:
                     "organization_name": server.organization.name if server.organization else "",
                     "status": "connected" if connected else "error",
                     "tools": tool_count,
-                    "endpoint": server.endpoint,
+                    "endpoint": redact_url(server.endpoint),
                     "error": None if connected else (link.error if link else "Disconnected"),
                 }
             )

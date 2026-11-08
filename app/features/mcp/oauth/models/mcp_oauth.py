@@ -21,6 +21,8 @@ class McpOAuthPending(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     endpoint: Mapped[str] = mapped_column(Text, nullable=False)
     nonce: Mapped[str] = mapped_column(String(128), nullable=False)
+    # SHA-256 of a secret held only in a cookie on the browser that started the sign-in.
+    browser_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     verifier_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
     client_id: Mapped[str] = mapped_column(Text, nullable=False)
     client_secret_ciphertext: Mapped[str] = mapped_column(Text, default="", nullable=False)

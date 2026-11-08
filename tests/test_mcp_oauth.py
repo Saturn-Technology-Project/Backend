@@ -350,3 +350,92 @@ async def test_authorization_requests_connect_to_the_checked_address(monkeypatch
     assert seen["url"] == "https://1.1.1.1/token?x=1"
     assert seen["headers"]["Host"] == "auth.example.com"
     assert seen["extensions"] == {"sni_hostname": "auth.example.com"}
+
+
+def _notion_flow(monkeypatch, exchanged: list):
+    async def listed(endpoint, authorization=""):
+        if authorization != "access-1":
+            raise McpUnauthorized(
+                'Bearer resource_metadata="https://mcp.notion.com/.well-known/oauth-protected-resource"',
+                endpoint,
+            )
+        return [{"name": "repo.read", "description": "Read", "inputSchema": {"type": "object", "properties": {}}}]
+
+    async def requested(method, url, **kwargs):
+        if url == "https://mcp.notion.com/.well-known/oauth-protected-resource":
+            return _response(200, {"resource": "https://mcp.notion.com/mcp", "authorization_servers": ["https://auth.example"]})
+        if url == "https://auth.example/.well-known/oauth-authorization-server":
+            return _response(
+                200,
+                {
+                    "authorization_endpoint": "https://auth.example/authorize",
+                    "token_endpoint": "https://auth.example/token",
+                    "registration_endpoint": "https://auth.example/register",
+                },
+            )
+        if method == "POST" and url == "https://auth.example/register":
+            return _response(201, {"client_id": "saturn-client"})
+        if method == "POST" and url == "https://auth.example/token":
+            exchanged.append(kwargs["data"]["code"])
+            return _response(200, {"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 3600})
+        raise AssertionError(url)
+
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth._request", requested)
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_link_opened_in_another_browser_stores_nothing(client, monkeypatch):
+    # An admin starts a sign-in and sends the provider link to someone else. When that person
+    # consents, their browser lacks the starting browser's cookie, so no token is stored.
+    monkeypatch.delenv("PUBLIC_WS_URL", raising=False)
+    exchanged: list = []
+    _notion_flow(monkeypatch, exchanged)
+    started = await client.post(
+        "/mcp-servers/oauth/start",
+        json={"name": "Notion", "endpoint": "https://mcp.notion.com/mcp", "nonce": "nonce-12345678"},
+    )
+    assert started.status_code == 200, started.text
+    set_cookie = started.headers.get("set-cookie", "")
+    assert "saturn_mcp_moa_" in set_cookie
+    assert "HttpOnly" in set_cookie and "Path=/mcp-servers/oauth/callback" in set_cookie
+    state = parse_qs(urlparse(started.json()["authorization_url"]).query)["state"][0]
+
+    victim = httpx.AsyncClient(transport=client._transport, base_url=str(client.base_url))
+    try:
+        page = await victim.get("/mcp-servers/oauth/callback", params={"code": "victim-code", "state": state})
+    finally:
+        await victim.aclose()
+    assert page.status_code == 200
+    assert "another browser" in page.text
+    assert exchanged == []
+    assert all(item["name"] != "Notion" for item in (await client.get("/mcp-servers")).json())
+    # The link is spent: the starting browser cannot finish it either.
+    again = await client.get("/mcp-servers/oauth/callback", params={"code": "code-1", "state": state})
+    assert "expired" in again.text
+    from sqlalchemy import select
+
+    from app.db.database import get_session
+    from app.main import app
+    from app.models import AuditLog
+
+    generator = app.dependency_overrides[get_session]()
+    session = await anext(generator)
+    try:
+        refused = (await session.scalars(select(AuditLog).where(AuditLog.event == "mcp_oauth_refused"))).all()
+    finally:
+        await generator.aclose()
+    assert [item.result for item in refused] == ["browser_mismatch"]
+
+
+def test_browser_cookie_reaches_the_callback_host():
+    from app.features.mcp.oauth.services.mcp_oauth import browser_cookie_domain
+
+    assert browser_cookie_domain("https://dashboard.saturn-core.com", "https://api.saturn-core.com") == "saturn-core.com"
+    assert browser_cookie_domain("https://api.saturn-core.com", "https://api.saturn-core.com") is None
+    assert browser_cookie_domain("http://localhost:3000", "http://localhost:8000") is None
+    assert browser_cookie_domain("https://a.example.com", "https://b.other.com") is None
+    # Never a public suffix alone.
+    assert browser_cookie_domain("https://a.com", "https://b.com") is None
+    assert browser_cookie_domain("http://127.0.0.1:3000", "http://127.0.0.2:8000") is None

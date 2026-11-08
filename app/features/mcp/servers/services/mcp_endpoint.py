@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import HTTPException, status
 
@@ -94,8 +95,61 @@ def require_mcp_endpoint(url: str) -> str:
         literal_ip = False
     if literal_ip or host in _METADATA_HOSTS or host not in ALLOWED_MCP_HOSTS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint host is not approved")
-    port = parts.port or 443
+    try:
+        port = parts.port or 443
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint must be HTTPS") from exc
+    if port != 443:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint must use port 443")
     found = addresses_for(host, port)
     if not found or any(address_blocked(item) for item in found):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint address is not allowed")
     return url.strip()
+
+
+# Query parameter names that carry a credential, compared without case, "-" or "_".
+_CREDENTIAL_PARAMS = frozenset(
+    {
+        "apikey",
+        "key",
+        "token",
+        "accesstoken",
+        "apitoken",
+        "authtoken",
+        "auth",
+        "authorization",
+        "secret",
+        "clientsecret",
+        "password",
+        "accesskey",
+        "signature",
+        "sig",
+    }
+)
+
+
+def _param_name(name: str) -> str:
+    return re.sub(r"[-_]", "", name).lower()
+
+
+def split_url_credential(url: str) -> tuple[str, str]:
+    """The URL without credential query parameters, and the credential it carried ("" if none).
+
+    An endpoint is stored and shown to every member who can see connections, so a key never stays
+    in it. A URL that carries more than one distinct credential is refused.
+    """
+    parts = urlsplit(url.strip())
+    if not parts.query:
+        return url.strip(), ""
+    kept: list[tuple[str, str]] = []
+    found: set[str] = set()
+    for name, value in parse_qsl(parts.query, keep_blank_values=True):
+        if _param_name(name) in _CREDENTIAL_PARAMS:
+            if value:
+                found.add(value)
+            continue
+        kept.append((name, value))
+    if len(found) > 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Put the API key in the authorization field, not the URL")
+    clean = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
+    return clean, next(iter(found), "")

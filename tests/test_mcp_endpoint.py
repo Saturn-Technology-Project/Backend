@@ -92,3 +92,58 @@ async def test_changing_the_endpoint_does_not_forward_the_saved_token(client, mo
     )
     assert blocked.status_code == 400
     assert len(seen) == 3
+
+
+def test_endpoint_must_use_port_443():
+    from app.features.mcp.servers.services.mcp_endpoint import require_mcp_endpoint
+
+    assert require_mcp_endpoint("https://mcp.notion.com:443/mcp") == "https://mcp.notion.com:443/mcp"
+    for endpoint in ["https://mcp.notion.com:8443/mcp", "https://mcp.notion.com:80/mcp", "https://mcp.notion.com:99999/mcp"]:
+        with pytest.raises(HTTPException):
+            require_mcp_endpoint(endpoint)
+
+
+@pytest.mark.asyncio
+async def test_a_key_in_the_endpoint_url_moves_to_the_vault_and_is_never_shown(client, monkeypatch):
+    seen: list[tuple[str, str]] = []
+
+    async def listed(endpoint, authorization=""):
+        seen.append((endpoint, authorization))
+        return [{"name": "filings.search", "description": "Search", "inputSchema": {"type": "object", "properties": {}}}]
+
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
+    created = await client.post(
+        "/mcp-servers",
+        json={"name": "SEC", "endpoint": "https://api.sec-api.io/mcp?apiKey=sk-live-1234567890&region=us"},
+    )
+    assert created.status_code == 201, created.text
+    assert seen == [("https://api.sec-api.io/mcp?region=us", "sk-live-1234567890")]
+    assert "sk-live" not in created.text
+    assert created.json()["has_authorization"] is True
+    listed_servers = await client.get("/mcp-servers")
+    assert "sk-live" not in listed_servers.text
+    tools = await client.get("/tools")
+    assert "sk-live" not in tools.text
+
+    conflicting = await client.post(
+        "/mcp-servers",
+        json={"name": "SEC2", "endpoint": "https://api.sec-api.io/mcp?apiKey=one", "authorization": "two"},
+    )
+    assert conflicting.status_code == 400
+    started = await client.post(
+        "/mcp-servers/oauth/start",
+        json={"name": "SEC3", "endpoint": "https://api.sec-api.io/mcp?token=abc123456", "nonce": "nonce-12345678"},
+    )
+    assert started.status_code == 400
+
+
+def test_endpoints_stored_with_a_key_are_redacted_when_read():
+    from app.schemas import McpServerRead, ToolRead
+
+    tool = ToolRead(
+        id="t", name="n", description="", type="mcp", mcp_endpoint="https://api.sec-api.io/mcp?apiKey=sk-live-1234567890",
+        permissions=[], status="active",
+    )
+    assert "sk-live" not in tool.mcp_endpoint
+    server = McpServerRead(id="s", name="n", endpoint="https://api.sec-api.io/mcp?apiKey=sk-live-1234567890", status="active")
+    assert "sk-live" not in server.endpoint

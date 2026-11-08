@@ -68,3 +68,4 @@ class AuditEvent(str, Enum):
     PROMPT_UPDATED = "prompt_updated"
     CREDENTIAL_ACCESSED = "credential_accessed"
     CONTENT_REVEALED = "content_revealed"
+    MCP_OAUTH_REFUSED = "mcp_oauth_refused"
