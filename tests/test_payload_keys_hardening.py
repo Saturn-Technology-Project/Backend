@@ -623,3 +623,55 @@ async def test_secret_manager_reads_legacy_name_and_never_deletes_another_tenant
         assert await secret_vault.get_secret(session, "org-crd_x", "org_a") == "new-value"
     finally:
         await generator.aclose()
+
+
+# Audit 2026-11-08 -----------------------------------------------------------------------------
+
+
+async def test_replacing_a_member_key_needs_a_recent_sign_in(client, monkeypatch):
+    from datetime import timedelta
+
+    _private, public = generate_mlkem()
+    assert (await client.post("/org/payload-keys/member", json={"public_key": public.hex()})).status_code == 200
+    monkeypatch.setattr("app.features.identity.auth.services.auth_service.RECENT_AUTH", timedelta(seconds=-1))
+    _private, stolen = generate_mlkem()
+    blocked = await client.post("/org/payload-keys/member", json={"public_key": stolen.hex(), "needs_assist": True})
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"] == "Reauthentication required"
+    own = await client.get("/org/payload-keys")
+    assert own.json()["own_member_key_approval"] == "approved"
+
+
+async def test_an_admin_replacement_key_waits_for_another_admin(client):
+    # The seeded admin and a second admin each hold an approved key.
+    _private, first = generate_mlkem()
+    assert (await client.post("/org/payload-keys/member", json={"public_key": first.hex()})).json()["approval"] == "approved"
+    invited = await client.post("/org/invites", json={"email": "second-admin@saturn.ai", "name": "Second", "role": "admin"})
+    assert invited.status_code == 201, invited.text
+    accepted = await client.post("/auth/accept-invite", json={"token": invited.json()["token"], "password": "password1"})
+    assert accepted.status_code == 200, accepted.text
+    from tests.totp_access import finish_totp
+
+    second = _auth(accepted.json()["token"])
+    await finish_totp(client, second)
+    _private, theirs = generate_mlkem()
+    assert (await client.post("/org/payload-keys/member", json={"public_key": theirs.hex()}, headers=second)).json()["approval"] == "approved"
+
+    # The first admin's replacement is held, and they cannot approve it themselves.
+    _private, replacement = generate_mlkem()
+    replaced = await client.post("/org/payload-keys/member", json={"public_key": replacement.hex(), "needs_assist": True})
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["approval"] == "pending"
+    key_id = replaced.json()["id"]
+    assert (await client.post(f"/org/payload-keys/member/{key_id}/approve")).status_code == 403
+    approved = await client.post(f"/org/payload-keys/member/{key_id}/approve", headers=second)
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["approval"] == "approved"
+
+
+async def test_a_sole_admin_can_still_replace_their_key(client):
+    _private, first = generate_mlkem()
+    assert (await client.post("/org/payload-keys/member", json={"public_key": first.hex()})).json()["approval"] == "approved"
+    _private, replacement = generate_mlkem()
+    replaced = await client.post("/org/payload-keys/member", json={"public_key": replacement.hex()})
+    assert replaced.json()["approval"] == "approved"

@@ -109,6 +109,28 @@ def _is_key_admin(employee: Employee) -> bool:
     return allows(employee.permissions, "team", "write")
 
 
+async def _other_key_admin(session: AsyncSession, organization_id: str, user_id: str) -> bool:
+    """Whether another team.write admin holds an approved key and so can approve this one."""
+    rows = (
+        await session.execute(
+            select(Employee, MemberPayloadKey)
+            .join(
+                MemberPayloadKey,
+                (MemberPayloadKey.user_id == Employee.user_id)
+                & (MemberPayloadKey.organization_id == Employee.organization_id),
+            )
+            .where(
+                Employee.organization_id == organization_id,
+                Employee.user_id != user_id,
+                Employee.status == "active",
+                MemberPayloadKey.status == "active",
+                MemberPayloadKey.approval == MEMBER_KEY_APPROVED,
+            )
+        )
+    ).all()
+    return any(_is_key_admin(employee) for employee, _key in rows)
+
+
 async def _audit(
     session: AsyncSession,
     *,
@@ -250,9 +272,13 @@ async def register_member_key(
     if current is not None:
         current.status = "replaced"
         current.assist_requested = False
-    # A key only receives DEK wraps once a team.write admin approves it. An admin's own key is
-    # approved on registration, which also covers the owner bootstrapping the first key.
-    auto = _is_key_admin(employee)
+    # A key only receives DEK wraps once a team.write admin approves it. An admin's first key is
+    # approved on registration, which also covers the owner bootstrapping the first key. A key that
+    # replaces one needs a second admin when there is one: whoever holds a stolen session must not
+    # be able to swap in their own key and have colleagues re-wrap every record to it.
+    auto = _is_key_admin(employee) and not (
+        replaced and await _other_key_admin(session, organization_id, user_id)
+    )
     row = MemberPayloadKey(
         id=key_id,
         organization_id=organization_id,
@@ -448,6 +474,8 @@ async def decide_member_key(
         return row
     if approve and row.approval == MEMBER_KEY_REJECTED and via != "envelope":
         raise HTTPException(status.HTTP_409_CONFLICT, "A rejected key must be registered again")
+    if approve and row.user_id == actor_user_id and await _other_key_admin(session, organization_id, actor_user_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Another admin must approve your key")
     row.approval = wanted
     row.approved_by = actor_user_id
     row.approved_at = utcnow()
