@@ -519,6 +519,13 @@ def _append_wrap(envelope: dict, member_key_id: str, user_id: str, wrapped: str)
     return {**envelope, "recipient_wraps": wraps}
 
 
+def _holds_wrap(envelope: dict, user_id: str) -> bool:
+    return any(
+        isinstance(item, dict) and item.get("user_id") == user_id
+        for item in envelope.get("recipient_wraps") or []
+    )
+
+
 def _check_wrapped(wrapped: str) -> None:
     try:
         raw = bytes.fromhex(wrapped)
@@ -575,7 +582,7 @@ async def grant_recipient_wraps(
     member_key_id: str,
     records: list[dict],
 ) -> int:
-    await _member(session, actor_user_id, organization_id)
+    actor = await _member(session, actor_user_id, organization_id)
     target = await session.get(MemberPayloadKey, member_key_id)
     if target is None or target.organization_id != organization_id or target.status != "active":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member key not found")
@@ -588,6 +595,10 @@ async def grant_recipient_wraps(
         kind = str(item.get("type") or "")
         wrapped = str(item.get("wrapped_dek") or "")
         row, envelope = await _encrypted_record(session, organization_id, kind, record_id)
+        if not has_key_check(envelope) and not (_is_key_admin(actor) or _holds_wrap(envelope, actor_user_id)):
+            # A legacy record's proof is its content hash, which every member can read. Without
+            # this, any member could plant an unusable wrap that the real holder can never replace.
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a current recipient or an admin can share this record")
         _check_possession(envelope, item)
         _check_wrapped(wrapped)
         existing = _same_wrap(envelope, target.id, wrapped)
