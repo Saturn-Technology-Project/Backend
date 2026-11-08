@@ -194,11 +194,23 @@ def _presented_token(request: Request, creds: HTTPAuthorizationCredentials | Non
     return request.cookies.get(COOKIE_NAME, "")
 
 
+def _body_token(request: Request, token: str) -> str | None:
+    """The session token for the response body, or None for a browser.
+
+    A browser gets the session only as the HttpOnly cookie, so script on the page (an XSS) cannot
+    read it and use it elsewhere. A browser always sends Origin on these POSTs; API clients and
+    scripts do not, and they still receive the bearer token.
+    """
+    if request.headers.get("origin"):
+        return None
+    return token
+
+
 async def _issue_login(session, request: Request, response: Response, user: User) -> LoginResponse:
     await mapping_service.bind_workspace(session, user)
     token, user = await auth_service.issue_session(session, user)
     set_session_cookie(response, request, token)
-    return LoginResponse(token=token, user=await serialize_user(session, user))
+    return LoginResponse(token=_body_token(request, token), user=await serialize_user(session, user))
 
 
 async def _begin_mfa(session, user: User, locale: str | None) -> LoginResponse | None:
@@ -645,7 +657,7 @@ async def accept_invite(body: AcceptInviteRequest, request: Request, response: R
     await mapping_service.bind_workspace(session, user)
     token, user = await auth_service.issue_session(session, user)
     set_session_cookie(response, request, token)
-    return LoginResponse(token=token, user=await serialize_user(session, user))
+    return LoginResponse(token=_body_token(request, token), user=await serialize_user(session, user))
 
 
 @router.post("/forgot-password", status_code=204)
