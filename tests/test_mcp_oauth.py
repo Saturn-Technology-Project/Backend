@@ -341,15 +341,39 @@ async def test_authorization_requests_connect_to_the_checked_address(monkeypatch
 
     seen = {}
 
-    async def fake_request(self, method, url, **kwargs):
-        seen.update(method=method, url=url, headers=kwargs.get("headers"), extensions=kwargs.get("extensions"))
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(url=str(request.url), host=request.headers.get("host"), sni=request.extensions.get("sni_hostname"))
         return httpx.Response(200, json={})
 
-    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    real = httpx.AsyncClient
+
+    def build(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.httpx.AsyncClient", build)
     await mcp_oauth._request("POST", "https://auth.example.com/token?x=1", data={"a": "b"})
     assert seen["url"] == "https://1.1.1.1/token?x=1"
-    assert seen["headers"]["Host"] == "auth.example.com"
-    assert seen["extensions"] == {"sni_hostname": "auth.example.com"}
+    assert seen["host"] == "auth.example.com"
+    assert seen["sni"] == "auth.example.com"
+
+
+async def test_authorization_server_responses_are_capped(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.features.mcp.oauth.services import mcp_oauth
+
+    monkeypatch.setattr(mcp_oauth, "MAX_OAUTH_RESPONSE_BYTES", 1024)
+    real = httpx.AsyncClient
+
+    def build(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(lambda request: httpx.Response(200, content=b"x" * 5000))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("app.features.mcp.oauth.services.mcp_oauth.httpx.AsyncClient", build)
+    with pytest.raises(HTTPException) as caught:
+        await mcp_oauth._request("GET", "https://auth.example.com/.well-known/oauth-authorization-server")
+    assert "too large" in str(caught.value.detail)
 
 
 def _notion_flow(monkeypatch, exchanged: list):

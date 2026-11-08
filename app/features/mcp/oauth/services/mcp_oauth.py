@@ -30,6 +30,7 @@ from app.features.mcp.servers.services.mcp_remote import McpUnauthorized, list_r
 from app.features.identity.oauth.services.oauth_service import pkce_s256
 
 PENDING_TTL = timedelta(minutes=10)
+MAX_OAUTH_RESPONSE_BYTES = 256 * 1024
 BROWSER_COOKIE_PREFIX = "saturn_mcp_"
 CALLBACK_PATH = "/mcp-servers/oauth/callback"
 
@@ -173,12 +174,29 @@ async def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     headers["Host"] = target.host
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
-            return await client.request(
+            request = client.build_request(
                 method,
                 target.url,
                 headers=headers,
                 extensions={"sni_hostname": target.host},
                 **kwargs,
+            )
+            response = await client.send(request, stream=True)
+            try:
+                # Metadata, registration and token answers are small. A server (or a metadata URL
+                # it points at) that streams more is cut off rather than buffered into memory.
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_OAUTH_RESPONSE_BYTES:
+                        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP authorization server response is too large")
+            finally:
+                await response.aclose()
+            return httpx.Response(
+                response.status_code,
+                headers=response.headers,
+                content=bytes(body),
+                request=request,
             )
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not reach the MCP authorization server") from exc
