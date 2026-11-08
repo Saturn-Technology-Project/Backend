@@ -147,3 +147,36 @@ def test_endpoints_stored_with_a_key_are_redacted_when_read():
     assert "sk-live" not in tool.mcp_endpoint
     server = McpServerRead(id="s", name="n", endpoint="https://api.sec-api.io/mcp?apiKey=sk-live-1234567890", status="active")
     assert "sk-live" not in server.endpoint
+
+
+@pytest.mark.asyncio
+async def test_mcp_requests_connect_to_the_checked_address(monkeypatch):
+    import httpx
+
+    from app.features.mcp.servers.services import mcp_remote
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.headers.get("host"), request.extensions.get("sni_hostname")))
+        body = __import__("json").loads(request.content)
+        if body["method"] == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "t"}]}})
+
+    real = httpx.AsyncClient
+
+    def build(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_remote.httpx.AsyncClient", build)
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_endpoint.addresses_for", lambda _h, _p: ["1.1.1.1"])
+    await mcp_remote.list_remote_tools("https://mcp.notion.com/mcp", "token")
+    assert seen == [("1.1.1.1", "mcp.notion.com", "mcp.notion.com")] * 2
+
+    # A name that now resolves to an internal address is refused before any request is sent.
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_endpoint.addresses_for", lambda _h, _p: ["10.0.0.5"])
+    with pytest.raises(HTTPException):
+        await mcp_remote.list_remote_tools("https://mcp.notion.com/mcp", "token")
+    assert len(seen) == 2

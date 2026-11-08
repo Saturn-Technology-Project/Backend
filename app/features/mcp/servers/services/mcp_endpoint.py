@@ -153,3 +153,22 @@ def split_url_credential(url: str) -> tuple[str, str]:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Put the API key in the authorization field, not the URL")
     clean = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
     return clean, next(iter(found), "")
+
+
+def pin_mcp_url(url: str) -> tuple[str, str]:
+    """Resolve the endpoint once, check every address, and return (url on that IP, host name).
+
+    The request then connects to the address that was checked, with Host and SNI set to the name.
+    Resolving again at connect time would let a DNS answer change in between and reach an
+    internal address.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower().rstrip(".")
+    found = addresses_for(host, parts.port or 443)
+    if not found or any(address_blocked(item) for item in found):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint address is not allowed")
+    address = found[0]
+    netloc = f"[{address}]" if ":" in address else address
+    if parts.port and parts.port != 443:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, "")), host
