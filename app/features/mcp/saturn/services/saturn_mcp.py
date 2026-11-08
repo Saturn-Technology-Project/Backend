@@ -174,6 +174,8 @@ MAX_AGENTS_PER_CLIENT = 5
 MAX_AGENTS_PER_USER = 25
 
 
+MAX_PENDING_APPROVALS_PER_AGENT = 100
+
 class SaturnMcp:
     async def handle(
         self,
@@ -460,6 +462,19 @@ class SaturnMcp:
         agent.settings = settings
         await session.flush()
 
+    async def _pending_for(self, session: AsyncSession, agent: Agent) -> int:
+        from sqlalchemy import func
+
+        return int(
+            await session.scalar(
+                select(func.count())
+                .select_from(Approval)
+                .join(Run, Run.id == Approval.run_id)
+                .where(Run.agent_id == agent.id, Approval.status == ApprovalStatus.PENDING.value)
+            )
+            or 0
+        )
+
     async def _exposed(self, session: AsyncSession, agent: Agent) -> list[tuple[Tool, ToolSetItem]]:
         if not agent.tool_set_id:
             return []
@@ -734,6 +749,15 @@ class SaturnMcp:
                         audit_no=audit_no,
                         decision=decision,
                     )
+
+        if action is None and await self._pending_for(session, agent) >= MAX_PENDING_APPROVALS_PER_AGENT:
+            # Each held call stores a run, an action, an approval and audit rows. An agent that keeps
+            # asking cannot bury the review queue; it must wait for people to decide.
+            return rpc_error(
+                request_id,
+                -32004,
+                f"too_many_pending_approvals: this agent already has {MAX_PENDING_APPROVALS_PER_AGENT} requests waiting for approval",
+            )
 
         # Run ids are always generated here. An agent-supplied saturnRunId only refers to a run it already owns.
         if run_id:

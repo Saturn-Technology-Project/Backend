@@ -51,15 +51,19 @@ logger = logging.getLogger(__name__)
 
 
 class ApprovalService:
-    async def list_approvals(self, session: AsyncSession, organization_id: str) -> list[Approval]:
+    async def list_approvals(self, session: AsyncSession, organization_id: str, page=None) -> list[Approval]:
         await expire_due(session, organization_id, now=utcnow())
-        result = await session.execute(
+        statement = (
             select(Approval)
             .options(selectinload(Approval.decisions))
             .join(Run, Approval.run_id == Run.id)
             .where(Run.organization_id == organization_id)
             .order_by(Approval.created_at.desc())
         )
+        if page is not None:
+            # Newest first, a page at a time, so a flooded queue cannot make one request load it all.
+            statement = page.apply(statement)
+        result = await session.execute(statement)
         return list(result.scalars().all())
 
     async def get_approval(
