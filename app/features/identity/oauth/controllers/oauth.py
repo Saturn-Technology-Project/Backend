@@ -563,8 +563,12 @@ async def oauth_login(request: Request, session: SessionDep):
 
 @router.post("/oauth/login/code")
 async def oauth_login_code(request: Request, session: SessionDep):
+    from app.core.rate_limit import code_check_allowed
+
     form = await _posted(request)
     fields = _posted_fields(form)
+    if not code_check_allowed(request):
+        return _page("Connect Agents", "<h1>請稍後再試</h1><p>Too many sign-in attempts.</p>", 429)
     try:
         if form.get("method", "") == "totp":
             user = await mfa_service.finish_totp(session, form.get("challenge", ""), form.get("code", ""))

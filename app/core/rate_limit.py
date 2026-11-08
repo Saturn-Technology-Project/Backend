@@ -163,8 +163,26 @@ def login_allowed(request: Request, email: str | None = None) -> bool:
     return allow(f"login-account:{email.strip().lower()}", limit=10, window=WINDOW_SECONDS)
 
 
-def migration_allowed(request: Request) -> bool:
-    return allow(f"login-migration:{client_ip(request)}", limit=24)
+def migration_allowed(request: Request, email: str | None = None) -> bool:
+    if not allow(f"login-migration:{client_ip(request)}", limit=24):
+        return False
+    if email is None:
+        return True
+    # It answers whether a legacy password is right, so it gets the same per-account cap as sign-in.
+    return allow(f"login-migration-account:{email.strip().lower()}", limit=10)
+
+
+def code_check_allowed(request: Request, subject: str | None = None) -> bool:
+    """Checking an emailed, reset or authenticator code. Per address, and per account when known.
+
+    Each code is also capped at a few guesses; this stops one address from spreading guesses
+    over many codes and accounts.
+    """
+    if not allow(f"code-check:{client_ip(request)}", limit=30):
+        return False
+    if not subject:
+        return True
+    return allow(f"code-check-account:{subject.strip().lower()}", limit=15)
 
 
 def reauth_allowed(user_id: str) -> bool:
