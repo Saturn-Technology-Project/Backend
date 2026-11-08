@@ -81,3 +81,30 @@ def test_command_refuses_the_same_key_twice(capsys):
     except SystemExit as exit:
         assert exit.code == 2
     assert "the same" in capsys.readouterr().err
+
+
+async def test_tenant_text_that_looks_sealed_does_not_block_a_reseal(client):
+    from app.db.database import get_session
+    from app.main import app
+    from app.models import User
+
+    from app.cli.reseal import sealed_location
+
+    assert sealed_location("secret_vault vault-1 ciphertext")
+    assert sealed_location("users u1 totp_secret")
+    assert sealed_location("audit_logs a1 payload.sealed")
+    assert not sealed_location("users u1 name")
+    assert not sealed_location("agents a1 settings.instructions")
+
+    generator = app.dependency_overrides[get_session]()
+    session = await anext(generator)
+    try:
+        user = (await session.scalars(select(User).where(User.email == "rick@saturn.ai"))).one()
+        user.name = "pq2.not-really-sealed"
+        await session.commit()
+        report = await reseal(await session.connection(), Keys(_local(OLD_ROOT)), Keys(_local(NEW_ROOT)), apply=False)
+        assert not report.unopened
+        assert any(item.endswith(" name") for item in report.ignored)
+        await session.rollback()
+    finally:
+        await generator.aclose()

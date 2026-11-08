@@ -23,6 +23,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import os
 import sys
 from collections.abc import Callable
@@ -120,6 +121,9 @@ class Report:
     digests: int = 0
     unopened: list[str] = field(default_factory=list)
     digests_left: list[str] = field(default_factory=list)
+    # Prefix-shaped text where Saturn never writes a sealed value. Reported, never blocking:
+    # a tenant can type "pq2.x" into a name or a prompt.
+    ignored: list[str] = field(default_factory=list)
 
     def count(self, table: str) -> None:
         self.resealed[table] = self.resealed.get(table, 0) + 1
@@ -151,9 +155,26 @@ class Tenants:
         return list(dict.fromkeys(contexts))
 
 
+# Where Saturn writes sealed values: vault and credential *ciphertext columns, users.totp_secret,
+# and the "sealed" key of JSON arguments and payloads.
+_SEALED_FIELDS = ("totp_secret", "sealed")
+
+
+def sealed_location(location: str) -> bool:
+    last = re.split(r"[ .]", location)[-1]
+    last = re.sub(r"\[\d+\]$", "", last)
+    return last.endswith("ciphertext") or last in _SEALED_FIELDS
+
+
 class Resealer:
     def __init__(self, old: Keys, new: Keys, tenants: Tenants, report: Report) -> None:
         self.old, self.new, self.tenants, self.report = old, new, tenants, report
+
+    def _unopened(self, location: str) -> None:
+        if sealed_location(location):
+            self.report.unopened.append(location)
+        else:
+            self.report.ignored.append(location)
 
     def value(self, table: str, location: str, row: dict[str, Any], value: Any) -> tuple[Any, bool]:
         """The value with every sealed string inside it re-sealed, and whether anything changed."""
@@ -163,13 +184,13 @@ class Resealer:
                     plain = self.old.open(value, organization_id, user_id)
                     if plain is not None:
                         return self.new.seal(plain, organization_id, user_id), True
-                self.report.unopened.append(location)
+                self._unopened(location)
             elif value.startswith(S2_PREFIX):
                 for organization_id in self.tenants.organizations_for(row):
                     body = self.old.open_content(value, organization_id)
                     if body is not None:
                         return self.new.seal_content(body, organization_id), True
-                self.report.unopened.append(location)
+                self._unopened(location)
             return value, False
         if isinstance(value, dict):
             changed = False
@@ -273,6 +294,8 @@ async def _run(old_key: str, new_key: str, apply: bool, allow_unopened: bool) ->
             print(f"digest left as is: {location}")
         for location in report.unopened:
             print(f"could not open: {location}")
+        for location in report.ignored:
+            print(f"left as text (not a sealed field): {location}")
         if report.unopened and not allow_unopened:
             await transaction.rollback()
             print("rolled back: some values did not open with the old key", file=sys.stderr)
