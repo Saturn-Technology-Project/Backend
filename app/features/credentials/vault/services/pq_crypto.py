@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 _PREFIX = "pq2."
 _LEGACY_PREFIX = "pq1."
+# pq3.<context>.<blob>: like pq2, with the context (what the value is for, such as the vault entry
+# it belongs to) authenticated as AES-GCM associated data. A value moved to another entry no longer
+# opens there.
+_BOUND_PREFIX = "pq3."
+_AAD_LABEL = b"saturn-pq3\n"
 
 
 class SecretNeedsReconnect(Exception):
@@ -110,12 +115,40 @@ async def content_key_async(organization_id: str) -> bytes:
     return await asyncio.to_thread(content_key, organization_id)
 
 
-async def open_secret_async(token: str, organization_id: str, user_id: str = "") -> str:
-    return await asyncio.to_thread(open_secret, token, organization_id, user_id)
+async def open_secret_async(token: str, organization_id: str, user_id: str = "", context: str | None = None) -> str:
+    return await asyncio.to_thread(open_secret, token, organization_id, user_id, context)
 
 
-async def seal_async(plain: str, organization_id: str, user_id: str = "") -> str:
-    return await asyncio.to_thread(seal, plain, organization_id, user_id)
+async def seal_async(plain: str, organization_id: str, user_id: str = "", context: str = "") -> str:
+    return await asyncio.to_thread(seal, plain, organization_id, user_id, context)
+
+
+def bound_aad(context: str) -> bytes:
+    return _AAD_LABEL + context.encode()
+
+
+def split_bound(token: str) -> tuple[str, str] | None:
+    """(context, base64 blob) of a pq3 value, or None if it is not one."""
+    if not token.startswith(_BOUND_PREFIX):
+        return None
+    head, _, blob = token[len(_BOUND_PREFIX) :].partition(".")
+    if not head or not blob:
+        return None
+    try:
+        context = base64.urlsafe_b64decode(head + "=" * (-len(head) % 4)).decode()
+    except Exception:
+        return None
+    return context, blob
+
+
+def join_bound(context: str, blob: str) -> str:
+    head = base64.urlsafe_b64encode(context.encode()).decode().rstrip("=")
+    return f"{_BOUND_PREFIX}{head}.{blob}"
+
+
+def unbound_secrets_allowed() -> bool:
+    """pq2 values carry no context. Accepted until SATURN_REQUIRE_BOUND_SECRETS is set after a reseal."""
+    return os.environ.get("SATURN_REQUIRE_BOUND_SECRETS", "").strip().lower() not in {"1", "true", "yes"}
 
 
 def _private(organization_id: str, user_id: str) -> MLKEM1024PrivateKey:
@@ -127,29 +160,43 @@ def _private(organization_id: str, user_id: str) -> MLKEM1024PrivateKey:
     return found
 
 
-def seal(plain: str, organization_id: str, user_id: str = "") -> str:
+def seal(plain: str, organization_id: str, user_id: str = "", context: str = "") -> str:
+    """Seal for this tenant. With a context, the value only opens where that context is expected."""
     if not plain:
         return ""
     public = _private(organization_id, user_id).public_key()
     shared, kem_ciphertext = public.encapsulate()
     key = _hkdf(shared, _INFO_AES, 32)
     nonce = os.urandom(12)
-    encrypted = AESGCM(key).encrypt(nonce, plain.encode(), None)
-    return _PREFIX + base64.b64encode(kem_ciphertext + nonce + encrypted).decode()
+    encrypted = AESGCM(key).encrypt(nonce, plain.encode(), bound_aad(context) if context else None)
+    blob = base64.b64encode(kem_ciphertext + nonce + encrypted).decode()
+    return join_bound(context, blob) if context else _PREFIX + blob
 
 
-def open_secret(token: str, organization_id: str, user_id: str = "") -> str:
+def open_secret(token: str, organization_id: str, user_id: str = "", context: str | None = None) -> str:
+    """Open a sealed value. Pass the context the caller expects; a value sealed for another refuses."""
     if not token or not organization_id:
         return ""
-    if token.startswith(_LEGACY_PREFIX) or not token.startswith(_PREFIX):
+    bound = split_bound(token)
+    if bound is not None:
+        sealed_for, blob = bound
+        if context is not None and sealed_for != context:
+            logger.warning("sealed value opened in the wrong place")
+            raise SecretNeedsReconnect()
+        aad: bytes | None = bound_aad(sealed_for)
+    elif token.startswith(_LEGACY_PREFIX) or not token.startswith(_PREFIX):
         raise SecretNeedsReconnect()
+    else:
+        if context and not unbound_secrets_allowed():
+            raise SecretNeedsReconnect()
+        blob, aad = token[len(_PREFIX) :], None
     try:
-        raw = base64.b64decode(token[len(_PREFIX) :])
+        raw = base64.b64decode(blob)
         kem_ciphertext, rest = raw[:1568], raw[1568:]
         nonce, encrypted = rest[:12], rest[12:]
         shared = _private(organization_id, user_id).decapsulate(kem_ciphertext)
         key = _hkdf(shared, _INFO_AES, 32)
-        return AESGCM(key).decrypt(nonce, encrypted, None).decode()
+        return AESGCM(key).decrypt(nonce, encrypted, aad).decode()
     except SecretNeedsReconnect:
         raise
     except Exception as exc:

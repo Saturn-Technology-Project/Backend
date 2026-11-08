@@ -299,6 +299,10 @@ Read directly from the process environment:
 | `SATURN_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | unset | OAuth client for Google's MCP servers |
 | `ORIGIN_AUTH_SECRET` | unset | Shared secret every request except `/healthz` must carry; required on Cloud Run |
 | `ORIGIN_AUTH_SECRET_PREVIOUS` | unset | Also accepted during a rotation |
+| `CONSOLE_PROXY_SECRET` | unset | Shared with the console; with it the API keys rate limits on the browser address the console forwards (`X-Saturn-Client-IP`) |
+| `CONSOLE_PROXY_SECRET_PREVIOUS` | unset | Also accepted during a rotation |
+| `MCP_OAUTH_COOKIE_DOMAIN` | derived | Domain for the cookie that binds an MCP sign-in to the browser that started it; by default the parent domain the console and API share |
+| `SATURN_REQUIRE_BOUND_SECRETS` | unset | `true` refuses vault values sealed before they were bound to their entry (`pq2.`); set it after a reseal |
 | `ORIGIN_AUTH_HEADER` | `X-Saturn-Origin-Auth` | Header that carries it |
 | `EXPOSE_API_DOCS` | `true` | `false` closes `/docs`, `/redoc` and `/openapi.json`; always closed on Cloud Run |
 | `K_SERVICE` | set by Cloud Run | Marks production: docs closed, origin auth and `PUBLIC_WS_URL` required, cookies always `Secure`, no invite tokens in responses |

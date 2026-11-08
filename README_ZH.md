@@ -299,6 +299,10 @@ Agent 錢包與 x402 付款已經移除（遷移 `039_drop_wallets_x402`）。
 | `SATURN_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | 未設定 | Google MCP 伺服器使用的 OAuth 用戶端 |
 | `ORIGIN_AUTH_SECRET` | 未設定 | 除了 `/healthz` 之外，每個請求都必須帶上的共用秘密；Cloud Run 上必填 |
 | `ORIGIN_AUTH_SECRET_PREVIOUS` | 未設定 | 輪替期間也接受的舊秘密 |
+| `CONSOLE_PROXY_SECRET` | 未設定 | 與主控台共用；設定後，API 以主控台轉送的瀏覽器位址（`X-Saturn-Client-IP`）做速率限制 |
+| `CONSOLE_PROXY_SECRET_PREVIOUS` | 未設定 | 輪替期間也接受的舊秘密 |
+| `MCP_OAUTH_COOKIE_DOMAIN` | 自動推導 | 把 MCP 登入綁定到發起瀏覽器的 cookie 網域；預設為主控台與 API 共用的上層網域 |
+| `SATURN_REQUIRE_BOUND_SECRETS` | 未設定 | 設為 `true` 時，拒絕尚未綁定到所屬項目的金庫值（`pq2.`）；請在重新封裝後再設定 |
 | `ORIGIN_AUTH_HEADER` | `X-Saturn-Origin-Auth` | 攜帶它的標頭 |
 | `EXPOSE_API_DOCS` | `true` | `false` 會關閉 `/docs`、`/redoc` 與 `/openapi.json`；在 Cloud Run 上一律關閉 |
 | `K_SERVICE` | 由 Cloud Run 設定 | 標示正式環境：關閉文件、必須有來源驗證與 `PUBLIC_WS_URL`、cookie 一律為 `Secure`、回應中不含邀請 token |

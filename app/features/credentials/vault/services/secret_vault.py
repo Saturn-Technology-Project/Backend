@@ -38,6 +38,11 @@ def _gcp_name(secret_id: str, organization_id: str) -> str:
     return f"sat2-{org_tag}-{id_tag}-{readable}".rstrip("-")[:255]
 
 
+def vault_context(secret_id: str) -> str:
+    """What a vault value is bound to. Moving it onto another entry makes it refuse to open."""
+    return f"vault:{secret_id}"
+
+
 def _owns(blob: str, organization_id: str, user_id: str = "") -> bool:
     """A legacy entry belongs to this tenant only when this tenant's key opens it."""
     if not blob or not organization_id:
@@ -63,7 +68,7 @@ async def put_secret(
     if not plaintext:
         await delete_secret(session, secret_id)
         return
-    blob = await seal_async(plaintext, organization_id, user_id)
+    blob = await seal_async(plaintext, organization_id, user_id, vault_context(secret_id))
     project = _project()
     if project:
         await asyncio.to_thread(_gcp_put, project, _gcp_name(secret_id, organization_id), blob)
@@ -109,17 +114,19 @@ async def _ciphertext(session: AsyncSession, secret_id: str, organization_id: st
 async def get_secret(session: AsyncSession, secret_id: str, organization_id: str, user_id: str = "") -> str:
     if not secret_id or not organization_id:
         return ""
-    return await open_secret_async(await _ciphertext(session, secret_id, organization_id), organization_id, user_id)
+    return await open_secret_async(
+        await _ciphertext(session, secret_id, organization_id), organization_id, user_id, vault_context(secret_id)
+    )
 
 
 async def reconnect_status(session: AsyncSession, secret_id: str, organization_id: str, user_id: str = "") -> str:
     if not secret_id:
         return "none"
     blob = await _ciphertext(session, secret_id, organization_id)
-    if not blob.startswith("pq2."):
+    if not blob.startswith(("pq2.", "pq3.")):
         return "needs_reconnect"
     try:
-        await open_secret_async(blob, organization_id, user_id)
+        await open_secret_async(blob, organization_id, user_id, vault_context(secret_id))
     except SecretNeedsReconnect:
         return "needs_reconnect"
     return "ok"

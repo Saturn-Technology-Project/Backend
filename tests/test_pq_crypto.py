@@ -85,7 +85,31 @@ async def test_connected_mcp_keeps_the_token_out_of_the_server_row(client, monke
         server = await session.get(McpServer, body["id"])
         assert server.credential_id.startswith("mcp-")
         vault = await session.get(SecretVault, server.credential_id)
-        assert vault.ciphertext.startswith("pq2.")
+        # Bound to its vault entry, so it does not open anywhere else.
+        assert vault.ciphertext.startswith("pq3.")
         assert "access-1" not in vault.ciphertext
     finally:
         await session_gen.aclose()
+
+
+def test_a_bound_value_only_opens_where_it_was_sealed_for(monkeypatch):
+    from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect, open_secret, seal
+
+    token = seal("bearer-for-server-1", "org_a", "", "vault:mcp-server-1")
+    assert token.startswith("pq3.")
+    assert open_secret(token, "org_a", "", "vault:mcp-server-1") == "bearer-for-server-1"
+    # Copied onto another server's vault entry, it refuses to open.
+    with pytest.raises(SecretNeedsReconnect):
+        open_secret(token, "org_a", "", "vault:mcp-server-2")
+    # Editing the visible context does not help: it is authenticated.
+    from app.features.credentials.vault.services.pq_crypto import join_bound, split_bound
+
+    _context, blob = split_bound(token)
+    with pytest.raises(SecretNeedsReconnect):
+        open_secret(join_bound("vault:mcp-server-2", blob), "org_a", "", "vault:mcp-server-2")
+    # Unbound values from before still open, until the operator requires bound ones.
+    legacy = seal("old", "org_a", "")
+    assert open_secret(legacy, "org_a", "", "vault:mcp-server-1") == "old"
+    monkeypatch.setenv("SATURN_REQUIRE_BOUND_SECRETS", "true")
+    with pytest.raises(SecretNeedsReconnect):
+        open_secret(legacy, "org_a", "", "vault:mcp-server-1")
