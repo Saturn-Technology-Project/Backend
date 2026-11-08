@@ -113,11 +113,20 @@ def _gate_expressions(
             if operator is None:
                 errors.append(f"Unknown operator on condition {str(data.get('field') or node_id)[:64]}")
                 operator = "eq"
+            value = data.get("value")
+            if operator in {"gt", "gte", "lt", "lte"}:
+                from app.features.policy.policies.services.policy_engine import strict_number
+
+                number = strict_number(value)
+                if number is None:
+                    errors.append(f"Condition {str(data.get('field') or node_id)[:64]} needs a number to compare with")
+                else:
+                    value = int(number) if number == number.to_integral_value() else float(number)
             own = {
                 "op": "cmp",
                 "field": str(data.get("field") or "").strip(),
                 "operator": operator,
-                "value": data.get("value"),
+                "value": value,
             }
             if upstream:
                 expr = {"op": "and", "args": [*(exprs[source] for source in upstream), own]}
@@ -380,9 +389,9 @@ def _has_subjects(rule: dict[str, Any]) -> bool:
 def _shadow_issues(tool: str, group: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """An unconditional allow beside a conditional restriction for the same tool.
 
-    A condition only matches when the call carries that field under exactly
-    that name. A call that leaves the field out, or spells it differently,
-    skips the restriction and falls through to the allow.
+    The engine applies the restriction whenever it cannot rule it out: a call that leaves the
+    field out, or sends a value it cannot compare, gets the restriction rather than the allow.
+    The warning names that, so the author knows the field name must match the tool's argument.
     """
     open_allow = any(rule["decision"] == "allow" and _is_open(rule) and not _has_subjects(rule) for rule in group)
     restricted = sorted({rule["decision"] for rule in group if rule["decision"] != "allow" and not _is_open(rule)})
@@ -395,8 +404,9 @@ def _shadow_issues(tool: str, group: list[dict[str, Any]]) -> list[dict[str, Any
             "code": "shadowed",
             "tool": tool,
             "message": (
-                f"{tool} is allowed without conditions, so its conditional {labels} only applies when a call "
-                "includes those fields with the exact same names. A call that leaves them out is allowed."
+                f"{tool} is allowed without conditions beside a conditional {labels}. A call that leaves "
+                "those fields out, or sends a value that is not a plain number for a numeric condition, gets "
+                f"the {labels}. Check that the field names match the tool's arguments exactly."
             ),
         }
     ]

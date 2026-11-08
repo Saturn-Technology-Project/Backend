@@ -81,3 +81,59 @@ def test_command_refuses_the_same_key_twice(capsys):
     except SystemExit as exit:
         assert exit.code == 2
     assert "the same" in capsys.readouterr().err
+
+
+async def test_tenant_text_that_looks_sealed_does_not_block_a_reseal(client):
+    from app.db.database import get_session
+    from app.main import app
+    from app.models import User
+
+    from app.cli.reseal import sealed_location
+
+    assert sealed_location("secret_vault vault-1 ciphertext")
+    assert sealed_location("users u1 totp_secret")
+    assert sealed_location("audit_logs a1 payload.sealed")
+    assert not sealed_location("users u1 name")
+    assert not sealed_location("agents a1 settings.instructions")
+
+    generator = app.dependency_overrides[get_session]()
+    session = await anext(generator)
+    try:
+        user = (await session.scalars(select(User).where(User.email == "rick@saturn.ai"))).one()
+        user.name = "pq2.not-really-sealed"
+        await session.commit()
+        report = await reseal(await session.connection(), Keys(_local(OLD_ROOT)), Keys(_local(NEW_ROOT)), apply=False)
+        assert not report.unopened
+        assert any(item.endswith(" name") for item in report.ignored)
+        await session.rollback()
+    finally:
+        await generator.aclose()
+
+
+async def test_reseal_binds_old_vault_rows_to_their_entry(client):
+    from app.core.ids import utcnow
+    from app.db.database import get_session
+    from app.features.credentials.vault.services.pq_crypto import split_bound
+    from app.main import app
+    from app.models import SecretVault, User
+
+    generator = app.dependency_overrides[get_session]()
+    session = await anext(generator)
+    try:
+        user = (await session.scalars(select(User).where(User.email == "rick@saturn.ai"))).one()
+        organization_id = user.organization_id
+        session.add(SecretVault(id="mcp-legacy", ciphertext=pq_crypto.seal("tok", organization_id), updated_at=utcnow()))
+        session.add(SecretVault(id="mcp-bound", ciphertext=pq_crypto.seal("tok2", organization_id, "", "vault:mcp-bound"), updated_at=utcnow()))
+        await session.commit()
+        old, new = Keys(_local(OLD_ROOT)), Keys(_local(NEW_ROOT))
+        await reseal(await session.connection(), old, new, apply=True)
+        await session.commit()
+        session.expire_all()
+        legacy = (await session.get(SecretVault, "mcp-legacy")).ciphertext
+        bound = (await session.get(SecretVault, "mcp-bound")).ciphertext
+        assert split_bound(legacy)[0] == "vault:mcp-legacy"
+        assert split_bound(bound)[0] == "vault:mcp-bound"
+        assert new.open(legacy, organization_id, "") == "tok"
+        assert new.open(bound, organization_id, "") == "tok2"
+    finally:
+        await generator.aclose()

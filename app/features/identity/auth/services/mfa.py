@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.features.identity.auth.services.attempts import reserve_attempt
 from app.core.ids import new_id, utcnow
 from app.features.identity.auth.models.mfa import EmailCode, LoginChallenge, Passkey
 from app.features.identity.auth.services.auth_service import hash_password, hash_token, verify_password
@@ -227,19 +228,24 @@ class MfaService:
         pending = current.name if current is not None and current.user_id == user.id else ""
         nxt = await self._open_code(session, pending, "email_next") if pending else None
         now = utcnow()
+        reserved: dict[str, int | None] = {}
+        for record in (current, nxt):
+            if record is not None:
+                reserved[record.id] = await reserve_attempt(session, record, "attempts", MAX_ATTEMPTS)
         if (
             current is None
             or nxt is None
             or nxt.user_id != user.id
             or nxt.name != pending
+            or any(value is None for value in reserved.values())
             or not self._code_ok(current, current_code, now)
             or not self._code_ok(nxt, next_code, now)
         ):
             for record in (current, nxt):
                 if record is None:
                     continue
-                record.attempts += 1
-                if record.attempts >= MAX_ATTEMPTS:
+                used = reserved.get(record.id)
+                if used is None or used >= MAX_ATTEMPTS:
                     record.used_at = now
             await session.flush()
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
@@ -282,11 +288,8 @@ class MfaService:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
 
     def _code_ok(self, record: EmailCode, code: str, now) -> bool:
-        return (
-            _as_utc(record.expires_at) > now
-            and record.attempts < MAX_ATTEMPTS
-            and verify_password(code.strip(), record.code_hash)
-        )
+        # The caller has already reserved this attempt (reserve_attempt), which enforces the cap.
+        return _as_utc(record.expires_at) > now and verify_password(code.strip(), record.code_hash)
 
     async def factors(self, session: AsyncSession, user: User) -> list[str]:
         methods: list[str] = []
@@ -353,9 +356,9 @@ class MfaService:
         record = await self._live_challenge(session, token)
         if record.code_hash is None:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
-        if not verify_password(code.strip(), record.code_hash):
-            record.attempts += 1
-            if record.attempts >= MAX_ATTEMPTS:
+        used = await reserve_attempt(session, record, "attempts", MAX_ATTEMPTS)
+        if used is None or not verify_password(code.strip(), record.code_hash):
+            if used is None or used >= MAX_ATTEMPTS:
                 record.used_at = utcnow()
             await session.flush()
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
@@ -375,11 +378,15 @@ class MfaService:
         user = await self._user(session, record.user_id)
         if user is None or not (user.totp_enabled and user.totp_secret):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        used = await reserve_attempt(session, record, "attempts", MAX_ATTEMPTS)
+        if used is None:
+            record.used_at = utcnow()
+            await session.flush()
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sign-in challenge is incorrect or expired")
         try:
             await verify_user_totp(session, user, code)
         except HTTPException:
-            record.attempts += 1
-            if record.attempts >= MAX_ATTEMPTS:
+            if used >= MAX_ATTEMPTS:
                 record.used_at = utcnow()
             await session.flush()
             raise
@@ -460,9 +467,9 @@ class MfaService:
         now = utcnow()
         if record is None or _as_utc(record.expires_at) <= now or record.attempts >= MAX_ATTEMPTS:
             return None
-        if not verify_password(code.strip(), record.code_hash):
-            record.attempts += 1
-            if record.attempts >= MAX_ATTEMPTS:
+        used = await reserve_attempt(session, record, "attempts", MAX_ATTEMPTS)
+        if used is None or not verify_password(code.strip(), record.code_hash):
+            if used is None or used >= MAX_ATTEMPTS:
                 record.used_at = now
             await session.flush()
             return None

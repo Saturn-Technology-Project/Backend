@@ -83,6 +83,9 @@ def verify_password(password: str, stored: str) -> bool:
             return True
         except (VerifyMismatchError, VerificationError, InvalidHashError):
             return False
+    if _pbkdf2_parts(stored) is not None and not legacy_password_allowed():
+        # After LEGACY_PASSWORD_UNTIL no pre-argon2 hash signs in, whichever field carries the proof.
+        return False
     if _pbkdf2_ok(secret, stored):
         return True
     if password != secret and _pbkdf2_ok(password, stored):
@@ -344,9 +347,11 @@ class AuthService:
             expires = expires.replace(tzinfo=timezone.utc)
         if record is None or expires is None or expires <= now or record.attempts >= 5:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
-        if not verify_password(code.strip(), record.code_hash):
-            record.attempts += 1
-            if record.attempts >= 5:
+        from app.features.identity.auth.services.attempts import reserve_attempt
+
+        used = await reserve_attempt(session, record, "attempts", 5)
+        if used is None or not verify_password(code.strip(), record.code_hash):
+            if used is None or used >= 5:
                 record.used_at = now
             await session.flush()
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")

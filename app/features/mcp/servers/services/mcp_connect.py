@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 from app.core.ids import new_id
 from app.models import McpServer, Tool, User
 from app.core.enums import ToolStatus, ToolType
-from app.features.mcp.servers.services.mcp_endpoint import require_mcp_endpoint
+from app.features.mcp.servers.services.mcp_endpoint import require_mcp_endpoint, split_url_credential
 from app.features.credentials.vault.services.pq_crypto import SecretNeedsReconnect
 from app.features.mcp.servers.services.mcp_grant import read_grant, write_grant
 from app.features.mcp.servers.services.mcp_remote import McpUnauthorized, list_remote_tools
@@ -47,6 +47,15 @@ class McpConnectService:
         url = endpoint.strip()
         if not label or not url:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name and endpoint are required")
+        url, url_key = split_url_credential(url)
+        if url_key:
+            # A key pasted into the URL moves to the vault like any other credential.
+            given = (authorization or "").strip()
+            if given.lower().startswith("bearer "):
+                given = given[7:].strip()
+            if given and given != url_key:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Put the API key in the authorization field, not the URL")
+            authorization = url_key
         url = require_mcp_endpoint(url)
         existing = await session.scalar(
             select(McpServer).where(
@@ -155,7 +164,7 @@ class McpConnectService:
                     description=str(item.get("description") or ""),
                     type=ToolType.MCP.value,
                     mcp_endpoint=server.endpoint,
-                    permissions=["read"],
+                    permissions=list(item.get("permissions") or ["write"]),
                     input_schema=item.get("inputSchema") or {"type": "object", "properties": {}},
                     upstream_name=upstream,
                     mcp_server_id=server.id,
@@ -165,6 +174,7 @@ class McpConnectService:
             else:
                 tool.description = str(item.get("description") or tool.description)
                 tool.input_schema = item.get("inputSchema") or tool.input_schema or {}
+                tool.permissions = list(item.get("permissions") or ["write"])
                 tool.upstream_name = upstream
                 tool.mcp_endpoint = server.endpoint
                 tool.mcp_server_id = server.id

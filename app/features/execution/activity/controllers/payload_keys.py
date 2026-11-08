@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.features.execution.activity.services import payload_key_service as keys
@@ -168,8 +168,16 @@ async def create_payload_key(body: CreateOrgKeyBody, session: SessionDep, user: 
 
 
 @router.post("/member")
-async def register_member(body: MemberKeyBody, session: SessionDep, user: CurrentUser):
+async def register_member(body: MemberKeyBody, request: Request, session: SessionDep, user: CurrentUser):
     _no_secrets(body)
+    # The console registers a key right after sign-in. Anything later needs the password again, so
+    # a stolen session alone cannot replace a member's key.
+    from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME
+    from app.features.identity.auth.services.auth_service import auth_service
+
+    header = request.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else request.cookies.get(COOKIE_NAME, "")
+    await auth_service.require_recent_auth(session, token)
     row = await keys.register_member_key(
         session,
         organization_id=user.organization_id,

@@ -10,7 +10,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.features.agent.agents.controllers.agents import serialize_agent
 from app.core.rate_limit import (
     accept_invite_allowed,
+    code_check_allowed,
     login_allowed,
+    login_failed,
     migration_allowed,
     reauth_allowed,
     signup_allowed,
@@ -65,6 +67,7 @@ from app.features.identity.auth.services.mailer import (
     normalize_locale,
     send_email_change_code,
     send_login_code,
+    send_factor_added,
     send_reauth_code,
     send_reset_code,
     send_signup_code,
@@ -76,6 +79,15 @@ from app.features.organization.org.services.plans import profile_identity
 from app.features.tooling.tool_sets.services.tool_set_service import tool_set_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _require_code_check(request: Request, subject: str | None = None) -> None:
+    if not code_check_allowed(request, subject):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many attempts",
+            headers={"Retry-After": "600"},
+        )
 _bearer = HTTPBearer(auto_error=False)
 logger = logging.getLogger(__name__)
 
@@ -183,11 +195,23 @@ def _presented_token(request: Request, creds: HTTPAuthorizationCredentials | Non
     return request.cookies.get(COOKIE_NAME, "")
 
 
+def _body_token(request: Request, token: str) -> str | None:
+    """The session token for the response body, or None for a browser.
+
+    A browser gets the session only as the HttpOnly cookie, so script on the page (an XSS) cannot
+    read it and use it elsewhere. A browser always sends Origin on these POSTs; API clients and
+    scripts do not, and they still receive the bearer token.
+    """
+    if request.headers.get("origin"):
+        return None
+    return token
+
+
 async def _issue_login(session, request: Request, response: Response, user: User) -> LoginResponse:
     await mapping_service.bind_workspace(session, user)
     token, user = await auth_service.issue_session(session, user)
     set_session_cookie(response, request, token)
-    return LoginResponse(token=token, user=await serialize_user(session, user))
+    return LoginResponse(token=_body_token(request, token), user=await serialize_user(session, user))
 
 
 async def _begin_mfa(session, user: User, locale: str | None) -> LoginResponse | None:
@@ -251,7 +275,7 @@ async def register(body: RegisterRequest, request: Request, response: Response, 
 
 @router.post("/login/migration")
 async def login_migration(body: LoginRequest, request: Request, session: SessionDep):
-    if not migration_allowed(request):
+    if not migration_allowed(request, body.email):
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "Too many attempts",
@@ -289,13 +313,18 @@ async def login(body: LoginRequest, request: Request, response: Response, sessio
             "Too many attempts",
             headers={"Retry-After": "600"},
         )
-    user = await auth_service.authenticate(
-        session,
-        body.email,
-        body.password,
-        legacy_password=body.legacy_password,
-        legacy_v1=body.legacy_v1,
-    )
+    try:
+        user = await auth_service.authenticate(
+            session,
+            body.email,
+            body.password,
+            legacy_password=body.legacy_password,
+            legacy_v1=body.legacy_v1,
+        )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            login_failed(body.email)
+        raise
     pending = await _begin_mfa(session, user, body.locale)
     if pending is not None:
         return pending
@@ -304,6 +333,7 @@ async def login(body: LoginRequest, request: Request, response: Response, sessio
 
 @router.post("/login/email", response_model=LoginResponse)
 async def login_email(body: LoginEmailRequest, request: Request, response: Response, session: SessionDep):
+    _require_code_check(request)
     user = await mfa_service.finish_email(session, body.challenge, body.code)
     return await _issue_login(session, request, response, user)
 
@@ -315,6 +345,7 @@ class LoginTotpRequest(BaseModel):
 
 @router.post("/login/totp", response_model=LoginResponse)
 async def login_totp(body: LoginTotpRequest, request: Request, response: Response, session: SessionDep):
+    _require_code_check(request)
     user = await mfa_service.finish_totp(session, body.challenge, body.code)
     return await _issue_login(session, request, response, user)
 
@@ -365,24 +396,51 @@ class TotpConfirmRequest(BaseModel):
     code: str
 
 
+async def _require_step_up(
+    request: Request, session: SessionDep, creds: HTTPAuthorizationCredentials | None
+) -> None:
+    """Adding a factor needs the same fresh sign-in as removing one.
+
+    Without it a stolen session could enrol its own authenticator and lock the owner out.
+    """
+    await auth_service.require_recent_auth(session, _presented_token(request, creds))
+
+
 @router.post("/totp/setup", response_model=TotpSetupRead)
-async def totp_setup(user: CurrentUser, session: SessionDep):
+async def totp_setup(
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
     from app.features.identity.auth.services.totp import begin_setup
 
+    await _require_step_up(request, session, creds)
     return await begin_setup(session, user)
 
 
 @router.post("/totp/confirm", status_code=204)
-async def totp_confirm(body: TotpConfirmRequest, user: CurrentUser, session: SessionDep):
+async def totp_confirm(
+    body: TotpConfirmRequest,
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    background: BackgroundTasks,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
     from app.features.identity.auth.services.totp import confirm_setup
 
+    _require_code_check(request, user.id)
+    await _require_step_up(request, session, creds)
     await confirm_setup(session, user, body.code)
+    background.add_task(send_factor_added, user.email, "totp", user.locale)
 
 
 @router.post("/totp/verify", status_code=204)
-async def totp_verify(body: TotpConfirmRequest, user: CurrentUser, session: SessionDep):
+async def totp_verify(body: TotpConfirmRequest, request: Request, user: CurrentUser, session: SessionDep):
     from app.features.identity.auth.services.totp import verify_user_totp
 
+    _require_code_check(request, user.id)
     await verify_user_totp(session, user, body.code)
 
 
@@ -410,7 +468,8 @@ async def mfa_email_code(
 
 
 @router.post("/mfa/email", status_code=204)
-async def mfa_email_enable(body: MfaCodeRequest, user: CurrentUser, session: SessionDep):
+async def mfa_email_enable(body: MfaCodeRequest, request: Request, user: CurrentUser, session: SessionDep):
+    _require_code_check(request, user.id)
     await mfa_service.enable_email_mfa(session, user, body.code)
 
 
@@ -426,7 +485,13 @@ async def mfa_email_disable(
 
 
 @router.post("/passkeys/options")
-async def passkey_options(request: Request, user: CurrentUser, session: SessionDep):
+async def passkey_options(
+    request: Request,
+    user: CurrentUser,
+    session: SessionDep,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    await _require_step_up(request, session, creds)
     return await passkey_service.registration_options(session, request, user)
 
 
@@ -436,8 +501,12 @@ async def create_passkey(
     request: Request,
     user: CurrentUser,
     session: SessionDep,
+    background: BackgroundTasks,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
+    await _require_step_up(request, session, creds)
     record = await passkey_service.register(session, request, user, body.credential)
+    background.add_task(send_factor_added, user.email, "passkey", user.locale)
     return PasskeyRead(id=record.id, created_at=record.created_at)
 
 
@@ -499,6 +568,7 @@ async def confirm_email_change(
     session: SessionDep,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
+    _require_code_check(request, user.id)
     await mfa_service.confirm_email_change(session, user, body.current_code, body.next_code)
     token = _presented_token(request, creds)
     await auth_service.revoke_user_sessions(
@@ -593,7 +663,7 @@ async def accept_invite(body: AcceptInviteRequest, request: Request, response: R
     await mapping_service.bind_workspace(session, user)
     token, user = await auth_service.issue_session(session, user)
     set_session_cookie(response, request, token)
-    return LoginResponse(token=token, user=await serialize_user(session, user))
+    return LoginResponse(token=_body_token(request, token), user=await serialize_user(session, user))
 
 
 @router.post("/forgot-password", status_code=204)
@@ -607,7 +677,8 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request, session
 
 
 @router.post("/reset-password", status_code=204)
-async def reset_password(body: ResetPasswordRequest, session: SessionDep):
+async def reset_password(body: ResetPasswordRequest, request: Request, session: SessionDep):
+    _require_code_check(request, body.email)
     await auth_service.reset_password(session, body.email, body.code, body.password)
 
 

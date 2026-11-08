@@ -2,7 +2,23 @@ from __future__ import annotations
 
 from fastapi import APIRouter, status
 
-from app.features.agent.agents.controllers.agents import serialize_agent
+from app.features.agent.agents.controllers.agents import serialize_agent as _serialize_tenant_agent
+
+
+# Tenant content the cross-tenant view never shows: the agent's prompt, its knowledge, and
+# where it sends model traffic. The audit view already hides prompt text the same way.
+_TENANT_SETTINGS = ("instructions", "knowledge", "base_url", "model_connection_id")
+
+
+def serialize_agent(agent):
+    read = _serialize_tenant_agent(agent)
+    settings = dict(read.settings or {})
+    if settings:
+        instructions = str(settings.get("instructions") or "")
+        for key in _TENANT_SETTINGS:
+            settings.pop(key, None)
+        settings["instructions_length"] = len(instructions)
+    return read.model_copy(update={"settings": settings})
 from app.features.identity.auth.controllers.deps import PlatformAdmin, SessionDep
 from app.features.mcp.servers.controllers.mcp_servers import serialize_mcp_server
 from app.features.organization.org.controllers.org import serialize_member

@@ -1,5 +1,7 @@
+import os
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +29,19 @@ class Settings(BaseSettings):
     policy_llm_model: str = ""
     # ISO date (YYYY-MM-DD). After this day, a legacy password can no longer sign in.
     legacy_password_until: str = ""
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _https_origins_in_production(cls, value: str) -> str:
+        """On Cloud Run only https origins are trusted.
+
+        This list drives credentialed CORS, the cookie CSRF check and the passkey relying party. A
+        localhost default left in production would trust any page a user runs on their own machine.
+        """
+        if not os.environ.get("K_SERVICE", "").strip():
+            return value
+        kept = [item.strip() for item in (value or "").split(",") if item.strip().lower().startswith("https://")]
+        return ",".join(kept)
 
 
 @lru_cache

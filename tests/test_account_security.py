@@ -184,3 +184,40 @@ async def test_public_signup_does_not_reveal_an_existing_account(client, monkeyp
     )
     assert existing.status_code == 204, existing.text
     assert second_new.status_code == second_existing.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_adding_a_factor_needs_a_recent_sign_in_and_tells_the_owner(client, monkeypatch):
+    # A stolen session must not be able to enrol its own authenticator or passkey.
+    from datetime import timedelta
+
+    from app.features.identity.auth.services.totp import current_code
+
+    told = []
+
+    async def capture(email, factor, locale=None):
+        told.append((email, factor))
+        return True
+
+    monkeypatch.setattr("app.features.identity.auth.controllers.auth.send_factor_added", capture)
+    invited = await client.post("/org/invites", json={"email": "factor@saturn.ai", "name": "Factor", "role": "viewer"})
+    assert invited.status_code == 201, invited.text
+    accepted = await client.post("/auth/accept-invite", json={"token": invited.json()["token"], "password": "password1"})
+    assert accepted.status_code == 200, accepted.text
+    member = {"Authorization": f"Bearer {accepted.json()['token']}"}
+
+    monkeypatch.setattr("app.features.identity.auth.services.auth_service.RECENT_AUTH", timedelta(seconds=-1))
+    for path in ("/auth/totp/setup", "/auth/passkeys/options"):
+        blocked = await client.post(path, headers=member, json={})
+        assert blocked.status_code == 403, (path, blocked.text)
+        assert blocked.json()["detail"] == "Reauthentication required"
+    assert (await client.post("/auth/totp/confirm", headers=member, json={"code": "000000"})).status_code == 403
+    assert (await client.post("/auth/passkeys", headers=member, json={"credential": {}})).status_code == 403
+
+    monkeypatch.setattr("app.features.identity.auth.services.auth_service.RECENT_AUTH", timedelta(minutes=10))
+    assert (await client.post("/auth/reauth", headers=member, json={"password": "password1"})).status_code == 204
+    setup = await client.post("/auth/totp/setup", headers=member, json={})
+    assert setup.status_code == 200, setup.text
+    confirmed = await client.post("/auth/totp/confirm", headers=member, json={"code": current_code(setup.json()["secret"])})
+    assert confirmed.status_code == 204, confirmed.text
+    assert told == [("factor@saturn.ai", "totp")]

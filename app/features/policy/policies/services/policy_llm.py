@@ -311,7 +311,9 @@ def _prompt_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for tool in tools:
         brief.append(
             {
-                "name": str(tool.get("name") or ""),
+                # Names come from the upstream server too. A name with hidden characters no longer
+                # matches after cleaning, so the model's answer for it is dropped and the tool is denied.
+                "name": _untrusted(tool.get("name"), 128),
                 "description": _untrusted(tool.get("description"), PROMPT_DESCRIPTION_LIMIT),
                 "inputSchema": _schema_brief(tool.get("inputSchema")),
                 "server": _untrusted(tool.get("server"), 120),

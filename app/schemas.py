@@ -91,12 +91,22 @@ class AgentUpdate(BaseModel):
     tool_set_id: str | None = Field(default=None, max_length=ID_LEN)
 
 
+def _redacted_endpoint(value: str) -> str:
+    """Endpoints stored before keys were moved out of URLs may still carry one."""
+    from app.features.mcp.servers.services.mcp_remote import redact_url
+
+    return redact_url(value or "")
+
+
+RedactedEndpoint = Annotated[str, AfterValidator(_redacted_endpoint)]
+
+
 class ToolRead(ORMModel):
     id: str
     name: str
     description: str
     type: str
-    mcp_endpoint: str
+    mcp_endpoint: RedactedEndpoint
     permissions: list[Any]
     mcp_server_id: str | None = None
     status: str
@@ -111,7 +121,7 @@ class McpToolRead(BaseModel):
 class McpServerRead(ORMModel):
     id: str
     name: str
-    endpoint: str
+    endpoint: RedactedEndpoint
     status: str
     connected: bool = False
     has_authorization: bool = False

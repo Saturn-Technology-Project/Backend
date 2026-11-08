@@ -53,6 +53,23 @@ async def _caller(request: Request, session: SessionDep) -> tuple[User, str, str
     return user, client_name, client_id
 
 
+MAX_MCP_BODY_BYTES = 256 * 1024
+MCP_CALLS_PER_MINUTE = 600
+
+
+async def _read_capped(request: Request) -> bytes | None:
+    """The request body, or None once it passes MAX_MCP_BODY_BYTES. Never buffers more than that."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_MCP_BODY_BYTES:
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_MCP_BODY_BYTES:
+            return None
+    return bytes(body)
+
+
 @router.post("/mcp")
 async def saturn_mcp_endpoint(request: Request, session: SessionDep) -> JSONResponse:
     try:
@@ -60,8 +77,22 @@ async def saturn_mcp_endpoint(request: Request, session: SessionDep) -> JSONResp
     except HTTPException:
         raise
     org = user.organization or await session.get(Organization, user.organization_id)
+    from app.core.rate_limit import allow
+
+    if not allow(f"mcp:{user.id}:{client_id}", limit=MCP_CALLS_PER_MINUTE, window=60):
+        return JSONResponse(
+            rpc_error(None, -32029, "Too many requests"),
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": "60"},
+        )
+    raw = await _read_capped(request)
+    if raw is None:
+        return JSONResponse(
+            rpc_error(None, -32600, "Request is too large"),
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        )
     try:
-        message = await request.json()
+        message = json.loads(raw) if raw else {}
     except Exception:
         message = {}
     if not isinstance(message, dict):

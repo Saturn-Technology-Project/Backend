@@ -357,6 +357,54 @@ async def _send(email: str, code: str, kind: str, locale: str) -> None:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not send email")
 
 
+_FACTOR = {
+    "zh": {
+        "subject": "Saturn：你的帳號新增了登入驗證方式",
+        "title": "已新增登入驗證方式",
+        "totp": "你的 Saturn 帳號剛剛設定了驗證器 App。",
+        "passkey": "你的 Saturn 帳號剛剛新增了一把通行密鑰（passkey）。",
+        "body": "如果這不是你本人操作，請立刻重設密碼並聯絡你的組織管理員。",
+    },
+    "en": {
+        "subject": "Saturn: a sign-in method was added to your account",
+        "title": "Sign-in method added",
+        "totp": "An authenticator app was just set up on your Saturn account.",
+        "passkey": "A passkey was just added to your Saturn account.",
+        "body": "If this wasn't you, reset your password now and contact your organization's admin.",
+    },
+}
+
+
+async def send_factor_added(email: str, factor: str, locale: str | None = None) -> bool:
+    """Tell the account owner a second factor was added. Best effort: never blocks the change."""
+    settings = get_settings()
+    if not settings.resend_api_key or not settings.resend_from:
+        return False
+    language = _copy_language(mail_locale(locale))
+    copy = _FACTOR[language]
+    what = copy["passkey" if factor == "passkey" else "totp"]
+    text = f"{copy['title']}\n\n{what}\n\n{copy['body']}\n\nSaturn\n"
+    inner = f"""<h1 style="margin:28px 0 0;font-size:22px;line-height:1.3;font-weight:600;letter-spacing:-0.02em;">{escape(copy["title"])}</h1>
+              <p style="margin:22px 0 0;font-size:14px;line-height:1.6;">{escape(what)}</p>
+              <p style="margin:16px 0 0;font-size:14px;line-height:1.6;">{escape(copy["body"])}</p>"""
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+                json={
+                    "from": settings.resend_from,
+                    "to": [email],
+                    "subject": copy["subject"],
+                    "text": text,
+                    "html": _card(normalize_locale(locale), copy["title"], inner),
+                },
+            )
+    except httpx.HTTPError:
+        return False
+    return response.status_code < 400
+
+
 _INVITE = {
     "zh": {
         "subject": "你受邀加入 Saturn 上的 {org}",

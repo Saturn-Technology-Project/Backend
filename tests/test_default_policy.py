@@ -32,7 +32,79 @@ def test_allow_rule_still_wins():
 def test_write_permissions_require_approval():
     assert decision_for_permissions(["read"]) == "allow"
     assert decision_for_permissions(["write"]) == "approval"
-    assert decision_for_permissions([]) == "allow"
+    # Unknown permissions fail closed.
+    assert decision_for_permissions([]) == "approval"
+    assert decision_for_permissions(None) == "approval"
+    assert decision_for_permissions(["read", "write"]) == "approval"
+    assert decision_for_permissions(["execute"]) == "approval"
+
+
+def test_upstream_annotations_set_permissions():
+    from app.features.mcp.servers.services.mcp_remote import _tools, permissions_for
+
+    assert permissions_for({"readOnlyHint": True}) == ["read"]
+    assert permissions_for({"readOnlyHint": True, "destructiveHint": True}) == ["write"]
+    assert permissions_for({"readOnlyHint": "true"}) == ["write"]
+    assert permissions_for({}) == ["write"]
+    assert permissions_for(None) == ["write"]
+    listed = _tools(
+        {
+            "result": {
+                "tools": [
+                    {"name": "notes.read", "annotations": {"readOnlyHint": True}},
+                    {"name": "notes.delete", "annotations": {"destructiveHint": True}},
+                    {"name": "notes.send"},
+                ]
+            }
+        }
+    )
+    assert {item["name"]: item["permissions"] for item in listed} == {
+        "notes.read": ["read"],
+        "notes.delete": ["write"],
+        "notes.send": ["write"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_connecting_a_server_holds_unannotated_tools_for_approval(client, monkeypatch):
+    from app.features.mcp.servers.services.mcp_remote import permissions_for
+
+    async def listed(endpoint, authorization=""):
+        return [
+            {"name": "notes.read", "description": "", "inputSchema": {}, "permissions": permissions_for({"readOnlyHint": True})},
+            {"name": "notes.transfer", "description": "", "inputSchema": {}, "permissions": permissions_for({})},
+            # A mock that predates permissions: still must not be allowed.
+            {"name": "notes.wipe", "description": "", "inputSchema": {}},
+        ]
+
+    monkeypatch.setattr("app.features.mcp.servers.services.mcp_connect.list_remote_tools", listed)
+    org_id = (await client.get("/auth/me")).json()["organization"]["id"]
+    generator, session = await _db_session()
+    try:
+        await ensure_default_policy(session, org_id)
+        await session.commit()
+    finally:
+        await generator.aclose()
+    connected = await client.post(
+        "/mcp-servers", json={"name": "Notes", "endpoint": "https://mcp.notion.com/mcp", "authorization": "t"}
+    )
+    assert connected.status_code == 201, connected.text
+    generator, session = await _db_session()
+    try:
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+
+        from app.models import Policy
+
+        policy = await session.scalar(
+            select(Policy).options(selectinload(Policy.rules)).where(Policy.organization_id == org_id, Policy.description == MARKER)
+        )
+        decisions = {rule.tool: rule.decision for rule in policy.rules}
+    finally:
+        await generator.aclose()
+    assert decisions["notes.read"] == "allow"
+    assert decisions["notes.transfer"] == "approval"
+    assert decisions["notes.wipe"] == "approval"
 
 
 async def _db_session():

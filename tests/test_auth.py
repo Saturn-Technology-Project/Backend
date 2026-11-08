@@ -88,6 +88,26 @@ async def test_legacy_password_is_refused_after_the_deadline(client, monkeypatch
     assert refused.json()["detail"]["migration"] == "reset"
     assert refused.json()["detail"]["message"] == "請重設密碼。 Reset your password."
 
+    # The raw legacy password in the ordinary password field must not get around the deadline.
+    raw = await client.post("/auth/login", json={"email": "rick@saturn.ai", "password": "correct horse"})
+    assert raw.status_code == 401
+    probe = await client.post("/auth/login/migration", json={"email": "rick@saturn.ai", "password": "correct horse"})
+    assert probe.status_code == 200
+    assert probe.json() == {}
+
+
+async def test_migration_probe_is_limited_per_account(client):
+    statuses = []
+    for n in range(12):
+        response = await client.post(
+            "/auth/login/migration",
+            headers={"X-Forwarded-For": f"10.2.0.{n}"},
+            json={"email": "rick@saturn.ai", "password": f"guess-{n}"},
+        )
+        statuses.append(response.status_code)
+    assert statuses[:10] == [200] * 10
+    assert statuses[10:] == [429, 429]
+
 
 async def test_legacy_password_is_rewritten_as_argon2id(client):
     import hashlib
@@ -209,7 +229,7 @@ async def test_login_migration_hides_unknown_accounts_and_is_rate_limited(client
 
     monkeypatch.setattr(
         "app.features.identity.auth.controllers.auth.migration_allowed",
-        lambda _request: False,
+        lambda _request, _email=None: False,
     )
     limited = await client.post(
         "/auth/login/migration",

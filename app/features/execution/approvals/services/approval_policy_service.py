@@ -47,7 +47,7 @@ class ApprovalPolicyService:
         required_count: int = 1,
         group_id: str | None = None,
         requirements: list[dict] | None = None,
-        allow_requester: bool = True,
+        allow_requester: bool = False,
         expires_minutes: int | None = None,
         resubmit_minutes: int | None = None,
     ) -> ApprovalPolicy:

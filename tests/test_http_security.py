@@ -81,3 +81,14 @@ async def test_security_headers_on_api_responses(client):
 async def test_hsts_is_sent_when_the_request_arrived_over_https(client):
     response = await client.get("/health", headers={"x-forwarded-proto": "https"})
     assert response.headers["strict-transport-security"] == "max-age=63072000; includeSubDomains"
+
+
+def test_production_trusts_only_https_origins(monkeypatch):
+    from app.core.config import Settings
+
+    monkeypatch.setenv("K_SERVICE", "saturn-backend")
+    settings = Settings(cors_origins="http://localhost:3000,https://dashboard.saturn-core.com, http://evil.test")
+    assert settings.cors_origins == "https://dashboard.saturn-core.com"
+    monkeypatch.delenv("K_SERVICE")
+    local = Settings(cors_origins="http://localhost:3000,https://dashboard.saturn-core.com")
+    assert local.cors_origins == "http://localhost:3000,https://dashboard.saturn-core.com"

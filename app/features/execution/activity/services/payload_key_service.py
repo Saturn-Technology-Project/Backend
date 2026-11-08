@@ -109,6 +109,28 @@ def _is_key_admin(employee: Employee) -> bool:
     return allows(employee.permissions, "team", "write")
 
 
+async def _other_key_admin(session: AsyncSession, organization_id: str, user_id: str) -> bool:
+    """Whether another team.write admin holds an approved key and so can approve this one."""
+    rows = (
+        await session.execute(
+            select(Employee, MemberPayloadKey)
+            .join(
+                MemberPayloadKey,
+                (MemberPayloadKey.user_id == Employee.user_id)
+                & (MemberPayloadKey.organization_id == Employee.organization_id),
+            )
+            .where(
+                Employee.organization_id == organization_id,
+                Employee.user_id != user_id,
+                Employee.status == "active",
+                MemberPayloadKey.status == "active",
+                MemberPayloadKey.approval == MEMBER_KEY_APPROVED,
+            )
+        )
+    ).all()
+    return any(_is_key_admin(employee) for employee, _key in rows)
+
+
 async def _audit(
     session: AsyncSession,
     *,
@@ -152,11 +174,15 @@ async def create_org_key(
     if await active_key(session, organization_id) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Organization payload key already exists")
     version = 1
+    # Validate everything first. The session commits on HTTPException, so a refused backup must not
+    # leave an active key behind with no way to recover it.
+    public_hex = _encapsulation_key(public_key, "public_key")
+    backup_row = _backup(organization_id, version, backup)
     row = OrgPayloadKey(
         id=new_id("opk"),
         organization_id=organization_id,
         version=version,
-        public_key=_encapsulation_key(public_key, "public_key"),
+        public_key=public_hex,
         algorithm=WRAP_ALG,
         status="active",
         owner_user_id=owner_user_id,
@@ -164,7 +190,7 @@ async def create_org_key(
         activated_at=utcnow(),
     )
     session.add(row)
-    session.add(_backup(organization_id, version, backup))
+    session.add(backup_row)
     await session.flush()
     await _audit(
         session,
@@ -250,9 +276,13 @@ async def register_member_key(
     if current is not None:
         current.status = "replaced"
         current.assist_requested = False
-    # A key only receives DEK wraps once a team.write admin approves it. An admin's own key is
-    # approved on registration, which also covers the owner bootstrapping the first key.
-    auto = _is_key_admin(employee)
+    # A key only receives DEK wraps once a team.write admin approves it. An admin's first key is
+    # approved on registration, which also covers the owner bootstrapping the first key. A key that
+    # replaces one needs a second admin when there is one: whoever holds a stolen session must not
+    # be able to swap in their own key and have colleagues re-wrap every record to it.
+    auto = _is_key_admin(employee) and not (
+        replaced and await _other_key_admin(session, organization_id, user_id)
+    )
     row = MemberPayloadKey(
         id=key_id,
         organization_id=organization_id,
@@ -448,6 +478,8 @@ async def decide_member_key(
         return row
     if approve and row.approval == MEMBER_KEY_REJECTED and via != "envelope":
         raise HTTPException(status.HTTP_409_CONFLICT, "A rejected key must be registered again")
+    if approve and row.user_id == actor_user_id and await _other_key_admin(session, organization_id, actor_user_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Another admin must approve your key")
     row.approval = wanted
     row.approved_by = actor_user_id
     row.approved_at = utcnow()
@@ -485,6 +517,13 @@ def _append_wrap(envelope: dict, member_key_id: str, user_id: str, wrapped: str)
     wraps = [item for item in envelope.get("recipient_wraps") or [] if isinstance(item, dict)]
     wraps.append({"user_id": user_id, "member_key_id": member_key_id, "wrapped_dek": wrapped})
     return {**envelope, "recipient_wraps": wraps}
+
+
+def _holds_wrap(envelope: dict, user_id: str) -> bool:
+    return any(
+        isinstance(item, dict) and item.get("user_id") == user_id
+        for item in envelope.get("recipient_wraps") or []
+    )
 
 
 def _check_wrapped(wrapped: str) -> None:
@@ -543,7 +582,7 @@ async def grant_recipient_wraps(
     member_key_id: str,
     records: list[dict],
 ) -> int:
-    await _member(session, actor_user_id, organization_id)
+    actor = await _member(session, actor_user_id, organization_id)
     target = await session.get(MemberPayloadKey, member_key_id)
     if target is None or target.organization_id != organization_id or target.status != "active":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member key not found")
@@ -556,6 +595,10 @@ async def grant_recipient_wraps(
         kind = str(item.get("type") or "")
         wrapped = str(item.get("wrapped_dek") or "")
         row, envelope = await _encrypted_record(session, organization_id, kind, record_id)
+        if not has_key_check(envelope) and not (_is_key_admin(actor) or _holds_wrap(envelope, actor_user_id)):
+            # A legacy record's proof is its content hash, which every member can read. Without
+            # this, any member could plant an unusable wrap that the real holder can never replace.
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a current recipient or an admin can share this record")
         _check_possession(envelope, item)
         _check_wrapped(wrapped)
         existing = _same_wrap(envelope, target.id, wrapped)
@@ -1011,11 +1054,13 @@ async def activate_rotation(session: AsyncSession, *, organization_id: str, acto
         raise HTTPException(status.HTTP_409_CONFLICT, "Rotation is incomplete")
     if await _any_wrapped_to(session, organization_id, job.from_version):
         raise HTTPException(status.HTTP_409_CONFLICT, "Historical payloads are still wrapped to the previous key")
+    # Check the backup before switching keys, so a bad one leaves the rotation as it was.
+    backup_row = _backup(organization_id, pending.version, backup)
     current.status = "retired"
     current.retired_at = utcnow()
     pending.status = "active"
     pending.activated_at = utcnow()
-    session.add(_backup(organization_id, pending.version, backup))
+    session.add(backup_row)
     job.status = "active"
     job.finished_at = utcnow()
     await session.flush()

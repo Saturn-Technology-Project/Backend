@@ -466,3 +466,27 @@ async def test_healthz_reveals_nothing_else(client):
     response = await client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+async def test_browsers_get_the_session_only_as_an_httponly_cookie(client):
+    # Script on the console page must not be able to read the session token.
+    invited = await client.post("/org/invites", json={"email": "cookie@saturn.ai", "name": "Cookie", "role": "viewer"})
+    assert invited.status_code == 201, invited.text
+    accepted = await client.post(
+        "/auth/accept-invite",
+        headers={"Origin": "http://localhost:3000"},
+        json={"token": invited.json()["token"], "password": "password1"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["token"] is None
+    assert accepted.json()["user"]["email"] == "cookie@saturn.ai"
+    assert "HttpOnly" in accepted.headers.get("set-cookie", "")
+
+    browser = await client.post(
+        "/auth/login", headers={"Origin": "http://localhost:3000"}, json={"email": "cookie@saturn.ai", "password": "password1"}
+    )
+    assert browser.status_code == 200, browser.text
+    assert browser.json()["token"] is None
+    api_client = await client.post("/auth/login", json={"email": "cookie@saturn.ai", "password": "password1"})
+    assert api_client.status_code == 200, api_client.text
+    assert api_client.json()["token"].startswith("sat_")

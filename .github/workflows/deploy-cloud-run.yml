@@ -55,6 +55,10 @@ jobs:
       SEED_ON_DEPLOY: ${{ vars.SEED_ON_DEPLOY }}
       # Secret Manager secret that holds REDIS_URL (for example a rediss:// URL with AUTH).
       REDIS_URL_SECRET: ${{ vars.REDIS_URL_SECRET || 'REDIS_URL' }}
+      # Secret Manager secret shared with the console (its CONSOLE_PROXY_SECRET_NAME). With it the API
+      # trusts the browser address the console forwards, so per-address limits are not shared by every
+      # console user. Unset: the API keys limits on the address Cloudflare reports, as before.
+      CONSOLE_PROXY_SECRET_NAME: ${{ vars.CONSOLE_PROXY_SECRET_NAME }}
       # Secret Manager secret with the Memorystore server CA (PEM), mounted at REDIS_CA_PATH.
       REDIS_CA_SECRET: ${{ vars.REDIS_CA_SECRET }}
       REDIS_CA_PATH: /etc/secrets/redis-ca/ca.pem
@@ -176,6 +180,9 @@ jobs:
           api="${api},POLICY_LLM_API_KEY=POLICY_LLM_API_KEY:latest"
           api="${api},POLICY_LLM_MODEL=POLICY_LLM_MODEL:latest"
           api="${api},ORIGIN_AUTH_SECRET=ORIGIN_AUTH_SECRET:latest"
+          if [ -n "${CONSOLE_PROXY_SECRET_NAME}" ]; then
+            api="${api},CONSOLE_PROXY_SECRET=${CONSOLE_PROXY_SECRET_NAME}:latest"
+          fi
           if [ "${SEED_ON_DEPLOY}" = "true" ]; then
             api="${api},SEED_USER_EMAIL=SEED_USER_EMAIL:latest,SEED_USER_PASSWORD=SEED_USER_PASSWORD:latest"
           fi

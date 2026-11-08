@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import httpx
 from fastapi import HTTPException, status
 
-from app.features.mcp.servers.services.mcp_endpoint import require_mcp_endpoint
+from app.features.mcp.servers.services.mcp_endpoint import pin_mcp_url, require_mcp_endpoint
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _SECRET_QUERY = re.compile(r"(?i)((?:api[_-]?key|access[_-]?token|token|key|secret|signature|sig)=)[^&\s'\"]+")
@@ -106,14 +106,29 @@ def _tools(body: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
             continue
         schema = item.get("inputSchema") if isinstance(item.get("inputSchema"), dict) else {"type": "object", "properties": {}}
+        annotations = item.get("annotations") if isinstance(item.get("annotations"), dict) else {}
         tools.append(
             {
                 "name": item["name"].strip(),
                 "description": str(item.get("description") or ""),
                 "inputSchema": schema,
+                "permissions": permissions_for(annotations),
             }
         )
     return tools
+
+
+def permissions_for(annotations: dict[str, Any] | None) -> list[str]:
+    """Saturn permissions for an upstream tool, from its MCP annotations.
+
+    Only a tool that declares itself read-only (readOnlyHint true, and not destructive) is read.
+    A tool that says nothing is treated as write, so the default policy holds it for approval
+    instead of allowing it.
+    """
+    hints = annotations if isinstance(annotations, dict) else {}
+    if hints.get("readOnlyHint") is True and hints.get("destructiveHint") is not True:
+        return ["read"]
+    return ["write"]
 
 
 class McpUnauthorized(Exception):
@@ -146,12 +161,14 @@ async def _rpc(
     method: str,
     params: dict[str, Any],
     request_id: int,
+    sni: str = "",
 ) -> httpx.Response:
     request = client.build_request(
         "POST",
         endpoint,
         headers=headers,
         json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+        extensions={"sni_hostname": sni} if sni else None,
     )
     try:
         response = await client.send(request, stream=True)
@@ -182,8 +199,9 @@ async def _rpc(
 async def list_remote_tools(endpoint: str, authorization: str = "") -> list[dict[str, Any]]:
     url = require_mcp_endpoint(endpoint)
     request_url, header_auth = sec_api_request(url, authorization)
-    headers = _headers(header_auth)
-    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+    request_url, host = pin_mcp_url(request_url)
+    headers = {**_headers(header_auth), "Host": host}
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
         init = await _rpc(
             client,
             request_url,
@@ -195,12 +213,13 @@ async def list_remote_tools(endpoint: str, authorization: str = "") -> list[dict
                 "clientInfo": {"name": "Saturn", "version": "0.1.0"},
             },
             1,
+            host,
         )
         _raise_for_status(init, url)
         session_id = init.headers.get("mcp-session-id", "")
         if session_id:
-            headers = _headers(header_auth, session_id)
-        listed = await _rpc(client, request_url, headers, "tools/list", {}, 2)
+            headers = {**_headers(header_auth, session_id), "Host": host}
+        listed = await _rpc(client, request_url, headers, "tools/list", {}, 2, host)
     _raise_for_status(listed, url)
     tools = _tools(_payload(listed))
     if not tools:
@@ -216,8 +235,9 @@ async def call_remote_tool(
 ) -> dict[str, Any]:
     url = require_mcp_endpoint(endpoint)
     request_url, header_auth = sec_api_request(url, authorization)
-    headers = _headers(header_auth)
-    async with httpx.AsyncClient(timeout=60, follow_redirects=False) as client:
+    request_url, host = pin_mcp_url(request_url)
+    headers = {**_headers(header_auth), "Host": host}
+    async with httpx.AsyncClient(timeout=60, follow_redirects=False, trust_env=False) as client:
         init = await _rpc(
             client,
             request_url,
@@ -229,11 +249,12 @@ async def call_remote_tool(
                 "clientInfo": {"name": "Saturn", "version": "0.1.0"},
             },
             1,
+            host,
         )
         _raise_for_status(init, url)
         session_id = init.headers.get("mcp-session-id", "")
         if session_id:
-            headers = _headers(header_auth, session_id)
+            headers = {**_headers(header_auth, session_id), "Host": host}
         called = await _rpc(
             client,
             request_url,
@@ -241,6 +262,7 @@ async def call_remote_tool(
             "tools/call",
             {"name": name, "arguments": arguments},
             2,
+            host,
         )
     _raise_for_status(called, url, call=True)
     body = _payload(called)

@@ -15,6 +15,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.features.identity.auth.services.attempts import reserve_attempt
 from app.core.ids import new_id, utcnow
 from app.core.rate_limit import _redis_client, _use_redis
 from app.features.credentials.vault.services.credential_service import open_secret, seal
@@ -157,11 +158,15 @@ async def confirm_setup(
         secret_b32 = open_secret(user.totp_secret, user.organization_id, user.id)
     except Exception as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, "MFA setup needs to be started again") from exc
+    used = await reserve_attempt(session, user, "totp_attempts", MAX_ATTEMPTS)
+    if used is None:
+        user.totp_secret = ""
+        await session.flush()
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
     last_step = int(user.totp_last_step or 0)
     step = _matched_step(secret_b32, code, now) if secret_b32 else None
     if step is None or step <= last_step or not _claim_step(secret_b32, step):
-        user.totp_attempts = int(user.totp_attempts or 0) + 1
-        if user.totp_attempts >= MAX_ATTEMPTS:
+        if used >= MAX_ATTEMPTS:
             user.totp_secret = ""
             await session.flush()
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
@@ -188,6 +193,12 @@ async def verify_user_totp(
         secret_b32 = open_secret(user.totp_secret, user.organization_id, user.id)
     except Exception as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, "MFA needs to be set up again") from exc
+    used = await reserve_attempt(session, user, "totp_attempts", MAX_ATTEMPTS)
+    if used is None:
+        if user.totp_locked_until is None:
+            user.totp_locked_until = utcnow() + LOCKOUT
+            await session.flush()
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
     last_step = int(user.totp_last_step or 0)
     step = _matched_step(secret_b32, code, now) if secret_b32 else None
     if step is not None and step > last_step and _claim_step(secret_b32, step):
@@ -213,11 +224,11 @@ async def verify_user_totp(
             user.totp_attempts = 0
             await session.flush()
             return
-    user.totp_attempts = int(user.totp_attempts or 0) + 1
-    if user.totp_attempts >= MAX_ATTEMPTS:
+    # The attempt was counted before the code was checked (reserve_attempt).
+    if used >= MAX_ATTEMPTS:
         user.totp_locked_until = utcnow() + LOCKOUT
     await session.flush()
-    if user.totp_attempts >= MAX_ATTEMPTS:
+    if used >= MAX_ATTEMPTS:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts")
     raise HTTPException(status.HTTP_400_BAD_REQUEST, "That code did not match")
 

@@ -30,6 +30,51 @@ from app.features.mcp.servers.services.mcp_remote import McpUnauthorized, list_r
 from app.features.identity.oauth.services.oauth_service import pkce_s256
 
 PENDING_TTL = timedelta(minutes=10)
+MAX_OAUTH_RESPONSE_BYTES = 256 * 1024
+BROWSER_COOKIE_PREFIX = "saturn_mcp_"
+CALLBACK_PATH = "/mcp-servers/oauth/callback"
+
+
+@dataclass(frozen=True)
+class BrowserBinding:
+    """A cookie the starting browser must present on the callback."""
+
+    name: str
+    value: str
+
+
+def browser_cookie_name(pending_id: str) -> str:
+    return f"{BROWSER_COOKIE_PREFIX}{pending_id}"
+
+
+def browser_cookie_domain(console_origin: str, api_origin: str) -> str | None:
+    """The cookie domain both the console and the API callback receive, or None for host-only.
+
+    The console starts the sign-in on its own host (through /saturn-api), and the provider redirects
+    to the API host. A cookie for their common parent domain reaches the callback; the same host
+    needs no Domain at all.
+    """
+    override = os.environ.get("MCP_OAUTH_COOKIE_DOMAIN", "").strip().lstrip(".").lower()
+    if override:
+        return override
+    console = (urlparse(console_origin).hostname or "").lower().rstrip(".")
+    api = (urlparse(api_origin).hostname or "").lower().rstrip(".")
+    if not console or not api or console == api:
+        return None
+    try:
+        ipaddress.ip_address(console)
+        return None
+    except ValueError:
+        pass
+    shared: list[str] = []
+    for left, right in zip(reversed(console.split(".")), reversed(api.split("."))):
+        if left != right:
+            break
+        shared.insert(0, left)
+    # Never a bare public suffix: a registrable name needs at least two labels.
+    if len(shared) < 2:
+        return None
+    return ".".join(shared)
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _METADATA = re.compile(r'resource_metadata=(?:"([^"]+)"|([^\s,]+))', re.IGNORECASE)
 
@@ -129,12 +174,29 @@ async def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     headers["Host"] = target.host
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
-            return await client.request(
+            request = client.build_request(
                 method,
                 target.url,
                 headers=headers,
                 extensions={"sni_hostname": target.host},
                 **kwargs,
+            )
+            response = await client.send(request, stream=True)
+            try:
+                # Metadata, registration and token answers are small. A server (or a metadata URL
+                # it points at) that streams more is cut off rather than buffered into memory.
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_OAUTH_RESPONSE_BYTES:
+                        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP authorization server response is too large")
+            finally:
+                await response.aclose()
+            return httpx.Response(
+                response.status_code,
+                headers=response.headers,
+                content=bytes(body),
+                request=request,
             )
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not reach the MCP authorization server") from exc
@@ -277,15 +339,23 @@ class McpOAuth:
         url = endpoint.strip()
         if not label or not url:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name and endpoint are required")
+        from app.features.mcp.servers.services.mcp_endpoint import split_url_credential
+
+        if split_url_credential(url)[1]:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Put the API key in the authorization field, not the URL")
         url = require_mcp_endpoint(url)
         if not _NONCE.match(nonce):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sign-in nonce is invalid")
         try:
             await list_remote_tools(url, "")
         except McpUnauthorized as denied:
-            return {"authorization_url": await self._authorize(session, user, label, url, origin, nonce, denied)}
+            authorization_url, binding = await self._authorize(session, user, label, url, origin, nonce, denied)
+            return {"authorization_url": authorization_url, "binding": binding}
         if await self._requires_preset_sign_in(url):
-            return {"authorization_url": await self._authorize(session, user, label, url, origin, nonce, McpUnauthorized("", url))}
+            authorization_url, binding = await self._authorize(
+                session, user, label, url, origin, nonce, McpUnauthorized("", url)
+            )
+            return {"authorization_url": authorization_url, "binding": binding}
         from app.features.mcp.servers.services.mcp_connect import mcp_connect_service
 
         server = await mcp_connect_service.connect(session, user, name=label, endpoint=url, authorization="")
@@ -300,17 +370,20 @@ class McpOAuth:
         origin: str,
         nonce: str,
         denied: McpUnauthorized,
-    ) -> str:
+    ) -> tuple[str, BrowserBinding]:
         found = await discover(endpoint, denied.www_authenticate)
         redirect_uri = f"{origin.rstrip('/')}/mcp-servers/oauth/callback"
         registered = await self._register(found, redirect_uri)
         verifier = secrets.token_urlsafe(48)
         state = secrets.token_urlsafe(32)
+        browser_secret = secrets.token_urlsafe(32)
+        pending_id = new_id("moa")
         await session.execute(delete(McpOAuthPending).where(McpOAuthPending.expires_at < utcnow()))
         session.add(
             McpOAuthPending(
-                id=new_id("moa"),
+                id=pending_id,
                 state_hash=hash_token(state),
+                browser_hash=hash_token(browser_secret),
                 user_id=user.id,
                 organization_id=user.organization_id,
                 name=name,
@@ -341,7 +414,8 @@ class McpOAuth:
             query["scope"] = found.scope
         if found.issuer == GOOGLE_ISSUER:
             query["access_type"] = "offline"
-        return f"{found.authorization_endpoint}?{urlencode(query)}"
+        binding = BrowserBinding(name=browser_cookie_name(pending_id), value=browser_secret)
+        return f"{found.authorization_endpoint}?{urlencode(query)}", binding
 
     async def _requires_preset_sign_in(self, endpoint: str) -> bool:
         """Google publishes its tool list before sign-in. A preset client still has to authorize."""
@@ -383,10 +457,40 @@ class McpOAuth:
         secret = str((registered or {}).get("client_secret") or "")
         return {"client_id": client_id, "client_secret": secret}
 
-    async def finish(self, session: AsyncSession, *, code: str, state: str, error: str) -> HTMLResponse:
+    async def finish(
+        self,
+        session: AsyncSession,
+        *,
+        code: str,
+        state: str,
+        error: str,
+        cookies: dict[str, str] | None = None,
+    ) -> HTMLResponse:
         pending = await session.scalar(select(McpOAuthPending).where(McpOAuthPending.state_hash == hash_token(state)))
         if pending is None or _aware(pending.expires_at) <= utcnow():
             return _page(False, "", "This sign-in expired. Close the window and connect again.")
+        presented = (cookies or {}).get(browser_cookie_name(pending.id), "")
+        if not pending.browser_hash or not secrets.compare_digest(hash_token(presented), pending.browser_hash):
+            # Someone else's browser opened this sign-in link. Never store their account for the
+            # person who started it; end the sign-in so the link cannot be retried.
+            from app.core.enums import ActorType, AuditEvent
+
+            await session.execute(delete(McpOAuthPending).where(McpOAuthPending.id == pending.id))
+            await audit_service.log(
+                session,
+                event=AuditEvent.MCP_OAUTH_REFUSED,
+                actor_type=ActorType.SYSTEM,
+                actor_id="saturn",
+                organization_id=pending.organization_id,
+                result="browser_mismatch",
+                payload={"user_id": pending.user_id, "endpoint_host": urlparse(pending.endpoint).hostname or ""},
+            )
+            return _page(
+                False,
+                "",
+                "This sign-in was started in another browser. Start it again from the Saturn console.",
+                notify=False,
+            )
         # Claim the sign-in before using its code. A browser can load this callback twice; only
         # one load may exchange the code, and the other must not tell the console it failed.
         claimed = await session.execute(

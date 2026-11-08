@@ -710,3 +710,25 @@ async def test_requester_alone_in_the_org_can_still_approve(client, monkeypatch)
     body = await _request(client, access, agent_id, {"amount": 7})
     approved = await client.post(f"/approvals/{body['error']['data']['approval_id']}/approve")
     assert approved.status_code == 200, approved.text
+
+
+async def test_mcp_refuses_oversized_bodies(client):
+    access = await oauth_access(client, "Big Body")
+    huge = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"pad": "x" * (300 * 1024)}}
+    response = await client.post("/mcp", headers={"Authorization": f"Bearer {access}"}, json=huge)
+    assert response.status_code == 413
+
+
+async def test_an_agent_cannot_flood_the_approval_queue(client, monkeypatch):
+    from app.features.mcp.saturn.services import saturn_mcp as module
+
+    monkeypatch.setattr(module, "MAX_PENDING_APPROVALS_PER_AGENT", 2)
+    calls, seen = {"n": 0}, []
+    _people_list, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
+    for n in range(2):
+        held = await _request(client, access, agent_id, {"amount": n})
+        assert held["error"]["data"]["code"] == "approval_pending"
+    refused = await _request(client, access, agent_id, {"amount": 99})
+    assert "too_many_pending_approvals" in refused["error"]["message"]
+    listed = await client.get("/approvals", params={"limit": 1})
+    assert listed.status_code == 200 and len(listed.json()) == 1

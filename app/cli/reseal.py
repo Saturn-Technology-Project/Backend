@@ -23,6 +23,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import os
 import sys
 from collections.abc import Callable
@@ -35,7 +36,15 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy import MetaData, Table, select, update
 
-from app.features.credentials.vault.services.pq_crypto import _INFO_AES, _PREFIX as PQ_PREFIX, _hkdf
+from app.features.credentials.vault.services.pq_crypto import (
+    _BOUND_PREFIX as PQ_BOUND_PREFIX,
+    _INFO_AES,
+    _PREFIX as PQ_PREFIX,
+    _hkdf,
+    bound_aad,
+    join_bound,
+    split_bound,
+)
 
 S2_PREFIX = "s2."
 _DIGEST_INFO = b"saturn-approval-digest-v1\n"
@@ -65,19 +74,27 @@ class Keys:
             self._content[organization_id] = found
         return found
 
-    def seal(self, plain: str, organization_id: str, user_id: str) -> str:
+    def seal(self, plain: str, organization_id: str, user_id: str, context: str = "") -> str:
         shared, kem_ciphertext = self.private(organization_id, user_id).public_key().encapsulate()
         nonce = os.urandom(12)
-        encrypted = AESGCM(_hkdf(shared, _INFO_AES, 32)).encrypt(nonce, plain.encode(), None)
-        return PQ_PREFIX + base64.b64encode(kem_ciphertext + nonce + encrypted).decode()
+        aad = bound_aad(context) if context else None
+        encrypted = AESGCM(_hkdf(shared, _INFO_AES, 32)).encrypt(nonce, plain.encode(), aad)
+        blob = base64.b64encode(kem_ciphertext + nonce + encrypted).decode()
+        return join_bound(context, blob) if context else PQ_PREFIX + blob
 
     def open(self, token: str, organization_id: str, user_id: str) -> str | None:
         """The plaintext, or None when this tenant key does not open the token."""
+        bound = split_bound(token)
+        if bound is not None:
+            context, blob = bound
+            aad: bytes | None = bound_aad(context)
+        else:
+            blob, aad = token[len(PQ_PREFIX) :], None
         try:
-            raw = base64.b64decode(token[len(PQ_PREFIX) :])
+            raw = base64.b64decode(blob)
             kem_ciphertext, rest = raw[:1568], raw[1568:]
             shared = self.private(organization_id, user_id).decapsulate(kem_ciphertext)
-            return AESGCM(_hkdf(shared, _INFO_AES, 32)).decrypt(rest[:12], rest[12:], None).decode()
+            return AESGCM(_hkdf(shared, _INFO_AES, 32)).decrypt(rest[:12], rest[12:], aad).decode()
         except Exception:
             return None
 
@@ -120,6 +137,9 @@ class Report:
     digests: int = 0
     unopened: list[str] = field(default_factory=list)
     digests_left: list[str] = field(default_factory=list)
+    # Prefix-shaped text where Saturn never writes a sealed value. Reported, never blocking:
+    # a tenant can type "pq2.x" into a name or a prompt.
+    ignored: list[str] = field(default_factory=list)
 
     def count(self, table: str) -> None:
         self.resealed[table] = self.resealed.get(table, 0) + 1
@@ -151,25 +171,49 @@ class Tenants:
         return list(dict.fromkeys(contexts))
 
 
+# Where Saturn writes sealed values: vault and credential *ciphertext columns, users.totp_secret,
+# and the "sealed" key of JSON arguments and payloads.
+_SEALED_FIELDS = ("totp_secret", "sealed")
+
+
+def sealed_location(location: str) -> bool:
+    last = re.split(r"[ .]", location)[-1]
+    last = re.sub(r"\[\d+\]$", "", last)
+    return last.endswith("ciphertext") or last in _SEALED_FIELDS
+
+
 class Resealer:
     def __init__(self, old: Keys, new: Keys, tenants: Tenants, report: Report) -> None:
         self.old, self.new, self.tenants, self.report = old, new, tenants, report
 
+    def _unopened(self, location: str) -> None:
+        if sealed_location(location):
+            self.report.unopened.append(location)
+        else:
+            self.report.ignored.append(location)
+
     def value(self, table: str, location: str, row: dict[str, Any], value: Any) -> tuple[Any, bool]:
         """The value with every sealed string inside it re-sealed, and whether anything changed."""
         if isinstance(value, str):
-            if value.startswith(PQ_PREFIX):
+            if value.startswith((PQ_PREFIX, PQ_BOUND_PREFIX)):
+                bound = split_bound(value)
+                context = bound[0] if bound is not None else ""
+                if not context and table == "secret_vault" and location.endswith(" ciphertext"):
+                    # Vault rows written before values were bound to their entry get bound now.
+                    from app.features.credentials.vault.services.secret_vault import vault_context
+
+                    context = vault_context(str(row.get("id") or ""))
                 for organization_id, user_id in self.tenants.contexts_for(table, row):
                     plain = self.old.open(value, organization_id, user_id)
                     if plain is not None:
-                        return self.new.seal(plain, organization_id, user_id), True
-                self.report.unopened.append(location)
+                        return self.new.seal(plain, organization_id, user_id, context), True
+                self._unopened(location)
             elif value.startswith(S2_PREFIX):
                 for organization_id in self.tenants.organizations_for(row):
                     body = self.old.open_content(value, organization_id)
                     if body is not None:
                         return self.new.seal_content(body, organization_id), True
-                self.report.unopened.append(location)
+                self._unopened(location)
             return value, False
         if isinstance(value, dict):
             changed = False
@@ -273,6 +317,8 @@ async def _run(old_key: str, new_key: str, apply: bool, allow_unopened: bool) ->
             print(f"digest left as is: {location}")
         for location in report.unopened:
             print(f"could not open: {location}")
+        for location in report.ignored:
+            print(f"left as text (not a sealed field): {location}")
         if report.unopened and not allow_unopened:
             await transaction.rollback()
             print("rolled back: some values did not open with the old key", file=sys.stderr)

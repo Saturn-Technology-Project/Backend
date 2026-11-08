@@ -4,6 +4,7 @@ import json
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from app.shared.pagination import Page
 from app.features.identity.auth.controllers.deps import ActorDep, ApprovalsRead, ApprovalsWrite, CurrentUser, SessionDep
 from app.schemas import ApprovalDecisionRead, ApprovalRead, ApprovalRequirementProgress
 from app.features.execution.approvals.services.approval_service import approval_service
@@ -43,8 +44,8 @@ def _tool_result(action) -> str:
 
 
 @router.get("", response_model=list[ApprovalRead])
-async def list_approvals(session: SessionDep, user: CurrentUser, _access: ApprovalsRead):
-    approvals = await approval_service.list_approvals(session, user.organization_id)
+async def list_approvals(session: SessionDep, user: CurrentUser, _access: ApprovalsRead, page: Page):
+    approvals = await approval_service.list_approvals(session, user.organization_id, page)
     return [await serialize_approval(session, item) for item in approvals]
 
 

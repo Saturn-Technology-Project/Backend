@@ -623,3 +623,118 @@ async def test_secret_manager_reads_legacy_name_and_never_deletes_another_tenant
         assert await secret_vault.get_secret(session, "org-crd_x", "org_a") == "new-value"
     finally:
         await generator.aclose()
+
+
+# Audit 2026-11-08 -----------------------------------------------------------------------------
+
+
+async def test_replacing_a_member_key_needs_a_recent_sign_in(client, monkeypatch):
+    from datetime import timedelta
+
+    _private, public = generate_mlkem()
+    assert (await client.post("/org/payload-keys/member", json={"public_key": public.hex()})).status_code == 200
+    monkeypatch.setattr("app.features.identity.auth.services.auth_service.RECENT_AUTH", timedelta(seconds=-1))
+    _private, stolen = generate_mlkem()
+    blocked = await client.post("/org/payload-keys/member", json={"public_key": stolen.hex(), "needs_assist": True})
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"] == "Reauthentication required"
+    own = await client.get("/org/payload-keys")
+    assert own.json()["own_member_key_approval"] == "approved"
+
+
+async def test_an_admin_replacement_key_waits_for_another_admin(client):
+    # The seeded admin and a second admin each hold an approved key.
+    _private, first = generate_mlkem()
+    assert (await client.post("/org/payload-keys/member", json={"public_key": first.hex()})).json()["approval"] == "approved"
+    invited = await client.post("/org/invites", json={"email": "second-admin@saturn.ai", "name": "Second", "role": "admin"})
+    assert invited.status_code == 201, invited.text
+    accepted = await client.post("/auth/accept-invite", json={"token": invited.json()["token"], "password": "password1"})
+    assert accepted.status_code == 200, accepted.text
+    from tests.totp_access import finish_totp
+
+    second = _auth(accepted.json()["token"])
+    await finish_totp(client, second)
+    _private, theirs = generate_mlkem()
+    assert (await client.post("/org/payload-keys/member", json={"public_key": theirs.hex()}, headers=second)).json()["approval"] == "approved"
+
+    # The first admin's replacement is held, and they cannot approve it themselves.
+    _private, replacement = generate_mlkem()
+    replaced = await client.post("/org/payload-keys/member", json={"public_key": replacement.hex(), "needs_assist": True})
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["approval"] == "pending"
+    key_id = replaced.json()["id"]
+    assert (await client.post(f"/org/payload-keys/member/{key_id}/approve")).status_code == 403
+    approved = await client.post(f"/org/payload-keys/member/{key_id}/approve", headers=second)
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["approval"] == "approved"
+
+
+async def test_a_sole_admin_can_still_replace_their_key(client):
+    _private, first = generate_mlkem()
+    assert (await client.post("/org/payload-keys/member", json={"public_key": first.hex()})).json()["approval"] == "approved"
+    _private, replacement = generate_mlkem()
+    replaced = await client.post("/org/payload-keys/member", json={"public_key": replacement.hex()})
+    assert replaced.json()["approval"] == "approved"
+
+
+async def test_a_refused_recovery_backup_leaves_no_org_key_behind(client):
+    _private, public = generate_mlkem()
+    weak = recovery_backup(os.urandom(32), "org", 1, _private)
+    weak["iterations"] = 1  # well-formed, but the service refuses it
+    refused = await client.post("/org/payload-keys", json={"public_key": public.hex(), "backup": weak})
+    assert refused.status_code == 400, refused.text
+    # Nothing was kept: the owner can try again with a good backup.
+    private, public = generate_mlkem()
+    created = await client.post(
+        "/org/payload-keys",
+        json={"public_key": public.hex(), "backup": recovery_backup(os.urandom(32), "org", 1, private)},
+    )
+    assert created.status_code == 200, created.text
+
+
+async def test_only_a_recipient_or_admin_can_share_a_legacy_record(client):
+    from app.core.ids import new_id, utcnow
+    from app.models import AuditLog
+
+    await _org_key(client)
+    people = await _people(client)
+    member_a, member_b = _auth(people[0][1]), _auth(people[1][1])
+    keys = {}
+    for name, headers in (("a", member_a), ("b", member_b)):
+        _private, public = generate_mlkem()
+        registered = await client.post("/org/payload-keys/member", json={"public_key": public.hex()}, headers=headers)
+        keys[name] = registered.json()["id"]
+        assert (await client.post(f"/org/payload-keys/member/{keys[name]}/approve")).status_code == 200
+
+    legacy_hash = "ab" * 32
+    record_id = new_id("aud")
+    generator, session = await _db(client)
+    try:
+        session.add(
+            AuditLog(
+                id=record_id,
+                organization_id=await _org_id(client),
+                event="tool_requested",
+                actor_type="agent",
+                actor_id="agent_x",
+                created_at=utcnow(),
+                payload={"envelope": {"v": 1, "org_key_version": 1, "content_sha256": legacy_hash, "recipient_wraps": []}},
+            )
+        )
+        await session.commit()
+    finally:
+        await generator.aclose()
+
+    junk = "00" * (1 + 1568 + 12 + 32 + 16)
+    planted = await client.post(
+        "/org/payload-keys/member/rewrap",
+        headers=member_a,
+        json={"member_key_id": keys["b"], "records": [{"id": record_id, "type": "audit", "wrapped_dek": junk, "content_sha256": legacy_hash}]},
+    )
+    # Member A holds no wrap for this record, so A cannot give B one.
+    assert planted.status_code == 403, planted.text
+    by_admin = await client.post(
+        "/org/payload-keys/member/rewrap",
+        json={"member_key_id": keys["b"], "records": [{"id": record_id, "type": "audit", "wrapped_dek": junk, "content_sha256": legacy_hash}]},
+    )
+    assert by_admin.status_code == 200, by_admin.text

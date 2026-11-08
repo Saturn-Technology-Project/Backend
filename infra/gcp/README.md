@@ -215,6 +215,7 @@ Backend only:
 | `DATABASE_URL`, `REDIS_URL` | Secret Manager | required |
 | `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` | Secret Manager | only read when `SEED_ON_DEPLOY=true` |
 | `ORIGIN_AUTH_SECRET` | Secret Manager | required on Cloud Run |
+| `CONSOLE_PROXY_SECRET_NAME` | variable, secret name shared with the console (set the same variable on Frontend) | console users share the per-address login limits |
 | `CORS_ORIGINS` | variable, optional, comma-separated browser origins if the API is called cross-origin | |
 
 Frontend / Dashboard:
@@ -239,6 +240,7 @@ unmounted.
 | `SATURN_GITHUB_OAUTH_*`, `SATURN_GOOGLE_OAUTH_*` | yes | no | no |
 | `POLICY_LLM_*` | yes | no | no |
 | `ORIGIN_AUTH_SECRET` | yes | no (internal ingress; fails closed) | no |
+| `CONSOLE_PROXY_SECRET_NAME` (when set) | yes | no | no |
 | `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` | only with `SEED_ON_DEPLOY=true` | no | no |
 
 ## Deploy
@@ -524,6 +526,25 @@ allowing only Cloudflare IPs → Cloud Run with ingress `internal-and-cloud-load
 
 Once only Cloudflare can reach the service, the `CF-Connecting-IP` header the app reads for rate
 limits comes only from Cloudflare.
+
+The console (Frontend) needs the same treatment: its `*.run.app` URL proxies `/saturn-api` to the
+API. Put it behind its own load balancer and Cloud Armor policy the same way, then set
+`CLOUD_RUN_INGRESS=internal-and-cloud-load-balancing` on the Frontend repo.
+
+### Per-browser rate limits through the console
+
+Console requests reach the API from the console's own address, so `CF-Connecting-IP` names the
+console and every console user would share one login, sign-up and invite bucket. The console sends
+each browser's address in `X-Saturn-Client-IP` with a secret only it and the API hold, and the API
+trusts that address only when the secret matches.
+
+1. `openssl rand -hex 32 | gcloud secrets create CONSOLE_PROXY_SECRET --data-file -`
+2. Grant both runtime service accounts `roles/secretmanager.secretAccessor` on it.
+3. Set the repository variable `CONSOLE_PROXY_SECRET_NAME=CONSOLE_PROXY_SECRET` on both Backend and
+   Frontend, deploy the backend, then the frontend.
+
+To rotate, set the old value as `CONSOLE_PROXY_SECRET_PREVIOUS` on the API while both services move to
+the new version.
 
 ### Seeding the first admin
 

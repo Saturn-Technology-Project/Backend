@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import HTTPException, status
 
@@ -41,6 +42,7 @@ ALLOWED_MCP_HOSTS = frozenset(
 )
 
 _METADATA_HOSTS = frozenset({"metadata.google.internal", "metadata.google.com"})
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _BLOCKED_V4 = (
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
@@ -70,6 +72,18 @@ def address_blocked(value: str) -> bool:
         return True
     if address.version == 6 and address.ipv4_mapped is not None:
         address = address.ipv4_mapped
+    if address.version == 6:
+        # IPv6 forms that carry an IPv4 address: a NAT64 gateway or a 6to4/Teredo relay would
+        # turn them back into that IPv4 address, internal ones included.
+        embedded = None
+        if address in _NAT64:
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        elif address.sixtofour is not None:
+            embedded = address.sixtofour
+        elif address.teredo is not None:
+            embedded = address.teredo[1]
+        if embedded is not None:
+            return True
     if (
         address.is_private
         or address.is_loopback
@@ -94,8 +108,80 @@ def require_mcp_endpoint(url: str) -> str:
         literal_ip = False
     if literal_ip or host in _METADATA_HOSTS or host not in ALLOWED_MCP_HOSTS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint host is not approved")
-    port = parts.port or 443
+    try:
+        port = parts.port or 443
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint must be HTTPS") from exc
+    if port != 443:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint must use port 443")
     found = addresses_for(host, port)
     if not found or any(address_blocked(item) for item in found):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint address is not allowed")
     return url.strip()
+
+
+# Query parameter names that carry a credential, compared without case, "-" or "_".
+_CREDENTIAL_PARAMS = frozenset(
+    {
+        "apikey",
+        "key",
+        "token",
+        "accesstoken",
+        "apitoken",
+        "authtoken",
+        "auth",
+        "authorization",
+        "secret",
+        "clientsecret",
+        "password",
+        "accesskey",
+        "signature",
+        "sig",
+    }
+)
+
+
+def _param_name(name: str) -> str:
+    return re.sub(r"[-_]", "", name).lower()
+
+
+def split_url_credential(url: str) -> tuple[str, str]:
+    """The URL without credential query parameters, and the credential it carried ("" if none).
+
+    An endpoint is stored and shown to every member who can see connections, so a key never stays
+    in it. A URL that carries more than one distinct credential is refused.
+    """
+    parts = urlsplit(url.strip())
+    if not parts.query:
+        return url.strip(), ""
+    kept: list[tuple[str, str]] = []
+    found: set[str] = set()
+    for name, value in parse_qsl(parts.query, keep_blank_values=True):
+        if _param_name(name) in _CREDENTIAL_PARAMS:
+            if value:
+                found.add(value)
+            continue
+        kept.append((name, value))
+    if len(found) > 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Put the API key in the authorization field, not the URL")
+    clean = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
+    return clean, next(iter(found), "")
+
+
+def pin_mcp_url(url: str) -> tuple[str, str]:
+    """Resolve the endpoint once, check every address, and return (url on that IP, host name).
+
+    The request then connects to the address that was checked, with Host and SNI set to the name.
+    Resolving again at connect time would let a DNS answer change in between and reach an
+    internal address.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower().rstrip(".")
+    found = addresses_for(host, parts.port or 443)
+    if not found or any(address_blocked(item) for item in found):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "MCP endpoint address is not allowed")
+    address = found[0]
+    netloc = f"[{address}]" if ":" in address else address
+    if parts.port and parts.port != 443:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, "")), host
