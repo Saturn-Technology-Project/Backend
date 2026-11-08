@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, insert, select
@@ -715,6 +716,7 @@ class PolicyService:
                 }
             )
             report["ok"] = False
+        report["issues"].extend(await self._unknown_fields(session, policy))
         report["review"] = await self._review(session, policy, names)
         if report["ok"] and policy.status != "active":
             policy.status = "validated"
@@ -727,6 +729,42 @@ class PolicyService:
             policy.updated_at = utcnow()
             await session.flush()
         return report
+
+    async def _unknown_fields(self, session: AsyncSession, policy: Policy) -> list[dict]:
+        """Conditions on a field the tool's input schema does not declare.
+
+        Such a condition never matches a real call: a restriction on it applies to every call and an
+        allow on it never applies. A warning, not an error, so re-validating a policy that is already
+        enforced never turns it off.
+        """
+        from app.models import Tool
+
+        wanted: dict[str, set[str]] = {}
+        for rule in policy.rules:
+            fields = _condition_fields(rule)
+            if fields:
+                wanted.setdefault(rule.tool, set()).update(fields)
+        if not wanted:
+            return []
+        tools = await session.scalars(
+            select(Tool).where(Tool.organization_id == policy.organization_id, Tool.name.in_(sorted(wanted)))
+        )
+        issues = []
+        for tool in sorted(tools.all(), key=lambda item: item.name):
+            schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
+            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            if not properties:
+                continue
+            for field in sorted(wanted.get(tool.name, set()) - set(properties)):
+                issues.append(
+                    {
+                        "level": "warning",
+                        "code": "unknown_field",
+                        "tool": tool.name,
+                        "message": f"{tool.name} has no argument named {field[:128]}, so that condition never matches a call",
+                    }
+                )
+        return issues
 
     async def _review(self, session: AsyncSession, policy: Policy, set_tools: list[str]) -> dict:
         """What activation will enforce, for a person to read before confirming.
@@ -753,6 +791,8 @@ class PolicyService:
                     reasons.append("description_truncated")
                 if hidden_characters(description):
                     reasons.append("hidden_characters")
+                if hidden_characters(tool.name or "") or len(tool.name or "") > 128:
+                    reasons.append("name_hidden_characters")
                 if reasons:
                     flagged.append({"tool": tool.name, "reasons": reasons})
         return {"allows": risky_allows(list(policy.rules)), "approvals": approvals, "flagged_tools": flagged}
@@ -841,3 +881,21 @@ class PolicyService:
 
 
 policy_service = PolicyService()
+
+
+def _condition_fields(rule: Any) -> set[str]:
+    fields: set[str] = set()
+
+    def walk(expr: Any) -> None:
+        if not isinstance(expr, dict):
+            return
+        if expr.get("op") == "cmp" and expr.get("field"):
+            fields.add(str(expr["field"]))
+        for item in expr.get("args") or []:
+            walk(item)
+
+    walk(getattr(rule, "expression", None))
+    for item in conditions_for(rule):
+        if item.get("field"):
+            fields.add(str(item["field"]))
+    return fields
