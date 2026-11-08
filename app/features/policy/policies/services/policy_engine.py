@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import math
 import operator
 import re
+import unicodedata
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import select
@@ -81,22 +84,93 @@ def parse_literal(raw: str) -> Any:
         return value
 
 
+_NUMERIC_TEXT = re.compile(r"-?\d+(\.\d+)?")
+_ORDERING = {"<", "<=", ">", ">="}
+
+
+def strict_number(value: Any) -> Decimal | None:
+    """A finite number, or a string written exactly as one ("1000", "-2.5"). Anything else is None.
+
+    "+1000", " 1000", "1e3", "$1000", NaN, Infinity and booleans are not numbers here, so an agent
+    cannot dodge a numeric rule by spelling a large amount in a way only the upstream understands.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        return Decimal(repr(value)) if math.isfinite(value) else None
+    if isinstance(value, str) and _NUMERIC_TEXT.fullmatch(value):
+        try:
+            return Decimal(value)
+        except InvalidOperation:
+            return None
+    return None
+
+
 def coerce_compare(left: Any, right: Any) -> tuple[Any, Any]:
+    """Kept for callers that only need comparable operands. Prefer compare()."""
     if isinstance(left, bool) or isinstance(right, bool):
         return left, right
-    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-        return float(left), float(right)
-    if isinstance(left, (int, float)):
-        try:
-            return float(left), float(right)
-        except (TypeError, ValueError):
-            return str(left), str(right)
-    if isinstance(right, (int, float)):
-        try:
-            return float(left), float(right)
-        except (TypeError, ValueError):
-            return str(left), str(right)
+    numbers = strict_number(left), strict_number(right)
+    if numbers[0] is not None and numbers[1] is not None:
+        return numbers
     return left, right
+
+
+def _text(value: str) -> str:
+    return unicodedata.normalize("NFKC", value)
+
+
+def compare(symbol: str, left: Any, right: Any) -> bool | None:
+    """True or False when the operands compare cleanly, None when they cannot be compared.
+
+    None means the engine cannot tell. match_rule then treats a deny or approval rule as matched
+    and an allow rule as not matched, so a value the engine does not understand never loosens a
+    restriction.
+    """
+    op = _OPS.get(symbol)
+    if op is None:
+        return None
+    if left is None or isinstance(left, (dict, list, tuple, set)):
+        return None
+    numbers = strict_number(left), strict_number(right)
+    if symbol in _ORDERING:
+        if numbers[0] is None or numbers[1] is None:
+            return None
+        return bool(op(numbers[0], numbers[1]))
+    if numbers[0] is not None and numbers[1] is not None:
+        return bool(op(numbers[0], numbers[1]))
+    if isinstance(left, bool) or isinstance(right, bool):
+        if isinstance(left, bool) and isinstance(right, bool):
+            return bool(op(left, right))
+        return None
+    if isinstance(left, str) and isinstance(right, str):
+        return bool(op(_text(left), _text(right)))
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        # One side is a number the other side cannot be read as: not comparable.
+        return None
+    return bool(op(left, right))
+
+
+def _and(values) -> bool | None:
+    result: bool | None = True
+    for value in values:
+        if value is False:
+            return False
+        if value is None:
+            result = None
+    return result
+
+
+def _or(values) -> bool | None:
+    result: bool | None = False
+    for value in values:
+        if value is True:
+            return True
+        if value is None:
+            result = None
+    return result
 
 
 def compile_condition(conditions: list[dict[str, Any]] | None) -> str:
@@ -192,76 +266,116 @@ def describe_reason(rule: PolicyRule | Any, arguments: dict[str, Any] | None = N
     return " and ".join(describe_condition(item) for item in conds)
 
 
-def evaluate_structured(item: dict[str, Any], arguments: dict[str, Any]) -> bool:
+def structured_truth(item: dict[str, Any], arguments: dict[str, Any]) -> bool | None:
     field = str(item.get("field") or "")
-    if not field or field not in arguments or arguments[field] is None:
+    if not field:
         return False
     operator = str(item.get("operator") or "eq").strip().lower()
     symbol = _OPERATOR_SYMBOLS.get(operator, operator if operator in _OPS else "==")
-    op = _OPS.get(symbol)
-    if op is None:
-        return False
-    left, right = coerce_compare(arguments[field], item.get("value"))
-    return bool(op(left, right))
+    if symbol not in _OPS:
+        return None
+    if field not in arguments:
+        # The call does not say. A restriction on this field cannot be ruled out.
+        return None
+    return compare(symbol, arguments[field], item.get("value"))
 
 
-def _evaluate_atom_string(condition: str, arguments: dict[str, Any]) -> bool:
+def evaluate_structured(item: dict[str, Any], arguments: dict[str, Any]) -> bool:
+    """Two-valued view for display and simulation: only a clean True counts."""
+    return structured_truth(item, arguments) is True
+
+
+def _atom_truth(condition: str, arguments: dict[str, Any]) -> bool | None:
     text = condition.strip()
     if not text or text.lower() in {"true", "*"}:
         return True
     match = _CONDITION.match(text)
     if not match:
-        return False
+        return None
     field = match.group("field")
-    if field not in arguments or arguments[field] is None:
-        return False
-    op = _OPS[match.group("op")]
-    left, right = coerce_compare(arguments[field], parse_literal(match.group("value")))
-    return bool(op(left, right))
+    if field not in arguments:
+        return None
+    return compare(match.group("op"), arguments[field], parse_literal(match.group("value")))
 
 
-def evaluate_condition(condition: str, arguments: dict[str, Any]) -> bool:
+def condition_truth(condition: str, arguments: dict[str, Any]) -> bool | None:
     text = condition.strip()
     if not text:
         return True
-    parts = _AND_SPLIT.split(text)
-    return all(_evaluate_atom_string(part, arguments) for part in parts)
+    return _and(_atom_truth(part, arguments) for part in _AND_SPLIT.split(text))
 
 
-def eval_expr(expr: dict[str, Any] | None, arguments: dict[str, Any]) -> bool:
+def evaluate_condition(condition: str, arguments: dict[str, Any]) -> bool:
+    return condition_truth(condition, arguments) is True
+
+
+def expr_truth(expr: dict[str, Any] | None, arguments: dict[str, Any]) -> bool | None:
     if not isinstance(expr, dict) or not expr:
         return False
     op = expr.get("op")
     if op == "true":
         return True
     if op == "cmp":
-        return evaluate_structured(
+        return structured_truth(
             {"field": expr.get("field"), "operator": expr.get("operator"), "value": expr.get("value")},
             arguments,
         )
     args = [item for item in expr.get("args") or [] if isinstance(item, dict)]
     if op == "not":
-        return len(args) == 1 and not eval_expr(args[0], arguments)
+        if len(args) != 1:
+            return False
+        inner = expr_truth(args[0], arguments)
+        return None if inner is None else not inner
     if op == "and":
-        return all(eval_expr(item, arguments) for item in args) if args else True
+        return _and(expr_truth(item, arguments) for item in args) if args else True
     if op == "or":
-        return any(eval_expr(item, arguments) for item in args)
+        return _or(expr_truth(item, arguments) for item in args)
     return False
 
 
-def match_rule(rule: PolicyRule | Any, arguments: dict[str, Any], agent_id: str | None = None) -> bool:
+def eval_expr(expr: dict[str, Any] | None, arguments: dict[str, Any]) -> bool:
+    return expr_truth(expr, arguments) is True
+
+
+def _restrictive(rule: PolicyRule | Any) -> bool:
+    try:
+        return normalize_decision(str(getattr(rule, "decision", "") or "")) != PolicyDecision.ALLOW
+    except ValueError:
+        return True
+
+
+def rule_truth(rule: PolicyRule | Any, arguments: dict[str, Any]) -> bool | None:
+    expression = getattr(rule, "expression", None)
+    if isinstance(expression, dict) and expression:
+        return expr_truth(expression, arguments)
+    structured = getattr(rule, "conditions", None)
+    if isinstance(structured, list) and structured:
+        return _and(structured_truth(item, arguments) for item in structured if isinstance(item, dict))
+    return condition_truth(getattr(rule, "condition", "") or "true", arguments)
+
+
+def _subject_excluded(rule: PolicyRule | Any, agent_id: str | None) -> bool:
     attributes = getattr(rule, "attributes", None)
     if isinstance(attributes, dict) and agent_id is not None:
         subjects = attributes.get("subjectAgentIds") or []
         if subjects and agent_id not in subjects:
-            return False
-    expression = getattr(rule, "expression", None)
-    if isinstance(expression, dict) and expression:
-        return eval_expr(expression, arguments)
-    structured = getattr(rule, "conditions", None)
-    if isinstance(structured, list) and structured:
-        return all(evaluate_structured(item, arguments) for item in structured if isinstance(item, dict))
-    return evaluate_condition(getattr(rule, "condition", "") or "true", arguments)
+            return True
+    return False
+
+
+def match_truth(rule: PolicyRule | Any, arguments: dict[str, Any], agent_id: str | None = None) -> bool | None:
+    """True, False, or None when the call's values cannot be compared with the rule's."""
+    if _subject_excluded(rule, agent_id):
+        return False
+    return rule_truth(rule, arguments)
+
+
+def match_rule(rule: PolicyRule | Any, arguments: dict[str, Any], agent_id: str | None = None) -> bool:
+    """Whether the rule applies. A restriction the engine cannot rule out applies; an allow it cannot confirm does not."""
+    truth = match_truth(rule, arguments, agent_id)
+    if truth is None:
+        return _restrictive(rule)
+    return truth
 
 
 def _linked_approval_policy(rule: PolicyRule | Any) -> str | None:
@@ -290,9 +404,16 @@ def evaluate_rules(
     if not rules:
         return EvaluationResult(decision=PolicyDecision.DENY, reason="No policy rule")
 
+    # Restrictions the engine could not rule out, met before the first rule that clearly matched.
+    unsure: list[PolicyRule | Any] = []
     for rule in sorted(rules, key=lambda item: item.position):
-        if match_rule(rule, arguments):
-            return _result_for(rule, arguments)
+        truth = match_truth(rule, arguments)
+        if truth is None and _restrictive(rule):
+            unsure.append(rule)
+            continue
+        if truth is True:
+            winner = max([rule, *unsure], key=lambda item: _RESTRICTIVENESS[normalize_decision(item.decision)])
+            return _result_for(winner, arguments)
     return EvaluationResult(decision=PolicyDecision.DENY, reason="No matching policy rule")
 
 
@@ -311,9 +432,11 @@ def evaluate_graph_rules(
     """Most restrictive matching decision. A tool with rules but no match is denied."""
     if not rules:
         return EvaluationResult(decision=PolicyDecision.DENY, reason="No policy rule")
-    matched = [rule for rule in rules if match_rule(rule, arguments, agent_id)]
-    if not matched:
+    truths = [(rule, match_truth(rule, arguments, agent_id)) for rule in rules]
+    if not any(truth is True for _rule, truth in truths):
         return EvaluationResult(decision=PolicyDecision.DENY, reason="No matching policy rule")
+    # A restriction the engine cannot rule out counts as matched, so it can only make the result stricter.
+    matched = [rule for rule, truth in truths if truth is True or (truth is None and _restrictive(rule))]
     winner = max(matched, key=lambda rule: _RESTRICTIVENESS[normalize_decision(rule.decision)])
     return _result_for(winner, arguments)
 

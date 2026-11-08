@@ -100,4 +100,13 @@ def clean_condition(item: Any) -> dict[str, Any] | None:
     value = item.get("value")
     if not scalar_value(value):
         return None
+    if operator in {"gt", "gte", "lt", "lte"}:
+        # Ordering needs a number. A numeric string is stored as a number, so the rule never
+        # falls back to comparing text; anything else ("$1,000", true, null) is refused.
+        from app.features.policy.policies.services.policy_engine import strict_number
+
+        number = strict_number(value)
+        if number is None:
+            return None
+        value = int(number) if number == number.to_integral_value() else float(number)
     return {"field": field, "operator": operator, "value": value}
