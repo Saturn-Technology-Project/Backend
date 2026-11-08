@@ -174,11 +174,15 @@ async def create_org_key(
     if await active_key(session, organization_id) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Organization payload key already exists")
     version = 1
+    # Validate everything first. The session commits on HTTPException, so a refused backup must not
+    # leave an active key behind with no way to recover it.
+    public_hex = _encapsulation_key(public_key, "public_key")
+    backup_row = _backup(organization_id, version, backup)
     row = OrgPayloadKey(
         id=new_id("opk"),
         organization_id=organization_id,
         version=version,
-        public_key=_encapsulation_key(public_key, "public_key"),
+        public_key=public_hex,
         algorithm=WRAP_ALG,
         status="active",
         owner_user_id=owner_user_id,
@@ -186,7 +190,7 @@ async def create_org_key(
         activated_at=utcnow(),
     )
     session.add(row)
-    session.add(_backup(organization_id, version, backup))
+    session.add(backup_row)
     await session.flush()
     await _audit(
         session,
@@ -1039,11 +1043,13 @@ async def activate_rotation(session: AsyncSession, *, organization_id: str, acto
         raise HTTPException(status.HTTP_409_CONFLICT, "Rotation is incomplete")
     if await _any_wrapped_to(session, organization_id, job.from_version):
         raise HTTPException(status.HTTP_409_CONFLICT, "Historical payloads are still wrapped to the previous key")
+    # Check the backup before switching keys, so a bad one leaves the rotation as it was.
+    backup_row = _backup(organization_id, pending.version, backup)
     current.status = "retired"
     current.retired_at = utcnow()
     pending.status = "active"
     pending.activated_at = utcnow()
-    session.add(_backup(organization_id, pending.version, backup))
+    session.add(backup_row)
     job.status = "active"
     job.finished_at = utcnow()
     await session.flush()

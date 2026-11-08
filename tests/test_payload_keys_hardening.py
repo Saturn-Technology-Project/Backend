@@ -675,3 +675,18 @@ async def test_a_sole_admin_can_still_replace_their_key(client):
     _private, replacement = generate_mlkem()
     replaced = await client.post("/org/payload-keys/member", json={"public_key": replacement.hex()})
     assert replaced.json()["approval"] == "approved"
+
+
+async def test_a_refused_recovery_backup_leaves_no_org_key_behind(client):
+    _private, public = generate_mlkem()
+    weak = recovery_backup(os.urandom(32), "org", 1, _private)
+    weak["iterations"] = 1  # well-formed, but the service refuses it
+    refused = await client.post("/org/payload-keys", json={"public_key": public.hex(), "backup": weak})
+    assert refused.status_code == 400, refused.text
+    # Nothing was kept: the owner can try again with a good backup.
+    private, public = generate_mlkem()
+    created = await client.post(
+        "/org/payload-keys",
+        json={"public_key": public.hex(), "backup": recovery_backup(os.urandom(32), "org", 1, private)},
+    )
+    assert created.status_code == 200, created.text
