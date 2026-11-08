@@ -106,14 +106,29 @@ def _tools(body: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
             continue
         schema = item.get("inputSchema") if isinstance(item.get("inputSchema"), dict) else {"type": "object", "properties": {}}
+        annotations = item.get("annotations") if isinstance(item.get("annotations"), dict) else {}
         tools.append(
             {
                 "name": item["name"].strip(),
                 "description": str(item.get("description") or ""),
                 "inputSchema": schema,
+                "permissions": permissions_for(annotations),
             }
         )
     return tools
+
+
+def permissions_for(annotations: dict[str, Any] | None) -> list[str]:
+    """Saturn permissions for an upstream tool, from its MCP annotations.
+
+    Only a tool that declares itself read-only (readOnlyHint true, and not destructive) is read.
+    A tool that says nothing is treated as write, so the default policy holds it for approval
+    instead of allowing it.
+    """
+    hints = annotations if isinstance(annotations, dict) else {}
+    if hints.get("readOnlyHint") is True and hints.get("destructiveHint") is not True:
+        return ["read"]
+    return ["write"]
 
 
 class McpUnauthorized(Exception):

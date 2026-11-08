@@ -1,7 +1,8 @@
 """Default tool policy for a new organization.
 
-Read-class tools are allowed. Write-class tools require approval. Existing
-organizations are not rewritten; startup only logs agents that have no policy.
+Read-class tools are allowed. Every other tool, including one whose permissions are
+unknown, requires approval. Existing organizations are not rewritten; startup only logs
+agents that have no policy.
 """
 
 from __future__ import annotations
@@ -18,14 +19,15 @@ from app.models import Agent, Policy, PolicyRule, Tool
 logger = logging.getLogger(__name__)
 
 MARKER = "saturn-default-v1"
-_WRITE = {"write", "admin", "mutate"}
+_READ = {"read"}
 
 
 def decision_for_permissions(permissions: list | None) -> str:
+    """Allow only tools that are read and nothing else. Unknown or empty fails closed."""
     values = {str(item).strip().lower() for item in (permissions or [])}
-    if values & _WRITE:
-        return "approval"
-    return "allow"
+    if values and values <= _READ:
+        return "allow"
+    return "approval"
 
 
 async def _default_policy(session: AsyncSession, organization_id: str) -> Policy | None:

@@ -155,7 +155,7 @@ class McpConnectService:
                     description=str(item.get("description") or ""),
                     type=ToolType.MCP.value,
                     mcp_endpoint=server.endpoint,
-                    permissions=["read"],
+                    permissions=list(item.get("permissions") or ["write"]),
                     input_schema=item.get("inputSchema") or {"type": "object", "properties": {}},
                     upstream_name=upstream,
                     mcp_server_id=server.id,
@@ -165,6 +165,7 @@ class McpConnectService:
             else:
                 tool.description = str(item.get("description") or tool.description)
                 tool.input_schema = item.get("inputSchema") or tool.input_schema or {}
+                tool.permissions = list(item.get("permissions") or ["write"])
                 tool.upstream_name = upstream
                 tool.mcp_endpoint = server.endpoint
                 tool.mcp_server_id = server.id
