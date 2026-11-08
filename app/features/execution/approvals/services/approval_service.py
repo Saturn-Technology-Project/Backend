@@ -44,6 +44,7 @@ from app.features.execution.approvals.services.expiration import (
     notify_transition,
 )
 from app.features.execution.runs.services.run_service import run_service
+from app.features.policy.policies.services.policy_engine import policy_engine
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -127,6 +128,9 @@ class ApprovalService:
             PolicyDecision.APPROVAL_REQUIRED,
         }:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Policy decision is not executable")
+        # A single approver is held to the same rules as a quorum: the policy and approval policy
+        # people asked under must still be the ones in force.
+        await self._revalidate_versions(session, approval, action, decision)
 
         # Atomic claim: of two concurrent approvals only one moves the row out of pending.
         await self._resolve_pending(session, approval, ApprovalStatus.APPROVED, actor_id)
@@ -399,16 +403,18 @@ class ApprovalService:
         counts = await self._tally(session, approval)
         prepared: _Prepared | None = None
         if _requirements_met(counts):
-            await self._revalidate_quorum(session, approval, action, agent)
+            try:
+                prepared = await self._prepare_execution(session, approval, action, agent, execution_arguments)
+            except HTTPException:
+                # Keep the approval open so this member can vote again with the arguments.
+                await session.delete(vote)
+                await session.flush()
+                raise
+            # Policy is evaluated again on the exact arguments that are about to run.
+            await self._revalidate_quorum(session, approval, action, agent, prepared.arguments)
             counts = await self._tally(session, approval)
-            if _requirements_met(counts):
-                try:
-                    prepared = await self._prepare_execution(session, approval, action, agent, execution_arguments)
-                except HTTPException:
-                    # Keep the approval open so this member can vote again with the arguments.
-                    await session.delete(vote)
-                    await session.flush()
-                    raise
+            if not _requirements_met(counts):
+                prepared = None
         progress = _progress_text(counts)
         await audit_service.log(
             session,
@@ -500,6 +506,12 @@ class ApprovalService:
         gateway = bool(getattr(tool, "mcp_server_id", None) or getattr(tool, "mcp_endpoint", None))
         if not gateway and settings.in_process_runtime:
             return _Prepared(tool=tool, gateway=False, arguments=None)
+        from app.features.mcp.saturn.services.saturn_mcp import saturn_mcp
+
+        # The same check tools/call makes: active, and still in this agent's tool set.
+        exposed = {item.id for item, _ in await saturn_mcp._exposed(session, agent)}
+        if tool.id not in exposed:
+            await self._invalidate(session, approval, action, "tool no longer available to this agent")
         return _Prepared(
             tool=tool,
             gateway=True,
@@ -601,9 +613,10 @@ class ApprovalService:
         approval: Approval,
         action: Action,
         agent: Agent,
+        opened: dict | None = None,
     ) -> None:
-        arguments = None
-        if not action_digest(action.arguments) and not is_zero_access(action.arguments):
+        arguments = opened
+        if arguments is None and not action_digest(action.arguments) and not is_zero_access(action.arguments):
             try:
                 arguments = stored_arguments(agent.organization_id, action.arguments)
             except ArgumentsUnavailable:
@@ -614,7 +627,17 @@ class ApprovalService:
             and not digest_matches(agent.organization_id, approval.parameter_digest, arguments)
         ):
             await self._invalidate(session, approval, action, "parameters changed")
-        _tool, fresh = await run_service.evaluate_action_policy(session, action, agent=agent)
+        if arguments is not None:
+            # Every active policy, on the real arguments: a deny added since the request applies.
+            fresh = await policy_engine.evaluate_named(
+                session,
+                organization_id=agent.organization_id,
+                agent=agent,
+                tool_name=action.tool,
+                arguments=arguments,
+            )
+        else:
+            _tool, fresh = await run_service.evaluate_action_policy(session, action, agent=agent)
         if fresh.decision == PolicyDecision.DENY:
             approval.status = ApprovalStatus.REJECTED
             approval.resolved_at = utcnow()
@@ -624,16 +647,7 @@ class ApprovalService:
                 run.status = RunStatus.FAILED
             await session.flush()
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Policy no longer allows this action")
-        if approval.policy_version is not None and fresh.policy_version != approval.policy_version:
-            await self._invalidate(session, approval, action, "policy changed")
-        if approval.approval_policy_id:
-            policy = await session.get(ApprovalPolicy, approval.approval_policy_id)
-            if (
-                policy is None
-                or policy.status != "active"
-                or (policy.version or 1) != (approval.approval_policy_version or 1)
-            ):
-                await self._invalidate(session, approval, action, "approval policy changed")
+        await self._revalidate_versions(session, approval, action, fresh)
         await audit_service.log(
             session,
             event=AuditEvent.POLICY_EVALUATED,
@@ -646,6 +660,22 @@ class ApprovalService:
             result="revalidated",
             payload={"approval_id": approval.id, "policy_version": fresh.policy_version, "source": "saturn_mcp"},
         )
+
+    async def _revalidate_versions(self, session: AsyncSession, approval: Approval, action: Action, fresh) -> None:
+        """Invalidate when the policy or approval policy the request was made under has changed."""
+        if approval.policy_version is not None and (
+            fresh.policy_version != approval.policy_version
+            or (approval.policy_id and fresh.policy_id and fresh.policy_id != approval.policy_id)
+        ):
+            await self._invalidate(session, approval, action, "policy changed")
+        if approval.approval_policy_id:
+            policy = await session.get(ApprovalPolicy, approval.approval_policy_id)
+            if (
+                policy is None
+                or policy.status != "active"
+                or (policy.version or 1) != (approval.approval_policy_version or 1)
+            ):
+                await self._invalidate(session, approval, action, "approval policy changed")
 
     async def _invalidate(self, session: AsyncSession, approval: Approval, action: Action, reason: str) -> None:
         approval.status = ApprovalStatus.INVALIDATED
