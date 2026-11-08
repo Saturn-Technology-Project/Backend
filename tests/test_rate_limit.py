@@ -132,9 +132,26 @@ def test_login_is_limited_per_account_across_addresses():
             self.headers = {"x-forwarded-for": ip}
             self.client = None
 
-    results = [rate_limit.login_allowed(Request(f"10.0.0.{n}"), "victim@example.com") for n in range(12)]
+    results = []
+    for n in range(12):
+        allowed = rate_limit.login_allowed(Request(f"10.0.0.{n}"), "victim@example.com")
+        results.append(allowed)
+        if allowed:
+            rate_limit.login_failed("victim@example.com")
     assert results[:10] == [True] * 10
     assert results[10:] == [False, False]
+
+
+def test_successful_sign_ins_do_not_count_against_the_account():
+    from app.core import rate_limit
+
+    class Request:
+        def __init__(self, ip: str) -> None:
+            self.headers = {"x-forwarded-for": ip}
+            self.client = None
+
+    # Fifteen good sign-ins from different addresses, none of them failures.
+    assert all(rate_limit.login_allowed(Request(f"10.3.0.{n}"), "busy@example.com") for n in range(15))
 
 
 def test_client_ip_trusts_the_console_address_only_with_the_console_secret(monkeypatch):

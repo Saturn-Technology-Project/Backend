@@ -134,6 +134,24 @@ def _redis_allow(key: str, *, limit: int, window: int) -> bool:
     return count <= limit
 
 
+def _memory_count(key: str, window: int) -> int:
+    now = time.monotonic()
+    return sum(1 for stamp in _hits.get(key, []) if now - stamp < window)
+
+
+def under_limit(key: str, *, limit: int, window: int = WINDOW_SECONDS) -> bool:
+    """Whether key has fewer than limit hits in the window, without adding one."""
+    if _use_redis():
+        try:
+            raw = _redis_client().get(f"saturn:rate:{key}")
+            return int(raw or 0) < limit
+        except Exception:
+            return False
+    if not get_settings().in_process_runtime:
+        return False
+    return _memory_count(key, window) < limit
+
+
 def allow(key: str, *, limit: int = MAX_HITS, window: int = WINDOW_SECONDS) -> bool:
     if _use_redis():
         try:
@@ -154,13 +172,22 @@ def signup_allowed(request: Request) -> bool:
     return allow(f"signup:{client_ip(request)}")
 
 
+LOGIN_ACCOUNT_FAILURES = 10
+
+
 def login_allowed(request: Request, email: str | None = None) -> bool:
     if not allow(f"login:{client_ip(request)}"):
         return False
     if email is None:
         return True
-    # Per account, so rotating addresses does not give unlimited guesses against one user.
-    return allow(f"login-account:{email.strip().lower()}", limit=10, window=WINDOW_SECONDS)
+    # Per account, so rotating addresses does not give unlimited guesses against one user. Only
+    # failed sign-ins count (login_failed), so an owner who signs in often is never locked out.
+    return under_limit(f"login-account:{email.strip().lower()}", limit=LOGIN_ACCOUNT_FAILURES)
+
+
+def login_failed(email: str | None) -> None:
+    if email:
+        allow(f"login-account:{email.strip().lower()}", limit=LOGIN_ACCOUNT_FAILURES * 10, window=WINDOW_SECONDS)
 
 
 def migration_allowed(request: Request, email: str | None = None) -> bool:

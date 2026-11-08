@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from app.features.execution.approvals.services.expiration import save_window, window_minutes
@@ -206,6 +206,11 @@ async def get_deliveries(endpoint_id: str, session: SessionDep, member: TeamRead
 
 @router.post("/webhooks/deliveries/{delivery_id}/retry", response_model=DeliveryRead)
 async def post_retry(delivery_id: str, session: SessionDep, member: TeamWrite, _pro: ProPlan):
+    from app.core.rate_limit import allow
+
+    # Each retry restarts the attempt count, so it is limited rather than repeatable at will.
+    if not allow(f"webhook-retry:{member.organization_id}", limit=30, window=600):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many retries", headers={"Retry-After": "600"})
     row = await retry_delivery(session, member.organization_id, delivery_id)
     return _delivery_read(row)
 

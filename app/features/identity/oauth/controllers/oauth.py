@@ -518,7 +518,7 @@ def _posted_fields(form: dict[str, str]) -> dict[str, str]:
 
 @router.post("/oauth/login")
 async def oauth_login(request: Request, session: SessionDep):
-    from app.core.rate_limit import login_allowed
+    from app.core.rate_limit import login_allowed, login_failed
 
     form = await _posted(request)
     if not login_allowed(request, form.get("email", "")):
@@ -533,6 +533,7 @@ async def oauth_login(request: Request, session: SessionDep):
             legacy_v1=form.get("legacy_v1") or None,
         )
     except HTTPException:
+        login_failed(form.get("email", ""))
         return _page("Connect Agents", "<h1>登入失敗</h1><p>Email or password is incorrect.</p>", 401)
     try:
         # The same factors as the console sign-in. An emailed code is never added as a fallback.

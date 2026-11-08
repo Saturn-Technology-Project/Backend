@@ -66,7 +66,7 @@ async def put_secret(
     if not secret_id:
         return
     if not plaintext:
-        await delete_secret(session, secret_id)
+        await delete_secret(session, secret_id, organization_id, user_id)
         return
     blob = await seal_async(plaintext, organization_id, user_id, vault_context(secret_id))
     project = _project()

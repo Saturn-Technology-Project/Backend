@@ -180,3 +180,10 @@ async def test_mcp_requests_connect_to_the_checked_address(monkeypatch):
     with pytest.raises(HTTPException):
         await mcp_remote.list_remote_tools("https://mcp.notion.com/mcp", "token")
     assert len(seen) == 2
+
+
+def test_ipv6_forms_that_carry_an_internal_ipv4_are_blocked():
+    for value in ["64:ff9b::a00:5", "64:ff9b::7f00:1", "2002:a00:5::1", "2001:0:4136:e378:8000:63bf:f5ff:fffa"]:
+        assert address_blocked(value), value
+    assert not address_blocked("2606:4700:4700::1111")
+    assert not address_blocked("1.1.1.1")

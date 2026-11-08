@@ -431,10 +431,10 @@ class RunService:
 
 
 def _requested_amount(arguments: dict) -> Decimal | None:
-    amount = arguments.get("amount")
-    if amount is None:
-        return None
-    return Decimal(str(amount))
+    from app.features.policy.policies.services.policy_engine import strict_number
+
+    # Anything but a plain number is not an amount; never a 500 on agent input.
+    return strict_number(arguments.get("amount"))
 
 
 def pending_approval_id(run: Run) -> str | None:

@@ -44,6 +44,7 @@ _KMS_ENV = "SATURN_KMS_KEY"
 _CONTENT_TTL_SECONDS = 300.0
 _root: bytes | None = None
 _keys: dict[tuple[str, str, str], MLKEM1024PrivateKey] = {}
+_MAX_CACHED_KEYS = 256
 _content_keys: dict[str, tuple[float, bytes]] = {}
 _kms_client = None
 
@@ -156,6 +157,9 @@ def _private(organization_id: str, user_id: str) -> MLKEM1024PrivateKey:
     found = _keys.get(cache_key)
     if found is None:
         found = MLKEM1024PrivateKey.from_seed_bytes(mlkem_seed(organization_id, user_id))
+        # Bounded, oldest first out, so a process never holds every tenant's key it has ever used.
+        while len(_keys) >= _MAX_CACHED_KEYS:
+            _keys.pop(next(iter(_keys)))
         _keys[cache_key] = found
     return found
 

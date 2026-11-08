@@ -42,6 +42,7 @@ ALLOWED_MCP_HOSTS = frozenset(
 )
 
 _METADATA_HOSTS = frozenset({"metadata.google.internal", "metadata.google.com"})
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _BLOCKED_V4 = (
     ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
@@ -71,6 +72,18 @@ def address_blocked(value: str) -> bool:
         return True
     if address.version == 6 and address.ipv4_mapped is not None:
         address = address.ipv4_mapped
+    if address.version == 6:
+        # IPv6 forms that carry an IPv4 address: a NAT64 gateway or a 6to4/Teredo relay would
+        # turn them back into that IPv4 address, internal ones included.
+        embedded = None
+        if address in _NAT64:
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        elif address.sixtofour is not None:
+            embedded = address.sixtofour
+        elif address.teredo is not None:
+            embedded = address.teredo[1]
+        if embedded is not None:
+            return True
     if (
         address.is_private
         or address.is_loopback

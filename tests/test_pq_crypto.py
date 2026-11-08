@@ -113,3 +113,13 @@ def test_a_bound_value_only_opens_where_it_was_sealed_for(monkeypatch):
     monkeypatch.setenv("SATURN_REQUIRE_BOUND_SECRETS", "true")
     with pytest.raises(SecretNeedsReconnect):
         open_secret(legacy, "org_a", "", "vault:mcp-server-1")
+
+
+def test_the_tenant_key_cache_is_bounded(monkeypatch):
+    from app.features.credentials.vault.services import pq_crypto
+
+    monkeypatch.setattr(pq_crypto, "_MAX_CACHED_KEYS", 3)
+    pq_crypto._keys.clear()
+    for n in range(6):
+        pq_crypto.open_secret(pq_crypto.seal("x", f"org_{n}"), f"org_{n}")
+    assert len(pq_crypto._keys) <= 3

@@ -12,6 +12,7 @@ from app.core.rate_limit import (
     accept_invite_allowed,
     code_check_allowed,
     login_allowed,
+    login_failed,
     migration_allowed,
     reauth_allowed,
     signup_allowed,
@@ -312,13 +313,18 @@ async def login(body: LoginRequest, request: Request, response: Response, sessio
             "Too many attempts",
             headers={"Retry-After": "600"},
         )
-    user = await auth_service.authenticate(
-        session,
-        body.email,
-        body.password,
-        legacy_password=body.legacy_password,
-        legacy_v1=body.legacy_v1,
-    )
+    try:
+        user = await auth_service.authenticate(
+            session,
+            body.email,
+            body.password,
+            legacy_password=body.legacy_password,
+            legacy_v1=body.legacy_v1,
+        )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            login_failed(body.email)
+        raise
     pending = await _begin_mfa(session, user, body.locale)
     if pending is not None:
         return pending
