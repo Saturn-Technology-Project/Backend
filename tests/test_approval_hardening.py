@@ -738,7 +738,6 @@ async def test_an_agent_cannot_flood_the_approval_queue(client, monkeypatch):
 
 
 async def test_an_executed_result_is_stored_sealed_and_still_replays(client, monkeypatch):
-    from sqlalchemy import select
 
     from app.cli.seal_results import seal_plain_results
     from app.models import Action

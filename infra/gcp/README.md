@@ -459,8 +459,9 @@ gcloud sql instances patch "$INSTANCE" --ssl-mode ENCRYPTED_ONLY
 For high availability, also run `--availability-type regional` (this roughly doubles the cost).
 
 Earlier versions of `bootstrap.sh` passed `CLOUD_SQL_PASSWORD` as a command-line argument on the CI
-runner. `rotate-db-password.sh` rotates it end to end: a new `DATABASE_URL` version, the password set
-through the Admin API, the API and worker rolled onto the new version, and the GitHub secret. By
+runner. `rotate-db-password.sh` rotates it end to end: the password set through the Admin API, a new
+`DATABASE_URL` version, the API and worker rolled onto that version, and the GitHub secret. If
+it cannot write the secret after changing the password, it puts the old password back. By
 hand, use
 `gcloud sql users set-password saturn --instance saturn-pg --prompt-for-password` at an interactive
 terminal. Then update the `DATABASE_URL` secret and redeploy.
@@ -517,10 +518,17 @@ allowing only Cloudflare IPs → Cloud Run with ingress `internal-and-cloud-load
 4. Set `CLOUD_RUN_INGRESS=internal-and-cloud-load-balancing` and deploy. The `*.run.app` URL then
    refuses outside traffic. To roll back, set the variable to `all` and deploy.
 5. Rotate `ORIGIN_AUTH_SECRET`, since the old value may have been exposed while the origin was
-   public. The app accepts one value at a time, so a rotation has a short window of 403s:
-   1. `openssl rand -hex 32 | gcloud secrets versions add ORIGIN_AUTH_SECRET --data-file -`
-   2. Update the Cloudflare Transform Rule that sets `X-Saturn-Origin-Auth` to the new value.
-   3. Immediately deploy the backend (or **Run workflow**), so the service picks up `:latest`.
+   public. The app accepts the previous value alongside the new one while
+   `ORIGIN_AUTH_SECRET_PREVIOUS` is mounted, so nothing is refused during the switch:
+   1. Copy the current value into its own secret:
+      `gcloud secrets versions access latest --secret ORIGIN_AUTH_SECRET | gcloud secrets create ORIGIN_AUTH_SECRET_PREVIOUS --data-file -`
+      (use `versions add` if that secret already exists), and grant the runtime service account
+      `roles/secretmanager.secretAccessor` on it.
+   2. `openssl rand -hex 32 | gcloud secrets versions add ORIGIN_AUTH_SECRET --data-file -`
+   3. Set the repository variable `ORIGIN_AUTH_SECRET_PREVIOUS_NAME=ORIGIN_AUTH_SECRET_PREVIOUS`
+      and deploy the backend. It now accepts both values.
+   4. Update the Cloudflare Transform Rule that sets `X-Saturn-Origin-Auth` to the new value.
+   5. Remove the repository variable and deploy again, so the old value stops working.
 
    Rotate again on any suspected leak, and at least yearly.
 
@@ -543,8 +551,9 @@ trusts that address only when the secret matches.
 3. Set the repository variable `CONSOLE_PROXY_SECRET_NAME=CONSOLE_PROXY_SECRET` on both Backend and
    Frontend, deploy the backend, then the frontend.
 
-To rotate, set the old value as `CONSOLE_PROXY_SECRET_PREVIOUS` on the API while both services move to
-the new version.
+To rotate, store the old value in its own secret and set the repository variable
+`CONSOLE_PROXY_SECRET_PREVIOUS_NAME` to that secret's name on the Backend while both services move
+to the new version. Remove the variable and deploy again afterwards.
 
 ### Seeding the first admin
 

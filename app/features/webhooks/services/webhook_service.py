@@ -48,7 +48,8 @@ def max_attempts() -> int:
 
 
 def backoff_seconds(attempt: int) -> float:
-    return min(300, 2 ** min(attempt, 8)) + random.random()
+    # Jitter so retries do not line up. Not a secret, so the ordinary generator is right.
+    return min(300, 2 ** min(attempt, 8)) + random.random()  # noqa: S311
 
 
 def disabled_delay_seconds() -> int:
@@ -552,7 +553,7 @@ async def deliver_due(
             return await send_webhook(job.url, job.body, job.headers)
 
     results = await asyncio.gather(*(run(job) for job in jobs))
-    for job, (code, error) in zip(jobs, results):
+    for job, (code, error) in zip(jobs, results, strict=True):
         await _record(session, job, moment, code, error)
     await session.flush()
     return len(picked)

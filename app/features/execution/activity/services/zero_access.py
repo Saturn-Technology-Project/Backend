@@ -45,7 +45,7 @@ RECOVERY_KDF_V2 = "PBKDF2-HMAC-SHA256"
 RECOVERY_ITERATIONS = 600_000
 RECOVERY_MAX_ITERATIONS = 10_000_000
 # Legacy member backup: the KEK comes from the login password, which the server receives at login.
-PASSWORD_KDF = "PBKDF2-HMAC-SHA256"
+PASSWORD_KDF = "PBKDF2-HMAC-SHA256"  # noqa: S105
 PASSWORD_ITERATIONS = 600_000
 # v2 member backup: an opaque blob the client wrapped under a secret that never reaches the server.
 CLIENT_BACKUP_VERSION = 2

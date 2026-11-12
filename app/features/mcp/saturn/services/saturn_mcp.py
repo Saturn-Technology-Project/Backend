@@ -1059,7 +1059,7 @@ class SaturnMcp:
         except McpUnauthorized:
             secret = await mcp_oauth.refresh_after_reject(session, server)
             if not secret:
-                raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server returned HTTP 401")
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server returned HTTP 401") from None
             await session.commit()
             try:
                 return await call_remote_tool(endpoint, upstream, arguments, secret)

@@ -1,4 +1,3 @@
-from typing import Any
 
 import json
 import secrets

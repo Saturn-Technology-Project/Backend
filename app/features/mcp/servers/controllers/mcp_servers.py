@@ -26,7 +26,7 @@ router = APIRouter(prefix="/mcp-servers", tags=["mcp-servers"])
 logger = logging.getLogger(__name__)
 
 
-def serialize_mcp_server(server: McpServer, *, secret_status: str = "ok") -> McpServerRead:
+def serialize_mcp_server(server: McpServer, *, secret_status: str = "ok") -> McpServerRead:  # noqa: S107
     active = [tool for tool in (server.tools or []) if tool.status == "active"]
     tools = sorted(tool.name for tool in active)
     link = mcp_gateway.link_for(server.id)

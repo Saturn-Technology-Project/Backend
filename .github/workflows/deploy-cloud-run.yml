@@ -59,6 +59,13 @@ jobs:
       # trusts the browser address the console forwards, so per-address limits are not shared by every
       # console user. Unset: the API keys limits on the address Cloudflare reports, as before.
       CONSOLE_PROXY_SECRET_NAME: ${{ vars.CONSOLE_PROXY_SECRET_NAME }}
+      # Secret Manager secrets that hold the value being rotated out. While one is set, the API
+      # accepts both the new and the old value, so Cloudflare (or the console) and this service
+      # can be switched one after the other with no window of 403s. Unset it again afterwards.
+      ORIGIN_AUTH_SECRET_PREVIOUS_NAME: ${{ vars.ORIGIN_AUTH_SECRET_PREVIOUS_NAME }}
+      CONSOLE_PROXY_SECRET_PREVIOUS_NAME: ${{ vars.CONSOLE_PROXY_SECRET_PREVIOUS_NAME }}
+      # 'true': refuse to deploy while a hardening setting below is still at its legacy default.
+      REQUIRE_HARDENED_DEPLOY: ${{ vars.REQUIRE_HARDENED_DEPLOY }}
       # Secret Manager secret with the Memorystore server CA (PEM), mounted at REDIS_CA_PATH.
       REDIS_CA_SECRET: ${{ vars.REDIS_CA_SECRET }}
       REDIS_CA_PATH: /etc/secrets/redis-ca/ca.pem
@@ -71,6 +78,28 @@ jobs:
         run: |
           if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
             echo "::error::Production deploys run only from refs/heads/main, not ${GITHUB_REF}."
+            exit 1
+          fi
+
+      # Each of these is optional so an older setup keeps deploying, but the default each one
+      # falls back to is the unsafe one. Say so on every run instead of staying silent.
+      - name: Check hardening settings
+        run: |
+          set -euo pipefail
+          missing=0
+          note() { echo "::warning title=Deploy hardening::$1"; missing=1; }
+          if [ -z "${RUNTIME_SERVICE_ACCOUNT}" ]; then
+            note "RUNTIME_SERVICE_ACCOUNT is not set: the services run as the project's default compute service account, which usually has the Editor role."
+          fi
+          if [ "${MIGRATIONS_JOB}" != "true" ]; then
+            note "MIGRATIONS_JOB is not 'true': every container migrates on start with the application's database user."
+          fi
+          case "${CLOUD_RUN_INGRESS}" in
+            internal | internal-and-cloud-load-balancing) ;;
+            *) note "CLOUD_RUN_INGRESS is '${CLOUD_RUN_INGRESS:-unset}': the run.app address is reachable from the internet, so only the origin secret separates it from Cloudflare." ;;
+          esac
+          if [ "${missing}" = "1" ] && [ "${REQUIRE_HARDENED_DEPLOY}" = "true" ]; then
+            echo "::error::REQUIRE_HARDENED_DEPLOY is true and a hardening setting is missing. See infra/gcp/README.md."
             exit 1
           fi
 
@@ -182,6 +211,12 @@ jobs:
           api="${api},ORIGIN_AUTH_SECRET=ORIGIN_AUTH_SECRET:latest"
           if [ -n "${CONSOLE_PROXY_SECRET_NAME}" ]; then
             api="${api},CONSOLE_PROXY_SECRET=${CONSOLE_PROXY_SECRET_NAME}:latest"
+          fi
+          if [ -n "${ORIGIN_AUTH_SECRET_PREVIOUS_NAME}" ]; then
+            api="${api},ORIGIN_AUTH_SECRET_PREVIOUS=${ORIGIN_AUTH_SECRET_PREVIOUS_NAME}:latest"
+          fi
+          if [ -n "${CONSOLE_PROXY_SECRET_PREVIOUS_NAME}" ]; then
+            api="${api},CONSOLE_PROXY_SECRET_PREVIOUS=${CONSOLE_PROXY_SECRET_PREVIOUS_NAME}:latest"
           fi
           if [ "${SEED_ON_DEPLOY}" = "true" ]; then
             api="${api},SEED_USER_EMAIL=SEED_USER_EMAIL:latest,SEED_USER_PASSWORD=SEED_USER_PASSWORD:latest"

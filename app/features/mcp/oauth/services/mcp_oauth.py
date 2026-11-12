@@ -67,7 +67,8 @@ def browser_cookie_domain(console_origin: str, api_origin: str) -> str | None:
     except ValueError:
         pass
     shared: list[str] = []
-    for left, right in zip(reversed(console.split(".")), reversed(api.split("."))):
+    # The two host names can have different numbers of labels; compare from the right as far as the shorter goes.
+    for left, right in zip(reversed(console.split(".")), reversed(api.split(".")), strict=False):
         if left != right:
             break
         shared.insert(0, left)

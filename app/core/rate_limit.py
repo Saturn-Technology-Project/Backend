@@ -196,7 +196,7 @@ def release(key: str) -> None:
     if _use_redis():
         try:
             _redis_client().eval(_DECR_FLOOR, 1, f"saturn:rate:{key}")
-        except Exception:
+        except Exception:  # noqa: S110
             # The hit stays counted and expires with its window: the safe direction.
             pass
         return

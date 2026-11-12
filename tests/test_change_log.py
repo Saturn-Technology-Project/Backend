@@ -62,9 +62,9 @@ async def test_tool_set_and_assignment_changes_are_recorded(client):
     )
     assert created.status_code == 201, created.text
     set_id = created.json()["id"]
-    assert (await client.patch(f"/agents/agent_customer_ops", json={"tool_set_id": set_id})).status_code == 200
+    assert (await client.patch("/agents/agent_customer_ops", json={"tool_set_id": set_id})).status_code == 200
     # Assigning the same set again changes nothing and adds no record.
-    assert (await client.patch(f"/agents/agent_customer_ops", json={"tool_set_id": set_id})).status_code == 200
+    assert (await client.patch("/agents/agent_customer_ops", json={"tool_set_id": set_id})).status_code == 200
     assert (await client.patch(f"/tool-sets/{set_id}", json={"name": "Support v2"})).status_code == 200
     assert (await client.delete(f"/tool-sets/{set_id}")).status_code == 204
 

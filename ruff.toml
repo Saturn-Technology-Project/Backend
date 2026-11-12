@@ -1,0 +1,24 @@
+# Run with `ruff check`. CI runs it before the tests (.github/workflows/test.yml).
+# This catches real mistakes (undefined names, unused imports, blocking calls in async code,
+# risky constructs); it does not reformat or enforce a style.
+target-version = "py312"
+extend-exclude = ["alembic/versions"]
+
+[lint]
+select = [
+    "E9",    # syntax errors
+    "F",     # pyflakes: undefined names, unused imports and variables
+    "B",     # bugbear: likely bugs
+    "ASYNC", # blocking calls and other mistakes in async functions
+    "S",     # bandit: risky constructs
+]
+ignore = [
+    "B008", # FastAPI declares dependencies as call defaults: `x = Depends(...)`
+    "S101", # assert is used to state invariants and narrow types, never to check input
+]
+
+[lint.per-file-ignores]
+# Tests assert, use fixed fake credentials, and expect broad exceptions on purpose.
+"tests/**" = ["S101", "S105", "S106", "S107", "S110", "B017"]
+# `from app.models import *` registers every model with the metadata.
+"app/models/__init__.py" = ["F401"]

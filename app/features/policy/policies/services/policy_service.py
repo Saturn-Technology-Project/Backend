@@ -688,7 +688,7 @@ class PolicyService:
         yield {"type": "result", "definition": optimized, "diff": diff}
 
     async def _set_tool_names(self, session: AsyncSession, organization_id: str, tool_set_id: str) -> list[str]:
-        from app.models import Tool, ToolSet, ToolSetItem
+        from app.models import ToolSet, ToolSetItem
 
         result = await session.execute(
             select(ToolSet)
