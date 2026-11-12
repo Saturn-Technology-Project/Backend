@@ -339,7 +339,9 @@ Agent 錢包與 x402 付款已經移除（遷移 `039_drop_wallets_x402`）。
 
 ### 審計內容
 
-審計紀錄中的工具參數、原始請求與上游回應，會加密給組織的 ML-KEM-1024 酬載金鑰，以及已核准成員的金鑰。伺服器為每把公鑰封裝一把資料金鑰後就丟棄；它從不儲存或接受組織私鑰、成員私鑰或復原金鑰（`/org/payload-keys`）。沒有註冊任何金鑰時，這些內容不會被儲存。平台管理的回應永遠拿不到它們。組織沒有酬載金鑰時，待核准請求將要執行的參數改以從 KMS 衍生的組織金鑰密封；把核准綁定到參數的摘要，也是以 KMS 衍生金鑰計算的 HMAC，所以單憑資料庫副本無法用來驗證金額之類的猜測。
+審計紀錄中的工具參數、原始請求與上游回應，會加密給組織的 ML-KEM-1024 酬載金鑰，以及已核准成員的金鑰。伺服器為每把公鑰封裝一把資料金鑰後就丟棄；它從不儲存或接受組織私鑰、成員私鑰或復原金鑰（`/org/payload-keys`）。沒有註冊任何金鑰時，這些內容不會被儲存。平台管理的回應永遠拿不到它們。組織沒有酬載金鑰時，待核准請求將要執行的參數改以從 KMS 衍生的組織金鑰密封；把核准綁定到參數的摘要，也是以 KMS 衍生金鑰計算的 HMAC，所以單憑資料庫副本無法用來驗證金額之類的猜測。已核准的呼叫為了重送而保留的結果，也以同樣方式密封；`python -m app.cli.seal_results --apply` 會把舊版以明文儲存的結果補上密封。
+
+規則本身的變更也會記錄：建立、編輯、啟用、暫停或刪除政策，變更工具集或把它指派給 Agent，邀請成員或變更其角色、狀態與指派，以及移除 Agent 或 MCP 伺服器。有 team 權限的成員可以用 `GET /activity/changes` 查看。這些紀錄只包含 ID、名稱與變更前後的狀態，不含工具內容。
 
 ### 網路暴露面
 
@@ -347,6 +349,7 @@ Agent 錢包與 x402 付款已經移除（遷移 `039_drop_wallets_x402`）。
 - **對內。** 在 Cloud Run 上，除了 `/healthz` 之外的每個請求都必須帶有 `ORIGIN_AUTH_SECRET`，所以只有邊緣代理能連到服務。`/healthz` 只回報正常或異常。
 - **用戶端位址。** uvicorn 只信任來自 127.0.0.1 的 `X-Forwarded-*`。速率限制只有在來源驗證證明請求經過 Cloudflare 時才採用 `CF-Connecting-IP`，否則採用 `X-Forwarded-For` 最右邊的項目。
 - **速率限制**計數在 Redis 中，失敗時拒絕：連不到 Redis 時，受限制的路由會拒絕請求。
+- **請求大小。** 請求 body 超過 4 MiB 會被拒絕，登入與 OAuth 路由則是 64 KiB，在任何 handler 讀取之前就擋下。
 - **標頭。** 每個回應都帶有嚴格的 Content-Security-Policy（API 為 `default-src 'none'`，OAuth 頁面使用每個請求各自的 nonce）、`X-Frame-Options: DENY`、`nosniff`、`Referrer-Policy: no-referrer` 與 Permissions-Policy；HTTPS 回應另加 HSTS。未處理的錯誤只回傳通用的 500。
 - **本機。** Compose 把 Postgres 與 Redis 綁定在 127.0.0.1，兩者都必須設定密碼。
 
@@ -363,7 +366,7 @@ pytest
 
 測試在記憶體中的 SQLite 上執行，使用 `IN_PROCESS_RUNTIME=true` 與固定的本機金庫金鑰，所以不需要 Postgres、Redis、KMS 或網路。Pytest 會載入本機的工具目錄 fixture（`tests/catalog.py`），讓執行迴圈的測試不依賴正式環境的初始資料。MCP 端點的 DNS 查詢會被替換成一個公開位址。
 
-[Test workflow](.github/workflows/test.yml) 在每次推送到 `main` 與每個 pull request 時執行：先以 gitleaks 掃描目前的檔案與完整歷史（執行檔以固定的 SHA-256 核對），再以雜湊驗證安裝並執行 `pytest`。
+[Test workflow](.github/workflows/test.yml) 在每次推送到 `main` 與每個 pull request 時執行：先以 gitleaks 掃描目前的檔案與完整歷史（執行檔以固定的 SHA-256 核對），再以雜湊驗證安裝，接著執行 `ruff check`、對正式環境鎖檔執行 `pip-audit`，最後執行 `pytest`。另一個 job 會把所有遷移套用到 PostgreSQL 16，再把最新的一支復原後重新套用。
 
 ## 相依套件與供應鏈
 

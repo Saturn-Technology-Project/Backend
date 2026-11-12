@@ -339,7 +339,9 @@ Credentials and upstream OAuth tokens are sealed with ML-KEM-1024 and AES-256-GC
 
 ### Audit content
 
-Tool arguments, raw requests and upstream responses in the audit log are encrypted to the organization's ML-KEM-1024 payload key and to the keys of approved members. The server encapsulates a data key to each public key and discards it; it never stores or accepts an organization private key, a member private key or a recovery key (`/org/payload-keys`). If no key is registered, that content is not stored. Platform admin responses never receive it. When an organization has no payload key, the arguments a pending approval will run are sealed with a per-organization key derived from KMS instead, and the digest that binds an approval to them is an HMAC with a KMS-derived key, so a database copy cannot be used to confirm guesses such as an amount.
+Tool arguments, raw requests and upstream responses in the audit log are encrypted to the organization's ML-KEM-1024 payload key and to the keys of approved members. The server encapsulates a data key to each public key and discards it; it never stores or accepts an organization private key, a member private key or a recovery key (`/org/payload-keys`). If no key is registered, that content is not stored. Platform admin responses never receive it. When an organization has no payload key, the arguments a pending approval will run are sealed with a per-organization key derived from KMS instead, and the digest that binds an approval to them is an HMAC with a KMS-derived key, so a database copy cannot be used to confirm guesses such as an amount. The result an approved call keeps for replays is sealed the same way; `python -m app.cli.seal_results --apply` seals the ones older versions stored readable.
+
+Changes to the rules are recorded too: creating, editing, activating, pausing or deleting a policy, changing a tool set or assigning one to an agent, inviting a member or changing their role, status or assignments, and removing an agent or MCP server. `GET /activity/changes` lists them for members with team access. These records hold ids, names and before/after states, never tool content.
 
 ### Network exposure
 
@@ -347,6 +349,7 @@ Tool arguments, raw requests and upstream responses in the audit log are encrypt
 - **Inbound.** On Cloud Run every request except `/healthz` must carry `ORIGIN_AUTH_SECRET`, so only the edge proxy can reach the service. `/healthz` reports only up or down.
 - **Client addresses.** uvicorn does not trust `X-Forwarded-*` from any peer but 127.0.0.1. Rate limits use `CF-Connecting-IP` only when origin auth proves the request came through Cloudflare, otherwise the rightmost `X-Forwarded-For` entry.
 - **Rate limits** are counted in Redis and fail closed: if Redis cannot be reached, limited routes refuse the request.
+- **Request size.** A request body over 4 MiB is refused, and over 64 KiB on the sign-in and OAuth routes, before any handler reads it.
 - **Headers.** Every response carries a restrictive Content-Security-Policy (`default-src 'none'` for the API, a per-request nonce for the OAuth pages), `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer` and a Permissions-Policy; HTTPS responses add HSTS. Unhandled errors return a generic 500.
 - **Local.** Compose binds Postgres and Redis to 127.0.0.1 and requires passwords for both.
 
@@ -363,7 +366,7 @@ pytest
 
 Tests run against in-memory SQLite with `IN_PROCESS_RUNTIME=true` and a fixed local vault key, so they need no Postgres, Redis, KMS or network. Pytest loads a local catalog fixture (`tests/catalog.py`) so the execution-loop tests do not depend on production seed data. DNS for MCP endpoints is stubbed to a public address.
 
-The [Test workflow](.github/workflows/test.yml) runs on every push to `main` and every pull request: gitleaks over the tree and the full history (the binary checked against a pinned SHA-256), then the hashed install and `pytest`.
+The [Test workflow](.github/workflows/test.yml) runs on every push to `main` and every pull request: gitleaks over the tree and the full history (the binary checked against a pinned SHA-256), then the hashed install, `ruff check`, `pip-audit` on the production lock, and `pytest`. A second job applies every migration to PostgreSQL 16, then reverses and reapplies the newest one.
 
 ## Dependencies and supply chain
 
