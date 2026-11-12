@@ -576,7 +576,24 @@ async def confirm_email_change(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
     _require_code_check(request, user.id)
+    from app.features.execution.activity.services import payload_key_service as keys
+
+    # Everything that can refuse the request is checked before the address changes.
+    rekey = body.current_password is not None or body.new_password is not None
+    if rekey:
+        await auth_service.check_rekey(user, body.current_password or "", body.new_password or "")
+    backup = await keys.prepare_member_backup(
+        session,
+        organization_id=user.organization_id,
+        user_id=user.id,
+        backup=body.member_backup.model_dump() if body.member_backup is not None and rekey else None,
+    )
     await mfa_service.confirm_email_change(session, user, body.current_code, body.next_code)
+    if rekey:
+        # The console derives the stored value from the password and the email. Keeping the old
+        # one would make the password stop working the moment the address changed.
+        await auth_service.store_password(user, body.new_password or "")
+        await keys.store_member_backup(session, backup)
     token = _presented_token(request, creds)
     await auth_service.revoke_user_sessions(
         session,
@@ -701,6 +718,16 @@ async def change_password(
     session: SessionDep,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
+    from app.features.execution.activity.services import payload_key_service as keys
+
+    # Checked before the password changes: a refused request is still committed, and a new
+    # password with the old backup would leave the member unable to open their own key.
+    backup = await keys.prepare_member_backup(
+        session,
+        organization_id=user.organization_id,
+        user_id=user.id,
+        backup=body.member_backup.model_dump() if body.member_backup is not None else None,
+    )
     await auth_service.change_password(
         session,
         user,
@@ -708,3 +735,4 @@ async def change_password(
         body.new_password,
         keep_token=_presented_token(request, creds) or None,
     )
+    await keys.store_member_backup(session, backup)

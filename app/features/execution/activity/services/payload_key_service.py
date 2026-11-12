@@ -6,7 +6,7 @@ import re
 from typing import Any, Callable
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ids import new_id, utcnow
@@ -57,6 +57,7 @@ EVENT_ROTATION_REWRAPPED = "payload_rotation_rewrapped"
 EVENT_ROTATION_STARTED = "payload_rotation_started"
 EVENT_ROTATION_ACTIVATED = "payload_rotation_activated"
 EVENT_OWNER_TRANSFERRED = "payload_owner_transferred"
+EVENT_MEMBER_BACKUP_REPLACED = "payload_member_backup_replaced"
 KEY_AUDIT_EVENTS = (
     EVENT_ORG_KEY_CREATED,
     EVENT_MEMBER_KEY_REGISTERED,
@@ -69,6 +70,7 @@ KEY_AUDIT_EVENTS = (
     EVENT_ROTATION_STARTED,
     EVENT_ROTATION_ACTIVATED,
     EVENT_OWNER_TRANSFERRED,
+    EVENT_MEMBER_BACKUP_REPLACED,
 )
 
 SCAN_DEFAULT_LIMIT = 200
@@ -408,6 +410,46 @@ def member_backup_view(key: MemberPayloadKey, backup: MemberKeyBackup) -> dict:
         }
     )
     return body
+
+
+async def prepare_member_backup(
+    session: AsyncSession, *, organization_id: str, user_id: str, backup: dict | None
+) -> MemberKeyBackup | None:
+    """Check a replacement backup for the member's current key. Changes nothing.
+
+    Returns None when there is nothing to store: no backup was sent, or the member has no key.
+    Call this before the password or email is changed, because a refused request is still
+    committed and a late failure must not leave the new password in place with the old backup.
+    """
+    if backup is None:
+        return None
+    if _backup_format(backup) != "client-secret":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported password backup")
+    key = await own_member_key(session, organization_id=organization_id, user_id=user_id)
+    if key is None:
+        return None
+    return _member_backup(organization_id, user_id, key.id, backup)
+
+
+async def store_member_backup(session: AsyncSession, row: MemberKeyBackup | None) -> None:
+    """Replace the stored backup of a member's key with one prepared above."""
+    if row is None:
+        return
+    await session.execute(
+        delete(MemberKeyBackup).where(
+            MemberKeyBackup.member_key_id == row.member_key_id,
+            MemberKeyBackup.user_id == row.user_id,
+        )
+    )
+    session.add(row)
+    await session.flush()
+    await _audit(
+        session,
+        event=EVENT_MEMBER_BACKUP_REPLACED,
+        actor_id=row.user_id,
+        organization_id=row.organization_id,
+        payload={"member_key_id": row.member_key_id, "user_id": row.user_id},
+    )
 
 
 async def own_password_backup(session: AsyncSession, *, organization_id: str, user_id: str) -> tuple[MemberPayloadKey, MemberKeyBackup] | None:

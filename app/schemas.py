@@ -723,9 +723,30 @@ class ReauthRequest(BaseModel):
     credential: MediumDict | None = None
 
 
+class MemberBackup(BaseModel):
+    """The member's private key, wrapped in the browser under a key derived from the password.
+
+    Opaque to the server. It is sent with a password or email change because the wrap key is
+    derived from both: without a new copy, the old one can no longer be opened after the change.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    v: int
+    kdf: str = Field(max_length=64)
+    scheme: str = Field(max_length=64)
+    blob: str = Field(max_length=16384)
+
+
 class EmailChangeConfirm(BaseModel):
     current_code: str = Field(max_length=CODE_LEN)
     next_code: str = Field(max_length=CODE_LEN)
+    # The console derives what it sends as "password" from the password and the email. After the
+    # email changes, the stored value can no longer be reproduced, so the console sends the old
+    # one as proof and the new one to store. Without them the account needs a password reset.
+    current_password: str | None = Field(default=None, max_length=PASSWORD_LEN)
+    new_password: str | None = Field(default=None, max_length=PASSWORD_LEN)
+    member_backup: MemberBackup | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -741,6 +762,7 @@ class PhotoUpdate(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str = Field(max_length=PASSWORD_LEN)
     new_password: str = Field(max_length=PASSWORD_LEN)
+    member_backup: MemberBackup | None = None
 
 
 class ForgotPasswordRequest(BaseModel):

@@ -389,6 +389,19 @@ class AuthService:
             await self.mark_session_authenticated(session, keep_token)
         await self._revoke_oauth(session, user.id)
 
+    async def check_rekey(self, user: User, current_password: str, new_password: str) -> None:
+        """Whether the caller may replace the stored password value. Changes nothing."""
+        from app.core.rate_limit import reauth_allowed
+
+        if not reauth_allowed(user.id):
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts", headers={"Retry-After": "900"})
+        if not current_password or not await in_thread(verify_password, current_password, user.password_hash):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
+        self._require_password(new_password)
+
+    async def store_password(self, user: User, new_password: str) -> None:
+        user.password_hash = await in_thread(hash_password, new_password)
+
     async def _session_record(self, session: AsyncSession, token: str) -> AuthSession | None:
         if not token:
             return None
