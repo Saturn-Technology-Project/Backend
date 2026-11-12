@@ -217,8 +217,11 @@ async def test_passkey_only_account_cannot_fall_back_to_email_on_oauth_page(clie
     saved = _no_auth(client)
     try:
         _query, signed = await _oauth_login(client, "Passkey Agent")
-        assert signed.status_code == 403
-        assert "passkey" in signed.text
+        # The page hands the passkey step to the console. No code is emailed and no code form is shown.
+        assert signed.status_code == 200
+        assert "/connect-passkey#" in signed.text
+        assert 'action="/oauth/login/code"' not in signed.text
+        assert "set-cookie" not in signed.headers
         assert sent == []
     finally:
         if saved:
