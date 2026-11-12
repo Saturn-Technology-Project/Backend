@@ -276,6 +276,10 @@ Settings come from the environment (or `.env`); see `.env.example`. App settings
 |---|---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://saturn:saturn@localhost:5432/saturn` | Database. Compose sets it from `POSTGRES_PASSWORD`. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Rate limits and MCP sessions. Compose sets it from `REDIS_PASSWORD`. |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | Connections each process keeps, and how many more it may open under load. Instances × the sum must stay under the database's connection limit. |
+| `DB_POOL_TIMEOUT` | `10` | Seconds a request waits for a free connection before it fails |
+| `DB_POOL_RECYCLE` | `1800` | Seconds before a pooled connection is replaced |
+| `DB_COMMAND_TIMEOUT` | `60` | Seconds one statement may run. `0` turns the limit off. |
 | `DEFAULT_ORG_ID` | `org_saturn` | ID of the bootstrap organization |
 | `DEFAULT_ACTOR_ID` | `user_operator` | ID of the bootstrap platform admin |
 | `SEED_USER_EMAIL` / `SEED_USER_PASSWORD` | empty | Create the platform admin on first boot; empty skips seeding. On Cloud Run the password must be 16 characters or more. |

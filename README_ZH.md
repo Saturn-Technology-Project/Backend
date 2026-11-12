@@ -276,6 +276,10 @@ Agent 錢包與 x402 付款已經移除（遷移 `039_drop_wallets_x402`）。
 |---|---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://saturn:saturn@localhost:5432/saturn` | 資料庫。Compose 以 `POSTGRES_PASSWORD` 組出它。 |
 | `REDIS_URL` | `redis://localhost:6379/0` | 速率限制與 MCP 工作階段。Compose 以 `REDIS_PASSWORD` 組出它。 |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | 每個行程保留的連線數，以及負載時可以多開幾條。instance 數 × 兩者總和必須低於資料庫的連線上限。 |
+| `DB_POOL_TIMEOUT` | `10` | 請求等待空閒連線的秒數，超過即失敗 |
+| `DB_POOL_RECYCLE` | `1800` | 連線池中的連線使用多少秒後換新 |
+| `DB_COMMAND_TIMEOUT` | `60` | 單一 SQL 可以執行的秒數。`0` 表示不限制。 |
 | `DEFAULT_ORG_ID` | `org_saturn` | Bootstrap 組織的 ID |
 | `DEFAULT_ACTOR_ID` | `user_operator` | Bootstrap 平台管理員的 ID |
 | `SEED_USER_EMAIL` / `SEED_USER_PASSWORD` | 空 | 第一次啟動時建立平台管理員；留空則略過。在 Cloud Run 上密碼必須至少 16 個字元。 |

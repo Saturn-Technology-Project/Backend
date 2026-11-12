@@ -27,6 +27,17 @@ class Settings(BaseSettings):
     policy_llm_base_url: str = ""
     policy_llm_api_key: str = ""
     policy_llm_model: str = ""
+    # Connection pool, per process. Instances x (pool_size + max_overflow) must stay under the
+    # database's connection limit: 10 instances at the defaults can open 150.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    # Seconds a request waits for a free connection before it fails. Short, so a full pool
+    # turns into quick 503s instead of every request hanging for half a minute.
+    db_pool_timeout: float = 10.0
+    # Seconds before a pooled connection is replaced, below the usual idle cut-off of proxies.
+    db_pool_recycle: int = 1800
+    # Seconds one statement may run. 0 turns the limit off.
+    db_command_timeout: float = 60.0
     # ISO date (YYYY-MM-DD). After this day, a legacy password can no longer sign in.
     legacy_password_until: str = ""
 

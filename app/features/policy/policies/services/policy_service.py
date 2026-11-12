@@ -599,6 +599,9 @@ class PolicyService:
         bounded_text(name, MAX_NAME, "Name")
         tool_set, inventory = await self.set_inventory(session, organization_id, tool_set_id)
         _cap_tools(len(inventory))
+        # The model can take minutes. Nothing is pending, so end the transaction and give the
+        # connection back to the pool while it thinks.
+        await session.commit()
         analyses, used_model = await analyze_tools(inventory, request)
         definition = definition_from_analyses(tool_set.id, analyses)
         return await self.create_policy(
@@ -616,6 +619,9 @@ class PolicyService:
         tool_set, inventory = await self.set_inventory(session, organization_id, tool_set_id)
         _cap_tools(len(inventory))
         yield {"type": "status", "code": "reading", "name": tool_set.name, "count": len(inventory)}
+        # The model can take minutes. Nothing is pending, so end the transaction and give the
+        # connection back to the pool while it thinks.
+        await session.commit()
         analyses = None
         used_model = False
         async for kind, payload in iter_tool_analysis(inventory, request):
@@ -655,6 +661,9 @@ class PolicyService:
         from app.features.policy.policies.services.policy_llm import optimize_definition
 
         document, inventory, request = await self._optimize_inputs(session, policy, definition, instructions)
+        # The model can take minutes. Nothing is pending, so end the transaction and give the
+        # connection back to the pool while it thinks.
+        await session.commit()
         optimized, diff = await optimize_definition(document, inventory, request)
         return {"definition": optimized, "diff": diff}
 
@@ -664,6 +673,9 @@ class PolicyService:
         document, inventory, request = await self._optimize_inputs(session, policy, definition, instructions)
         tool_count = len(inventory) or sum(1 for node in document.get("nodes") or [] if node.get("type") == "tool")
         yield {"type": "status", "code": "optimizing", "total": tool_count}
+        # The model can take minutes. Nothing is pending, so end the transaction and give the
+        # connection back to the pool while it thinks.
+        await session.commit()
         outcome = None
         async for kind, payload in iter_optimize_definition(document, inventory, request):
             if kind == "think":

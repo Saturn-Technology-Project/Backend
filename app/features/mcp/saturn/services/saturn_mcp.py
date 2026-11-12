@@ -175,6 +175,7 @@ MAX_AGENTS_PER_USER = 25
 
 
 MAX_PENDING_APPROVALS_PER_AGENT = 100
+LAST_SEEN_EVERY_SECONDS = 30
 
 class SaturnMcp:
     async def handle(
@@ -212,8 +213,15 @@ class SaturnMcp:
                 return rpc_error(request_id, -32000, refused, {"reason": "AGENT_LIMIT"})
             agent = await self._client_for_call(session, user, "", profile_id, client_name, client_id)
         if agent is not None and str((agent.settings or {}).get("origin") or "") == "saturn_mcp":
-            agent.last_seen_at = utcnow()
-            await session.flush()
+            # "Connected" in the console means seen in the last two minutes, so one write every
+            # half minute is enough. Writing on every call made each call update the agent row.
+            now = utcnow()
+            seen = agent.last_seen_at
+            if seen is not None and seen.tzinfo is None:
+                seen = seen.replace(tzinfo=now.tzinfo)
+            if seen is None or (now - seen).total_seconds() >= LAST_SEEN_EVERY_SECONDS:
+                agent.last_seen_at = now
+                await session.flush()
         owned = agent if agent is not None and self._owns(agent, user, client_id) else None
         if mcp_session_id and method == "initialize":
             # The controller issued this id for this initialize; nothing else creates a session record.
@@ -498,6 +506,21 @@ class SaturnMcp:
 
     async def _next_audit_no(self, session: AsyncSession, organization_id: str) -> int:
         event = AuditEvent.TOOL_REQUESTED.value
+        # The counter row exists after an organization's first call, so this is the usual path.
+        value = await session.scalar(
+            text(
+                """
+                UPDATE audit_counters SET value = value + 1
+                WHERE organization_id = :org AND event = :event
+                RETURNING value
+                """
+            ),
+            {"org": organization_id, "event": event},
+        )
+        if value is not None:
+            return int(value)
+        # First call: start from the rows that already exist. This count ran on every call
+        # before, against the largest table, even when the row was there.
         value = await session.scalar(
             text(
                 """
@@ -1008,12 +1031,18 @@ class SaturnMcp:
         endpoint = (server.endpoint if server is not None else "") or tool.mcp_endpoint
         secret = await mcp_oauth.authorization_for(session, server)
         upstream = tool.upstream_name or tool.name
+        # End the transaction before waiting on the upstream, which can take a minute. It holds a
+        # pooled connection and this organization's audit counter row, so a slow tool would stall
+        # the organization's other calls and a few of them would use up the pool for everyone.
+        # What is committed here is the record that the call was requested and a refreshed token.
+        await session.commit()
         try:
             return await call_remote_tool(endpoint, upstream, arguments, secret)
         except McpUnauthorized:
             secret = await mcp_oauth.refresh_after_reject(session, server)
             if not secret:
                 raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server returned HTTP 401")
+            await session.commit()
             try:
                 return await call_remote_tool(endpoint, upstream, arguments, secret)
             except McpUnauthorized as exc:
