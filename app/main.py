@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, HTTPException, Request
@@ -40,6 +41,10 @@ settings = get_settings()
 def _cors_origins() -> list[str]:
     raw = (settings.cors_origins or "").strip()
     if not raw:
+        # On Cloud Run the setting keeps https origins only. If that leaves nothing, trust
+        # nothing: falling back to localhost would trust any page a user runs on their own machine.
+        if os.environ.get("K_SERVICE", "").strip():
+            return []
         return ["http://localhost:3000", "http://localhost:3001"]
     if raw == "*":
         return ["*"]

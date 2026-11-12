@@ -13,12 +13,12 @@ from app.core.rate_limit import (
     accept_invite_allowed,
     code_check_allowed,
     login_allowed,
-    login_failed,
+    login_succeeded,
     migration_allowed,
     reauth_allowed,
     signup_allowed,
 )
-from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep
+from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep, require_same_origin
 from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME, clear_session_cookie, set_session_cookie
 from app.features.mcp.servers.controllers.mcp_servers import serialize_mcp_server
 from app.features.tooling.tool_sets.controllers.tool_sets import serialize_tool_set
@@ -324,9 +324,11 @@ async def login(body: LoginRequest, request: Request, response: Response, sessio
             legacy_v1=body.legacy_v1,
         )
     except HTTPException as exc:
-        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
-            login_failed(body.email)
+        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            # Not a wrong password, so it does not count against the account.
+            login_succeeded(body.email)
         raise
+    login_succeeded(body.email)
     pending = await _begin_mfa(session, user, body.locale)
     if pending is not None:
         return pending
@@ -608,6 +610,10 @@ async def logout(
     session: SessionDep,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
+    if creds is None and request.cookies.get(COOKIE_NAME):
+        # The cookie is sent on cross-site requests too. Without this, any page could sign a
+        # visitor out, for example right before showing them a look-alike sign-in page.
+        require_same_origin(request)
     token = _presented_token(request, creds)
     if token:
         await auth_service.logout(session, token)

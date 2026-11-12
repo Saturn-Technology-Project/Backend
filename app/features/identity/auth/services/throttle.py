@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.ids import new_id, utcnow
-from app.core.rate_limit import client_ip
+from app.core.rate_limit import client_ip, limit_address
 from app.features.identity.auth.models.throttle import AuthThrottle
 
 EMAIL_LIMIT = 1
@@ -41,7 +41,7 @@ async def _hit(session: AsyncSession, bucket: str, *, limit: int, window: timede
 
 
 async def consume(session: AsyncSession, request: Request, purpose: str, email: str) -> None:
-    ip = client_ip(request)
+    ip = limit_address(request)
     device = _device(request)
     await _hit(session, f"email:{purpose}:{email}", limit=EMAIL_LIMIT, window=EMAIL_WINDOW)
     await _hit(session, f"email-day:{purpose}:{email}", limit=EMAIL_DAILY_LIMIT, window=EMAIL_DAILY_WINDOW)
@@ -64,6 +64,15 @@ async def purge_expired(session: AsyncSession) -> None:
     await session.execute(delete(AuthThrottle).where(AuthThrottle.created_at < cutoff))
     for model in (EmailCode, LoginChallenge, WebAuthnChallenge, PasswordReset):
         await session.execute(delete(model).where(model.expires_at < cutoff))
+    # Sessions and agent tokens that can no longer be used. Every sign-in and every token
+    # refresh adds a row, and nothing removed them. A revoked refresh token is kept until it
+    # would have expired anyway, because presenting it again is how reuse is detected.
+    from app.features.identity.auth.models.session import AuthSession
+    from app.features.identity.oauth.models.oauth import OAuthAccess, OAuthGrant
+
+    await session.execute(delete(AuthSession).where(AuthSession.expires_at < cutoff))
+    await session.execute(delete(OAuthGrant).where(OAuthGrant.expires_at < cutoff))
+    await session.execute(delete(OAuthAccess).where(OAuthAccess.refresh_expires_at < cutoff))
     await session.flush()
 
 

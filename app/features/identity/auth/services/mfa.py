@@ -385,11 +385,21 @@ class MfaService:
         With methods left, the sign-in is not finished: the same challenge stays open for them
         and the emailed code cannot be presented again.
         """
+        from app.core.rate_limit import login_code_failed, login_code_open
+
         record = await self._live_challenge(session, token)
         if record.code_hash is None:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        if not login_code_open(record.user_id):
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Too many incorrect codes. Try again tomorrow or use another sign-in method.",
+                headers={"Retry-After": "3600"},
+            )
         used = await reserve_attempt(session, record, "attempts", MAX_ATTEMPTS)
         if used is None or not await in_thread(verify_password, code.strip(), record.code_hash):
+            if used is not None:
+                login_code_failed(record.user_id)
             if used is None or used >= MAX_ATTEMPTS:
                 record.used_at = utcnow()
             await session.flush()

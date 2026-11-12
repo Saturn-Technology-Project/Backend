@@ -128,7 +128,9 @@ def _page(title: str, body: str, status_code: int = 200, *, wide: bool = False, 
 <body><main>{body}</main>
 <script nonce="{nonce}">{_ONE_SUBMIT}</script></body>
 </html>"""
-    return HTMLResponse(html, status_code=status_code)
+    # Sign-in and consent pages carry per-request tokens and must not be kept by a cache or
+    # shown again from the browser's back button after sign-out.
+    return HTMLResponse(html, status_code=status_code, headers={"Cache-Control": "no-store"})
 
 
 def _hidden(fields: dict[str, str]) -> str:
@@ -545,6 +547,25 @@ def _code_page(fields: dict[str, str], challenge: str, method: str, *, passkey: 
     )
 
 
+def _cross_site(request: Request):
+    """Refuse a sign-in form posted from another site.
+
+    These forms only ever come from this origin's own sign-in page. Without this, a page on any
+    site could post an attacker's credentials from the victim's browser and leave the attacker's
+    consent session behind; the victim's next agent would then be connected to the attacker's
+    workspace. A browser states where a POST came from, and a cross-site one cannot hide it.
+    Clients that send neither header are not browsers and cannot be used this way.
+    """
+    from app.features.identity.auth.controllers.deps import _origin_of, _trusted_origins
+
+    site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    origin = (request.headers.get("origin") or "").strip()
+    foreign = site == "cross-site" or (bool(origin) and _origin_of(origin) not in _trusted_origins(request))
+    if not foreign:
+        return None
+    return _page("Saturn", "<h1>無法連線</h1><p>Start again from the agent to sign in.</p>", 403)
+
+
 async def _consent_redirect(session, request: Request, user, fields: dict[str, str]) -> RedirectResponse:
     # A short session that only the consent pages accept. It is not a console or API session.
     token, _user = await auth_service.issue_session(session, user, purpose=_SESSION_PURPOSE, ttl=OAUTH_SESSION_TTL)
@@ -560,8 +581,11 @@ def _posted_fields(form: dict[str, str]) -> dict[str, str]:
 
 @router.post("/oauth/login")
 async def oauth_login(request: Request, session: SessionDep):
-    from app.core.rate_limit import login_allowed, login_failed
+    from app.core.rate_limit import login_allowed, login_succeeded
 
+    refused = _cross_site(request)
+    if refused is not None:
+        return refused
     form = await _posted(request)
     if not login_allowed(request, form.get("email", "")):
         return _page("Connect Agents", "<h1>請稍後再試</h1><p>Too many sign-in attempts.</p>", 429)
@@ -575,8 +599,8 @@ async def oauth_login(request: Request, session: SessionDep):
             legacy_v1=form.get("legacy_v1") or None,
         )
     except HTTPException:
-        login_failed(form.get("email", ""))
         return _page("Connect Agents", "<h1>登入失敗</h1><p>Email or password is incorrect.</p>", 401)
+    login_succeeded(form.get("email", ""))
     try:
         # The same factors as the console sign-in. An emailed code is never added as a fallback.
         pending = await mfa_service.start_login(session, user)
@@ -602,6 +626,9 @@ async def oauth_login(request: Request, session: SessionDep):
 async def oauth_login_code(request: Request, session: SessionDep):
     from app.core.rate_limit import code_check_allowed
 
+    refused = _cross_site(request)
+    if refused is not None:
+        return refused
     form = await _posted(request)
     fields = _posted_fields(form)
     if not code_check_allowed(request):
