@@ -280,6 +280,8 @@ Agent 錢包與 x402 付款已經移除（遷移 `039_drop_wallets_x402`）。
 | `DB_POOL_TIMEOUT` | `10` | 請求等待空閒連線的秒數，超過即失敗 |
 | `DB_POOL_RECYCLE` | `1800` | 連線池中的連線使用多少秒後換新 |
 | `DB_COMMAND_TIMEOUT` | `60` | 單一 SQL 可以執行的秒數。`0` 表示不限制。 |
+| `LOG_LEVEL` | `INFO` | 寫到 stdout 的最低等級 |
+| `LOG_FORMAT` | Cloud Run 上為 `json`，其他為 `text` | 每行一個 JSON 物件，含 `severity`、`request_id` 與 Cloud Trace id，或純文字。每個請求記錄一行：方法、路徑、狀態碼、耗時；query string 一律不記錄。 |
 | `DEFAULT_ORG_ID` | `org_saturn` | Bootstrap 組織的 ID |
 | `DEFAULT_ACTOR_ID` | `user_operator` | Bootstrap 平台管理員的 ID |
 | `SEED_USER_EMAIL` / `SEED_USER_PASSWORD` | 空 | 第一次啟動時建立平台管理員；留空則略過。在 Cloud Run 上密碼必須至少 16 個字元。 |

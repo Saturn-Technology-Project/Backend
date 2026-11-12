@@ -11,6 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.config import get_settings
 from app.core.body_limit import BodyLimitMiddleware
 from app.core.http_security import HttpSecurityMiddleware
+from app.core.logs import RequestLogMiddleware, configure_logging
 from app.core.origin_auth import OriginAuthMiddleware
 from app.features.agent.agents.routes import router as agents_router
 from app.features.billing.payments.routes import router as payments_router
@@ -36,6 +37,7 @@ from app.db.seed import seed_if_empty
 from app.models import *  # noqa: F401,F403
 
 settings = get_settings()
+configure_logging()
 
 
 def _cors_origins() -> list[str]:
@@ -116,10 +118,15 @@ app.add_middleware(
 )
 app.add_middleware(HttpSecurityMiddleware)
 app.add_middleware(OriginAuthMiddleware)
+# Added last, so it is the outermost layer: every request gets an id and a log line,
+# including the ones the origin check refuses.
+app.add_middleware(RequestLogMiddleware)
 
 
 @app.exception_handler(Exception)
 async def unhandled_error(_request: Request, exc: Exception):
+    # RequestLogMiddleware answers and logs unexpected errors. This stays as the last resort for
+    # anything raised outside it.
     if isinstance(exc, (HTTPException, StarletteHTTPException)):
         raise exc
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})

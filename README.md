@@ -280,6 +280,8 @@ Settings come from the environment (or `.env`); see `.env.example`. App settings
 | `DB_POOL_TIMEOUT` | `10` | Seconds a request waits for a free connection before it fails |
 | `DB_POOL_RECYCLE` | `1800` | Seconds before a pooled connection is replaced |
 | `DB_COMMAND_TIMEOUT` | `60` | Seconds one statement may run. `0` turns the limit off. |
+| `LOG_LEVEL` | `INFO` | Lowest level written to stdout |
+| `LOG_FORMAT` | `json` on Cloud Run, `text` elsewhere | One JSON object per line with `severity`, `request_id` and the Cloud Trace id, or plain text. Each request is logged once with method, path, status and duration; the query string is never logged. |
 | `DEFAULT_ORG_ID` | `org_saturn` | ID of the bootstrap organization |
 | `DEFAULT_ACTOR_ID` | `user_operator` | ID of the bootstrap platform admin |
 | `SEED_USER_EMAIL` / `SEED_USER_PASSWORD` | empty | Create the platform admin on first boot; empty skips seeding. On Cloud Run the password must be 16 characters or more. |
