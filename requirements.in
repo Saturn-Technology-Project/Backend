@@ -11,10 +11,10 @@
 #
 # Install with `pip install --require-hashes -r requirements.txt`.
 # Test-only packages live in requirements-dev.in.
-fastapi==0.141.1
+fastapi==0.162.0
 # fastapi allows any starlette >=0.46. Pin it explicitly so the version that
 # carries the Host-header and FileResponse Range fixes cannot float.
-starlette==1.7.0
+starlette==1.10.0
 uvicorn[standard]==0.54.0
 sqlalchemy==2.1.6
 asyncpg==0.32.0

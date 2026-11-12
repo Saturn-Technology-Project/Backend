@@ -31,7 +31,8 @@ _requests = logging.getLogger("saturn.request")
 _errors = logging.getLogger("saturn.error")
 
 # Attributes every LogRecord has. Anything else was passed as extra= and belongs in the output.
-_STANDARD = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None))) | {"message", "asctime", "taskName"}
+# color_message is uvicorn's copy of the message with terminal colour codes.
+_STANDARD = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None))) | {"message", "asctime", "taskName", "color_message"}
 
 
 def current_request_id() -> str:

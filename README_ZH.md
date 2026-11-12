@@ -8,7 +8,7 @@ Agent 只呼叫一個 MCP 端點。Saturn 只讓每個 Agent 看到自己的工�
 
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE.md)
 ![Python](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688.svg?logo=fastapi&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.162-009688.svg?logo=fastapi&logoColor=white)
 [![Test](https://github.com/Saturn-Technology-Project/Backend/actions/workflows/test.yml/badge.svg)](https://github.com/Saturn-Technology-Project/Backend/actions/workflows/test.yml)
 
 [功能](#功能) · [架構](#架構) · [快速開始](#快速開始) · [政策](#政策與核准) · [安全](#安全) · [設定](#設定) · [部署](#部署) · [English](README.md)
