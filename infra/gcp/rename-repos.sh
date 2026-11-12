@@ -9,7 +9,9 @@
 #   2. adds a binding for the new repository name (safe to re-run),
 #   3. with REMOVE_OLD=true, removes the binding for the old name.
 #
-# Run as a project IAM admin. Run it once without REMOVE_OLD, deploy both repositories from main,
+# Run as a project IAM admin, or as an identity with roles/iam.serviceAccountAdmin on the three
+# deployer accounts (get, getIamPolicy, setIamPolicy). A deployer cannot run it: it must not be
+# able to change who may act as itself. Run it once without REMOVE_OLD, deploy both repositories from main,
 # check that they serve, then run it again with REMOVE_OLD=true. A new repository created under an
 # old name would otherwise inherit the old binding.
 # See infra/gcp/README.md, "Renamed repositories".
@@ -19,7 +21,8 @@ set -euo pipefail
 GITHUB_ORG="${GITHUB_ORG:-Saturn-Technology-Project}"
 POOL="${WIF_POOL:-github}"
 REMOVE_OLD="${REMOVE_OLD:-false}"
-PROJECT_NUMBER="$(gcloud projects describe "${GCP_PROJECT_ID}" --format='value(projectNumber)')"
+# Set PROJECT_NUMBER to skip the lookup, for an identity without resourcemanager.projects.get.
+PROJECT_NUMBER="${PROJECT_NUMBER:-$(gcloud projects describe "${GCP_PROJECT_ID}" --format='value(projectNumber)')}"
 
 # service account : old repository name : new repository name
 MOVES=(
