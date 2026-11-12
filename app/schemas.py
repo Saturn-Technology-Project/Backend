@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
 # Request size limits. String limits match the database columns they are stored in, so an
 # oversized value is a 422 here instead of a 500 from the database. Free text stored in Text
@@ -305,6 +305,14 @@ class ActionRead(ORMModel):
     policy_reason: str | None = None
     status: str
     result: dict[str, Any] | None = None
+
+    @field_validator("result", mode="before")
+    @classmethod
+    def _hide_sealed_result(cls, value: Any) -> Any:
+        # A gateway result is kept sealed for replays only. The console reads results from the audit log.
+        if isinstance(value, dict) and isinstance(value.get("sealed"), str):
+            return {"sealed": True}
+        return value
 
 
 class RunRead(ORMModel):

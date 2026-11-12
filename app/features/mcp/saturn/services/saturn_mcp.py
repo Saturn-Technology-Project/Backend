@@ -15,7 +15,7 @@ from app.core.enums import ActionStatus, ActorType, ApprovalStatus, AuditEvent, 
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.execution.activity.services.zero_access import PAYLOAD_ENCRYPTION, action_digest, is_zero_access
 from app.features.execution.activity.services.content_seal import policy_fields
-from app.features.execution.approvals.services.approval_arguments import digest_matches, server_sealed
+from app.features.execution.approvals.services.approval_arguments import digest_matches, open_result, seal_result, server_sealed
 from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 from app.features.mcp.servers.services.mcp_remote import call_remote_tool
 from app.features.policy.policies.services.policy_engine import policy_engine
@@ -679,8 +679,11 @@ class SaturnMcp:
 
                     return mismatch_error(request_id, policy_id=getattr(decision, "policy_id", None))
                 if approval.execution_state == "executed":
-                    cached = action.result if isinstance(action.result, dict) else {}
-                    return rpc_result(request_id, cached)
+                    cached = open_result(agent.organization_id, action.result)
+                    if cached is None and action.result is not None:
+                        # It ran, but what it returned can no longer be opened. Do not answer with an empty success.
+                        return rpc_error(request_id, -32005, "execution_recorded: this call already ran and its result is no longer available")
+                    return rpc_result(request_id, cached or {})
                 if approval.execution_state == "uncertain":
                     return rpc_error(request_id, -32005, "execution_uncertain")
                 if approval.execution_state == "failed":
@@ -950,7 +953,7 @@ class SaturnMcp:
             raw_response, result = _split_remote(raw_response)
             reply = rpc_result(request_id, result)
             action.status = ActionStatus.COMPLETED.value
-            action.result = result
+            action.result = seal_result(agent.organization_id, result)
             if run is not None:
                 run.status = RunStatus.COMPLETED.value
                 run.updated_at = utcnow()

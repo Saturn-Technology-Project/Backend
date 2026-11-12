@@ -96,3 +96,24 @@ def stored_arguments(organization_id: str | None, stored: Any) -> dict[str, Any]
     if not isinstance(stored, dict):
         return {}
     return stored
+
+
+def seal_result(organization_id: str, result: Any) -> dict[str, Any]:
+    """A tool result kept so an executed approval can answer a repeated call. Never stored readable."""
+    return {"sealed": seal_json(organization_id, result), "encryption": SERVER_SEALED}
+
+
+def open_result(organization_id: str | None, stored: Any) -> dict[str, Any] | None:
+    """The kept result, or None when there is none or it cannot be opened.
+
+    Rows written before results were sealed hold the result itself.
+    """
+    if is_server_sealed(stored):
+        if not organization_id:
+            return None
+        try:
+            opened = open_json(organization_id, stored["sealed"])
+        except Exception:
+            return None
+        return opened if isinstance(opened, dict) else None
+    return stored if isinstance(stored, dict) else None

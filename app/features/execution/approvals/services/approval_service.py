@@ -19,6 +19,7 @@ from app.features.execution.approvals.services.approval_arguments import (
     is_server_sealed,
     keyed_digest,
     open_sealed,
+    seal_result,
     stored_arguments,
 )
 from app.features.organization.org.models.group import Group, GroupMember
@@ -569,7 +570,7 @@ class ApprovalService:
             try:
                 raw_response, result = _split_remote(raw_response)
                 action.status = ActionStatus.COMPLETED.value
-                action.result = result
+                action.result = seal_result(run.organization_id, result)
                 run.status = RunStatus.COMPLETED.value
                 run.updated_at = utcnow()
                 await settle_claim(session, approval, "executed", commit=False)
