@@ -151,7 +151,7 @@ curl -s localhost:8000/auth/me -H "Authorization: Bearer $TOKEN"
 
 The API accepts the session token as `Authorization: Bearer` or as the `saturn_session` cookie the console uses. `/auth/login` is limited to 20 attempts per address and 10 per account in 10 minutes.
 
-**Admins need TOTP first.** A platform admin, or an organization admin (`team.write`), without an authenticator app gets `403 MFA setup is required` from every route except `/auth/me`, `/auth/logout`, `/auth/mfa…`, `/auth/totp…` and the health checks. Set it up with the session token:
+**Admins need a passkey or TOTP first.** A platform admin, or an organization admin (`team.write`), with neither a passkey nor an authenticator app gets `403 MFA setup is required` from every route except `/auth/me`, `/auth/logout`, `/auth/mfa…`, `/auth/totp…`, `/auth/passkeys…`, `/auth/reauth…` and the health checks. Either one is enough. A passkey is added from the console (`/mfa`), because it needs a browser. An authenticator app can be set up with the session token:
 
 ```bash
 curl -s -X POST localhost:8000/auth/totp/setup -H "Authorization: Bearer $TOKEN"
@@ -161,7 +161,9 @@ curl -s -X POST localhost:8000/auth/totp/confirm \
   -d '{"code":"123456"}'
 ```
 
-From then on `/auth/login` returns `mfa_required` with a `challenge` and `methods`. When `methods` contains `totp`, finish with `POST /auth/login/totp` and `{"challenge": …, "code": …}`. The other methods are `email` (a code sent through Resend, `POST /auth/login/email`) and `passkey` (`POST /auth/login/passkey/options`, then `POST /auth/login/passkey`).
+From then on `/auth/login` returns `mfa_required` with a `challenge` and `methods`. When `methods` contains `totp`, finish with `POST /auth/login/totp` and `{"challenge": …, "code": …}`. The other methods are `email` (a code sent through Resend, `POST /auth/login/email`) and `passkey` (`POST /auth/login/passkey/options`, then `POST /auth/login/passkey`). For an admin who holds a passkey, `POST /auth/login/email` does not finish the sign-in: it answers `mfa_required` again with the same `challenge` and the methods still required.
+
+The agent sign-in page (`/oauth/authorize`) accepts the same factors. A passkey is bound to the console's origin, so that page links to the console's `/connect-passkey`, which asks for the passkey and posts the answer to `POST /oauth/login/passkey`.
 
 Other account routes: self sign-up with an emailed code (`/auth/register/code`, `/auth/register`), `/auth/forgot-password` and `/auth/reset-password`, `/auth/passkeys`, `/auth/reauth`, and `PATCH /auth/password`.
 
@@ -322,7 +324,7 @@ This section says what the code does. [`infra/gcp/README.md`](infra/gcp/README.m
 
 - **Passwords** are stored as Argon2id hashes (time cost 2, 19 MiB memory, parallelism 1) and must be at least 8 characters. The OAuth sign-in page hashes the password in the browser with a vendored Argon2 build before sending it. An unknown email costs the same time as a wrong password. Accounts that still have a legacy (pre-argon2) PBKDF2 hash can sign in until `LEGACY_PASSWORD_UNTIL`, and must reset their password after it.
 - **Sessions** are random tokens stored only as SHA-256 hashes. They expire after `SESSION_TTL_DAYS` or 24 hours idle. The cookie is `HttpOnly`, `SameSite=Lax` and `Secure` everywhere except plain-HTTP local runs. A state change authenticated by cookie must come from a trusted origin.
-- **MFA.** TOTP (RFC 6238, 6 digits, each code accepted once, 5 attempts then a 15-minute lockout) with 8 backup codes stored as hashes; the TOTP secret is sealed in the vault. Emailed codes, offered only when TOTP is off. Passkeys through WebAuthn. Admins must have TOTP.
+- **MFA.** TOTP (RFC 6238, 6 digits, each code accepted once, 5 attempts then a 15-minute lockout) with 8 backup codes stored as hashes; the TOTP secret is sealed in the vault. Emailed codes, offered only when TOTP is off. Passkeys through WebAuthn. Admins must have a passkey or TOTP, and an emailed code alone never signs in an admin who has one.
 - **Step-up.** Changing the account email, turning off emailed codes and deleting a passkey need a sign-in within the last 10 minutes (`/auth/reauth`).
 
 ### Credential vault

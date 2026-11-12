@@ -151,7 +151,7 @@ curl -s localhost:8000/auth/me -H "Authorization: Bearer $TOKEN"
 
 API 接受以 `Authorization: Bearer` 或主控台使用的 `saturn_session` cookie 帶入工作階段 token。`/auth/login` 在 10 分鐘內，每個來源位址最多 20 次、每個帳號最多 10 次嘗試。
 
-**管理員必須先設定 TOTP。** 平台管理員或組織管理員（`team.write`）若沒有設定驗證器 App，除了 `/auth/me`、`/auth/logout`、`/auth/mfa…`、`/auth/totp…` 與健康檢查之外，每個路由都會回傳 `403 MFA setup is required`。用工作階段 token 設定：
+**管理員必須先設定 passkey 或 TOTP。** 平台管理員或組織管理員（`team.write`）若 passkey 與驗證器 App 都沒有設定，除了 `/auth/me`、`/auth/logout`、`/auth/mfa…`、`/auth/totp…`、`/auth/passkeys…`、`/auth/reauth…` 與健康檢查之外，每個路由都會回傳 `403 MFA setup is required`。兩者擇一即可。passkey 需要瀏覽器，請在主控台（`/mfa`）新增。驗證器 App 可以用工作階段 token 設定：
 
 ```bash
 curl -s -X POST localhost:8000/auth/totp/setup -H "Authorization: Bearer $TOKEN"
@@ -161,7 +161,9 @@ curl -s -X POST localhost:8000/auth/totp/confirm \
   -d '{"code":"123456"}'
 ```
 
-之後 `/auth/login` 會回傳 `mfa_required`，並附上 `challenge` 與 `methods`。`methods` 包含 `totp` 時，以 `POST /auth/login/totp` 與 `{"challenge": …, "code": …}` 完成登入。其他方式是 `email`（透過 Resend 寄出的驗證碼，`POST /auth/login/email`）與 `passkey`（先 `POST /auth/login/passkey/options`，再 `POST /auth/login/passkey`）。
+之後 `/auth/login` 會回傳 `mfa_required`，並附上 `challenge` 與 `methods`。`methods` 包含 `totp` 時，以 `POST /auth/login/totp` 與 `{"challenge": …, "code": …}` 完成登入。其他方式是 `email`（透過 Resend 寄出的驗證碼，`POST /auth/login/email`）與 `passkey`（先 `POST /auth/login/passkey/options`，再 `POST /auth/login/passkey`）。持有 passkey 的管理員以 `POST /auth/login/email` 送出驗證碼後不會完成登入：回應仍是 `mfa_required`，附上同一個 `challenge` 與還需要完成的方式。
+
+代理人登入頁（`/oauth/authorize`）接受相同的驗證方式。passkey 綁定在主控台的來源，因此該頁會連到主控台的 `/connect-passkey`，由它要求 passkey，再把結果送到 `POST /oauth/login/passkey`。
 
 其他帳號路由：以 Email 驗證碼自行註冊（`/auth/register/code`、`/auth/register`）、`/auth/forgot-password` 與 `/auth/reset-password`、`/auth/passkeys`、`/auth/reauth`，以及 `PATCH /auth/password`。
 
@@ -322,7 +324,7 @@ Agent 錢包與 x402 付款已經移除（遷移 `039_drop_wallets_x402`）。
 
 - **密碼**以 Argon2id 雜湊儲存（time cost 2、19 MiB 記憶體、parallelism 1），長度至少 8 個字元。OAuth 登入頁面會在瀏覽器中，以內附的 Argon2 程式先雜湊密碼再送出。不存在的 Email 與錯誤密碼花費相同的時間。仍使用舊版（argon2 之前）PBKDF2 雜湊的帳號，在 `LEGACY_PASSWORD_UNTIL` 之前可以登入，之後必須重設密碼。
 - **工作階段**是隨機 token，只以 SHA-256 雜湊儲存。超過 `SESSION_TTL_DAYS` 或閒置 24 小時就會失效。cookie 為 `HttpOnly`、`SameSite=Lax`，除了本機純 HTTP 執行之外一律 `Secure`。以 cookie 驗證的狀態變更必須來自受信任的來源。
-- **MFA。** TOTP（RFC 6238，6 位數，每組驗證碼只接受一次，失敗 5 次後鎖定 15 分鐘），附 8 組以雜湊儲存的備用碼；TOTP 秘密密封在金庫中。Email 驗證碼，只在沒有啟用 TOTP 時提供。透過 WebAuthn 的 passkey。管理員必須設定 TOTP。
+- **MFA。** TOTP（RFC 6238，6 位數，每組驗證碼只接受一次，失敗 5 次後鎖定 15 分鐘），附 8 組以雜湊儲存的備用碼；TOTP 秘密密封在金庫中。Email 驗證碼，只在沒有啟用 TOTP 時提供。透過 WebAuthn 的 passkey。管理員必須設定 passkey 或 TOTP，而且持有其中之一的管理員無法只靠 Email 驗證碼登入。
 - **重新驗證。** 變更帳號 Email、關閉 Email 驗證碼與刪除 passkey，都需要在最近 10 分鐘內登入過（`/auth/reauth`）。
 
 ### 憑證金庫

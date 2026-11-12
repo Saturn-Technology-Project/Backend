@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets
 from html import escape
 from pathlib import Path
@@ -19,8 +20,9 @@ from app.features.execution.activity.services.audit_service import audit_service
 from app.features.identity.auth.controllers.deps import SessionDep
 from app.features.identity.auth.controllers.session_cookie import cookie_secure
 from app.features.identity.auth.services.auth_service import OAUTH_SESSION_TTL, auth_service
-from app.features.identity.auth.services.mailer import is_english, normalize_locale, send_login_code
+from app.features.identity.auth.services.mailer import console_origin, is_english, normalize_locale, send_login_code
 from app.features.identity.auth.services.mfa import mfa_service
+from app.features.identity.auth.services.passkeys import passkey_service
 from app.features.identity.oauth.services.oauth_service import (
     ACCESS_TTL,
     REFRESH_TTL,
@@ -118,6 +120,8 @@ def _page(title: str, body: str, status_code: int = 200, *, wide: bool = False, 
     .row button {{ flex: 1; }}
     button {{ height: 36px; border: 0; border-radius: 8px; padding: 0 14px; background: #171716; color: #f7f7f5; cursor: pointer; }}
     button.secondary {{ background: #efefe9; color: #111110; }}
+    a.button {{ flex: 1; display: block; box-sizing: border-box; height: 36px; line-height: 36px; border-radius: 8px; padding: 0 14px; background: #171716; color: #f7f7f5; text-align: center; text-decoration: none; }}
+    a.button.secondary {{ background: #efefe9; color: #111110; }}
     code {{ display: block; margin-top: 8px; padding: 8px 10px; border: 1px solid #e6e6e1; border-radius: 8px; background: #fff; word-break: break-all; color: #111110; }}
   </style>
 </head>
@@ -482,7 +486,33 @@ async def authorize(request: Request, session: SessionDep):
     return page
 
 
-def _code_page(fields: dict[str, str], challenge: str, method: str) -> HTMLResponse:
+def _passkey_link(fields: dict[str, str], challenge: str, *, secondary: bool = False) -> str:
+    """A link to the console page that asks for the passkey.
+
+    A passkey is bound to the console's origin, so the browser will not offer it on this page.
+    The console checks it and posts the result to /oauth/login/passkey. The sign-in challenge
+    travels in the fragment, which is not sent to a server or written to its logs.
+    """
+    target = f"{console_origin()}/connect-passkey#{urlencode({**fields, 'challenge': challenge})}"
+    kind = "button secondary" if secondary else "button"
+    return f'<div class="row"><a class="{kind}" href="{escape(target)}">使用 Passkey Use a passkey</a></div>'
+
+
+def _passkey_page(fields: dict[str, str], challenge: str, *, after_email: bool = False) -> HTMLResponse:
+    lead = (
+        "Your email code is confirmed. This account also needs its passkey to sign in."
+        if after_email
+        else "This account signs in with a passkey."
+    )
+    return _page(
+        "Verify sign-in",
+        f"""<h1>驗證登入</h1>
+            <p>{escape(lead)} Continue in the Saturn console to use it, then you return here.</p>
+            {_passkey_link(fields, challenge)}""",
+    )
+
+
+def _code_page(fields: dict[str, str], challenge: str, method: str, *, passkey: bool = False) -> HTMLResponse:
     if method == "totp":
         lead = "Enter the 6-digit code from your authenticator app, or a backup code."
         label = "驗證器代碼 Authenticator code"
@@ -499,7 +529,8 @@ def _code_page(fields: dict[str, str], challenge: str, method: str) -> HTMLRespo
               <input type="hidden" name="method" value="{escape(method)}">
               <label>{escape(label)}<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
               <div class="row"><button type="submit">繼續 Continue</button></div>
-            </form>""",
+            </form>
+            {_passkey_link(fields, challenge, secondary=True) if passkey else ""}""",
     )
 
 
@@ -543,23 +574,17 @@ async def oauth_login(request: Request, session: SessionDep):
     if pending is None:
         return await _consent_redirect(session, request, user, fields)
     challenge, methods, code = pending
+    passkey = "passkey" in methods
     if "totp" in methods:
-        return _code_page(fields, challenge, "totp")
+        return _code_page(fields, challenge, "totp", passkey=passkey)
     if "email" in methods and code is not None:
         try:
             await send_login_code(user.email, code, user.locale)
         except HTTPException as exc:
             await mfa_service.discard_login(session, challenge)
             return _page("Connect Agents", f"<h1>無法寄信</h1><p>{escape(str(exc.detail))}</p>", exc.status_code)
-        return _code_page(fields, challenge, "email")
-    # Passkeys belong to the console's origin and cannot be used on this page.
-    await mfa_service.discard_login(session, challenge)
-    return _page(
-        "Connect Agents",
-        "<h1>無法在此頁登入</h1><p>This account signs in with a passkey, which this page cannot use. "
-        "Add an authenticator app in the Saturn console, then connect the agent again.</p>",
-        403,
-    )
+        return _code_page(fields, challenge, "email", passkey=passkey)
+    return _passkey_page(fields, challenge)
 
 
 @router.post("/oauth/login/code")
@@ -570,13 +595,49 @@ async def oauth_login_code(request: Request, session: SessionDep):
     fields = _posted_fields(form)
     if not code_check_allowed(request):
         return _page("Connect Agents", "<h1>請稍後再試</h1><p>Too many sign-in attempts.</p>", 429)
+    challenge = form.get("challenge", "")
+    further: list[str] = []
     try:
         if form.get("method", "") == "totp":
-            user = await mfa_service.finish_totp(session, form.get("challenge", ""), form.get("code", ""))
+            user = await mfa_service.finish_totp(session, challenge, form.get("code", ""))
         else:
-            user = await mfa_service.finish_email(session, form.get("challenge", ""), form.get("code", ""))
+            user, further = await mfa_service.finish_email(session, challenge, form.get("code", ""))
     except HTTPException:
         return _page("Connect Agents", "<h1>驗證失敗</h1><p>That code is incorrect or expired.</p>", 400)
+    if "totp" in further:
+        return _code_page(fields, challenge, "totp", passkey="passkey" in further)
+    if further:
+        return _passkey_page(fields, challenge, after_email=True)
+    return await _consent_redirect(session, request, user, fields)
+
+
+@router.post("/oauth/login/passkey")
+async def oauth_login_passkey(request: Request, session: SessionDep):
+    """The console posts the passkey answer here, as a page navigation, to finish the sign-in.
+
+    The answer is signed over the console's origin and a challenge this API issued for the
+    account, so a form on any other site cannot produce one.
+    """
+    from app.core.rate_limit import code_check_allowed
+
+    form = await _posted(request)
+    fields = _posted_fields(form)
+    if not code_check_allowed(request):
+        return _page("Connect Agents", "<h1>請稍後再試</h1><p>Too many sign-in attempts.</p>", 429)
+    try:
+        credential = json.loads(form.get("credential", ""))
+    except ValueError:
+        credential = None
+    try:
+        if not isinstance(credential, dict):
+            raise HTTPException(400, "Passkey could not be verified")
+        user = await passkey_service.authenticate(session, request, form.get("challenge", ""), credential)
+    except HTTPException:
+        return _page(
+            "Connect Agents",
+            "<h1>驗證失敗</h1><p>The passkey could not be verified. Start again from the agent.</p>",
+            400,
+        )
     return await _consent_redirect(session, request, user, fields)
 
 

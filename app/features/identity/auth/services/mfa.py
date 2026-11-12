@@ -13,7 +13,7 @@ from app.core.ids import new_id, utcnow
 from app.features.identity.auth.models.mfa import EmailCode, LoginChallenge, Passkey
 from app.features.identity.auth.services.auth_service import hash_password, hash_token, verify_password
 from app.features.identity.auth.services.throttle import consume
-from app.models import User
+from app.models import Employee, User
 
 CODE_TTL = timedelta(minutes=10)
 CHALLENGE_TTL = timedelta(minutes=10)
@@ -306,6 +306,32 @@ class MfaService:
             methods.append("passkey")
         return methods
 
+    async def is_admin(self, session: AsyncSession, user: User) -> bool:
+        """A platform admin or an organization admin. These accounts must hold a strong factor."""
+        if user.is_platform_admin:
+            return True
+        from app.features.organization.org.services.access import is_org_admin
+
+        employee = await session.scalar(select(Employee).where(Employee.user_id == user.id))
+        return employee is not None and is_org_admin(employee.permissions)
+
+    async def _after_email(self, session: AsyncSession, user: User) -> list[str]:
+        """What an emailed code still leaves to prove.
+
+        An admin who holds a passkey or an authenticator app must use it: the emailed code alone
+        does not sign them in. Everyone else is done.
+        """
+        if not await self.is_admin(session, user):
+            return []
+        return [method for method in await self.factors(session, user) if method != "email"]
+
+    async def has_strong_factor(self, session: AsyncSession, user: User) -> bool:
+        """An authenticator app or a passkey. Either one meets the admin MFA requirement."""
+        if user.totp_enabled and user.totp_secret:
+            return True
+        found = await session.scalar(select(Passkey.id).where(Passkey.user_id == user.id).limit(1))
+        return found is not None
+
     async def start_login(
         self,
         session: AsyncSession,
@@ -352,7 +378,12 @@ class MfaService:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Sign-in challenge is incorrect or expired")
         return user
 
-    async def finish_email(self, session: AsyncSession, token: str, code: str) -> User:
+    async def finish_email(self, session: AsyncSession, token: str, code: str) -> tuple[User, list[str]]:
+        """Check the emailed code. Returns the user and the methods still required, if any.
+
+        With methods left, the sign-in is not finished: the same challenge stays open for them
+        and the emailed code cannot be presented again.
+        """
         record = await self._live_challenge(session, token)
         if record.code_hash is None:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
@@ -367,9 +398,13 @@ class MfaService:
             record.used_at = utcnow()
             await session.flush()
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
-        record.used_at = utcnow()
+        further = await self._after_email(session, user)
+        if further:
+            record.code_hash = None
+        else:
+            record.used_at = utcnow()
         await session.flush()
-        return user
+        return user, further
 
     async def finish_totp(self, session: AsyncSession, token: str, code: str) -> User:
         from app.features.identity.auth.services.totp import verify_user_totp
