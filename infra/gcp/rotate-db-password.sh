@@ -13,7 +13,7 @@ INSTANCE="${CLOUD_SQL_INSTANCE:-saturn-pg}"
 DB_USER="${CLOUD_SQL_USER:-saturn}"
 REGION="${GCP_REGION:-asia-east1}"
 SECRET="${DATABASE_URL_SECRET:-DATABASE_URL}"
-REPO="${GITHUB_REPO:-Saturn-Technology-Project/Backend}"
+REPO="${GITHUB_REPO:-Saturn-Technology-Project/Saturn-MCP-Backend}"
 SERVICES="${SERVICES:-saturn-backend saturn-worker}"
 
 NEW_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"

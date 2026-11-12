@@ -71,7 +71,7 @@ REGION=asia-east1
 GAR_LOCATION=asia-east1
 DEPLOYER=github-deployer-backend@${PROJECT_ID}.iam.gserviceaccount.com
 PROVISIONER=github-provisioner@${PROJECT_ID}.iam.gserviceaccount.com
-REPO_PRINCIPAL="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/attribute.repository/${GITHUB_ORG}/saturn-backend"
+REPO_PRINCIPAL="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/attribute.repository/${GITHUB_ORG}/Saturn-MCP-Backend"
 
 gcloud iam service-accounts create github-deployer-backend --display-name "GitHub deployer (backend)"
 gcloud iam service-accounts create github-provisioner --display-name "GitHub provisioner (backend)"
@@ -317,7 +317,7 @@ Before the split, one `github-deployer` was shared by every repo. It holds proje
 the identities in [Identities](#identities):
 
 1. Create `github-deployer-backend` and `github-provisioner`, bind each to
-   `attribute.repository/ORG/saturn-backend` only, and grant the roles in the table.
+   `attribute.repository/ORG/Saturn-MCP-Backend` only, and grant the roles in the table.
 2. Run [Runtime service account](#runtime-service-account) with
    `DEPLOYER_SA=github-deployer-backend@...`, so the new deployer can act as `saturn-runtime`.
 3. Set the backend secrets `GCP_SERVICE_ACCOUNT_EMAIL` (new deployer) and
@@ -354,6 +354,24 @@ Also set the `production` environment rules and branch protection
 ([above](#github-environment-and-branch-protection)). For extra safety against a renamed or
 recreated org or repo, match on `assertion.repository_owner_id` and `assertion.repository_id`
 instead of the names.
+
+### Renamed repositories
+
+Deployers trust a repository by name (`attribute.repository/ORG/NAME`), and GitHub's OIDC token
+carries the repository's current name. The repositories were renamed from `Backend` and
+`Frontend` to `Saturn-MCP-Backend` and `Saturn-MCP-Frontend`, so a deploy from the new names gets
+no Google token until they are bound. [`rename-repos.sh`](rename-repos.sh) moves the bindings of
+`github-deployer-backend`, `github-provisioner` and `github-deployer-frontend`:
+
+```bash
+GCP_PROJECT_ID=... bash infra/gcp/rename-repos.sh                  # adds the new names
+# deploy both repositories from main and check that they serve, then:
+REMOVE_OLD=true GCP_PROJECT_ID=... bash infra/gcp/rename-repos.sh  # removes the old names
+```
+
+Remove the old names once the new ones work: a repository created later under an old name would
+otherwise be trusted by these deployers. GitHub redirects the old names for `git` and the API, so
+`gh -R` and the scripts keep working either way; their defaults now use the new names.
 
 ### Migrations in a Cloud Run Job
 
