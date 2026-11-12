@@ -16,7 +16,7 @@ fastapi==0.141.1
 # carries the Host-header and FileResponse Range fixes cannot float.
 starlette==1.7.0
 uvicorn[standard]==0.34.0
-sqlalchemy==2.0.38
+sqlalchemy==2.1.8
 asyncpg==0.30.0
 alembic==1.14.1
 pydantic==2.14.1
