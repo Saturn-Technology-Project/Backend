@@ -29,7 +29,7 @@ argon2-cffi==25.1.0
 webauthn==3.0.1
 google-cloud-secret-manager==2.31.0
 google-cloud-kms==3.18.0
-redis==5.2.1
+redis==8.1.0
 # Security fixes for shared TLS trust and parsers used by transitive dependencies.
 certifi==2026.10.23
 opentelemetry-api==1.45.1
