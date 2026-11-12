@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.features.execution.activity.models.payload_keys import MemberPayloadKey, OrgPayloadKey
+from app.features.organization.org.models.employee import Employee
 
 logger = logging.getLogger(__name__)
 
@@ -406,12 +407,20 @@ async def protect_mapping(
     if not organization_id or content in (None, {}, []):
         return None
     key = await active_org_key(session, organization_id)
+    # Only people who are still active members. A disabled member's key stays on file so their
+    # access can come back, but nothing new is wrapped to it while they are out.
     members = list(
         await session.scalars(
             select(MemberPayloadKey).where(
                 MemberPayloadKey.organization_id == organization_id,
                 MemberPayloadKey.status == "active",
                 MemberPayloadKey.approval == MEMBER_KEY_APPROVED,
+                MemberPayloadKey.user_id.in_(
+                    select(Employee.user_id).where(
+                        Employee.organization_id == organization_id,
+                        Employee.status == "active",
+                    )
+                ),
             )
         )
     )

@@ -22,6 +22,8 @@ from app.schemas import (
     SubscriptionRead,
 )
 from app.features.organization.org.services.access import allows, normalize_permissions, permission_catalog
+from app.core.enums import AuditEvent
+from app.features.execution.activity.services.change_log import record_change
 from app.features.mcp.servers.controllers.mcp_servers import serialize_mcp_server
 from app.features.organization.org.services.mapping_service import mapping_service
 from app.features.mcp.servers.services.mcp_gateway import mcp_gateway
@@ -176,6 +178,8 @@ async def update_member(
     user: CurrentUser,
     _access: TeamWrite,
 ):
+    current = await member_service.require_org_member(session, user.organization_id, employee_id)
+    before = {"role": current.role, "status": current.status, "permissions": dict(current.permissions or {})}
     employee = await member_service.update_member(
         session,
         user,
@@ -189,6 +193,21 @@ async def update_member(
         agent_edit_ids=body.agent_edit_ids,
         mcp_server_ids=body.mcp_server_ids,
     )
+    access_fields = {"role", "permissions", "status", "agent_ids", "agent_edit_ids", "mcp_server_ids"}
+    if body.model_fields_set & access_fields:
+        await record_change(
+            session,
+            user,
+            AuditEvent.MEMBER_UPDATED,
+            result=employee.role,
+            employee_id=employee.id,
+            user_id=employee.user_id,
+            role=employee.role,
+            status=employee.status,
+            permissions=dict(employee.permissions or {}),
+            previous=before,
+            changed=sorted(body.model_fields_set & access_fields),
+        )
     return serialize_member(employee)
 
 
@@ -215,6 +234,16 @@ async def invite_member(
         permissions=body.permissions.model_dump() if body.permissions is not None else None,
         agent_ids=body.agent_ids,
         mcp_server_ids=body.mcp_server_ids,
+    )
+    await record_change(
+        session,
+        user,
+        AuditEvent.MEMBER_INVITED,
+        result=invite.role,
+        invite_id=invite.id,
+        email=invite.email,
+        role=invite.role,
+        permissions=dict(invite.permissions or {}),
     )
     # token is None outside local development: the invitee gets the link by email.
     return serialize_invite(invite, token, created=True)
@@ -246,4 +275,5 @@ async def revoke_invite(
     _access: TeamWrite,
 ):
     await member_service.revoke_invite(session, user.organization_id, invite_id)
+    await record_change(session, user, AuditEvent.INVITE_REVOKED, invite_id=invite_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

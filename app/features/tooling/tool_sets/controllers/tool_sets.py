@@ -1,5 +1,7 @@
 from fastapi import APIRouter
 
+from app.core.enums import AuditEvent
+from app.features.execution.activity.services.change_log import record_change
 from app.features.identity.auth.controllers.deps import CurrentUser, PoliciesRead, PoliciesWrite, SaturnCloud, SessionDep
 from app.models import ToolSet
 from app.schemas import ToolSetItemRead, ToolSetRead, ToolSetUpdate, ToolSetWrite
@@ -53,7 +55,24 @@ async def create_tool_set(body: ToolSetWrite, session: SessionDep, user: Current
         description=body.description,
         items=[item.model_dump() for item in body.items],
     )
+    await _record(session, user, AuditEvent.TOOL_SET_CREATED, tool_set)
     return serialize_tool_set(tool_set)
+
+
+async def _record(session, user, event: AuditEvent, tool_set: ToolSet, **details) -> None:
+    await record_change(
+        session,
+        user,
+        event,
+        result=tool_set.name,
+        tool_set_id=tool_set.id,
+        # Which tools the set exposes, and which of them always ask for approval.
+        tools=sorted(item.tool.name for item in tool_set.items or [] if item.tool is not None),
+        approval_tools=sorted(
+            item.tool.name for item in tool_set.items or [] if item.tool is not None and item.approval
+        ),
+        **details,
+    )
 
 
 @router.patch("/{tool_set_id}", response_model=ToolSetRead)
@@ -73,9 +92,13 @@ async def update_tool_set(
         description=body.description,
         items=None if body.items is None else [item.model_dump() for item in body.items],
     )
+    await _record(session, user, AuditEvent.TOOL_SET_UPDATED, tool_set, changed=sorted(body.model_fields_set))
     return serialize_tool_set(tool_set)
 
 
 @router.delete("/{tool_set_id}", status_code=204)
 async def delete_tool_set(tool_set_id: str, session: SessionDep, user: CurrentUser, _access: PoliciesWrite, _cloud: SaturnCloud):
-    await tool_set_service.delete(session, user, tool_set_id)
+    removed = await tool_set_service.delete(session, user, tool_set_id)
+    await record_change(
+        session, user, AuditEvent.TOOL_SET_DELETED, result=removed["name"], tool_set_id=tool_set_id, agent_ids=removed["agent_ids"]
+    )

@@ -54,6 +54,9 @@ EVENT_MEMBER_REVOKED = "payload_member_revoked"
 EVENT_WRAPS_GRANTED = "payload_wraps_granted"
 EVENT_ENVELOPE_GRANTED = "payload_envelope_granted"
 EVENT_ROTATION_REWRAPPED = "payload_rotation_rewrapped"
+EVENT_ROTATION_STARTED = "payload_rotation_started"
+EVENT_ROTATION_ACTIVATED = "payload_rotation_activated"
+EVENT_OWNER_TRANSFERRED = "payload_owner_transferred"
 KEY_AUDIT_EVENTS = (
     EVENT_ORG_KEY_CREATED,
     EVENT_MEMBER_KEY_REGISTERED,
@@ -63,6 +66,9 @@ KEY_AUDIT_EVENTS = (
     EVENT_WRAPS_GRANTED,
     EVENT_ENVELOPE_GRANTED,
     EVENT_ROTATION_REWRAPPED,
+    EVENT_ROTATION_STARTED,
+    EVENT_ROTATION_ACTIVATED,
+    EVENT_OWNER_TRANSFERRED,
 )
 
 SCAN_DEFAULT_LIMIT = 200
@@ -928,6 +934,13 @@ async def start_rotation(session: AsyncSession, *, organization_id: str, actor_u
     )
     session.add(job)
     await session.flush()
+    await _audit(
+        session,
+        event=EVENT_ROTATION_STARTED,
+        actor_id=actor_user_id,
+        organization_id=organization_id,
+        payload={"rotation_id": job.id, "from_version": job.from_version, "to_version": job.to_version},
+    )
     return job
 
 
@@ -1064,7 +1077,51 @@ async def activate_rotation(session: AsyncSession, *, organization_id: str, acto
     job.status = "active"
     job.finished_at = utcnow()
     await session.flush()
+    await _audit(
+        session,
+        event=EVENT_ROTATION_ACTIVATED,
+        actor_id=actor_user_id,
+        organization_id=organization_id,
+        payload={"rotation_id": job.id, "from_version": job.from_version, "to_version": job.to_version},
+    )
     return pending
+
+
+async def transfer_owner(session: AsyncSession, *, organization_id: str, actor_user_id: str, user_id: str) -> OrgPayloadKey:
+    """Hand the organization key to another member who already holds an envelope for it.
+
+    The owner does this. When the owner is no longer an active member, an admin who holds an
+    envelope may take ownership themselves: otherwise nobody could ever rotate the key again.
+    """
+    actor = await _member(session, actor_user_id, organization_id)
+    key = await active_key(session, organization_id)
+    if key is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the payload owner can transfer ownership")
+    previous = key.owner_user_id
+    if previous != actor.user_id:
+        owner_active = await session.scalar(
+            select(Employee.id).where(
+                Employee.user_id == previous,
+                Employee.organization_id == organization_id,
+                Employee.status == "active",
+            )
+        )
+        if owner_active is not None or user_id != actor.user_id or not _is_key_admin(actor):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the payload owner can transfer ownership")
+    envelope = await own_envelope(session, organization_id=organization_id, user_id=user_id)
+    if envelope is None or envelope.org_key_version != key.version:
+        raise HTTPException(status.HTTP_409_CONFLICT, "The new owner has no envelope for the active key")
+    await _member(session, user_id, organization_id)
+    key.owner_user_id = user_id
+    await session.flush()
+    await _audit(
+        session,
+        event=EVENT_OWNER_TRANSFERRED,
+        actor_id=actor_user_id,
+        organization_id=organization_id,
+        payload={"from_user_id": previous, "to_user_id": user_id, "version": key.version},
+    )
+    return key
 
 
 async def key_audit(

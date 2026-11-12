@@ -285,7 +285,8 @@ class PolicyService:
                 "The organization default policy cannot be deleted. Change its rules or pause it instead.",
             )
         await session.execute(delete(agent_policies).where(agent_policies.c.policy_id == policy.id))
-        await session.execute(delete(PolicyRule).where(PolicyRule.policy_id == policy.id))
+        # The rules go with the policy through the relationship's cascade. Deleting them here as
+        # well made the cascade delete rows that were already gone.
         await session.delete(policy)
         await session.flush()
 

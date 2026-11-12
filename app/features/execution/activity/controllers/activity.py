@@ -8,7 +8,7 @@ from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 
 from app.core.ids import utcnow
-from app.features.identity.auth.controllers.deps import AgentsRead, CurrentUser, SessionDep
+from app.features.identity.auth.controllers.deps import AgentsRead, CurrentUser, SessionDep, TeamRead
 from app.features.organization.org.services.plans import audit_retention_days
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.execution.activity.services.zero_access import public_audit_payload
@@ -113,6 +113,50 @@ async def list_activity(
     rows, more = await _rows(session, user, run_id=run_id, q=q, tool=tool, agent=agent, limit=limit, offset=offset)
     _page_headers(response, offset, len(rows), more)
     return [_read(item) for item in rows]
+
+
+# Changes people made to what agents may do. Ids, names and before/after states; no tool content.
+CHANGE_EVENTS = (
+    AuditEvent.POLICY_CREATED.value,
+    AuditEvent.POLICY_UPDATED.value,
+    AuditEvent.POLICY_ACTIVATED.value,
+    AuditEvent.POLICY_PAUSED.value,
+    AuditEvent.POLICY_DELETED.value,
+    AuditEvent.TOOL_SET_CREATED.value,
+    AuditEvent.TOOL_SET_UPDATED.value,
+    AuditEvent.TOOL_SET_DELETED.value,
+    AuditEvent.TOOL_SET_ASSIGNED.value,
+    AuditEvent.MEMBER_INVITED.value,
+    AuditEvent.MEMBER_UPDATED.value,
+    AuditEvent.INVITE_REVOKED.value,
+    AuditEvent.AGENT_DELETED.value,
+    AuditEvent.MCP_SERVER_DELETED.value,
+    AuditEvent.GROUP_UPDATED.value,
+)
+
+
+@router.get("/changes", response_model=list[ActivityEventRead])
+async def list_changes(
+    session: SessionDep,
+    user: CurrentUser,
+    _access: TeamRead,
+    response: Response,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Who changed a policy, a tool set, a member's access, or removed an agent or server."""
+    org = await session.get(Organization, user.organization_id)
+    days = audit_retention_days(org.plan if org is not None else None)
+    stmt = select(AuditLog).where(
+        AuditLog.organization_id == user.organization_id,
+        AuditLog.event.in_(CHANGE_EVENTS),
+    )
+    if days is not None:
+        stmt = stmt.where(AuditLog.created_at >= utcnow() - timedelta(days=days))
+    stmt = stmt.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).offset(offset).limit(limit + 1)
+    rows = list((await session.execute(stmt)).scalars().all())
+    _page_headers(response, offset, len(rows[:limit]), len(rows) > limit)
+    return [_read(item) for item in rows[:limit]]
 
 
 @router.get("/export")

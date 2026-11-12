@@ -136,4 +136,11 @@ async def refresh_mcp_server(server_id: str, session: SessionDep, user: CurrentU
 
 @router.delete("/{server_id}", status_code=204)
 async def delete_mcp_server(server_id: str, session: SessionDep, user: CurrentUser, _access: TeamWrite, _cloud: SaturnCloud):
+    from app.core.enums import AuditEvent
+    from app.features.execution.activity.services.change_log import record_change
+    from app.models import McpServer
+
+    server = await session.get(McpServer, server_id)
+    name = server.name if server is not None and server.organization_id == user.organization_id else ""
     await removal_service.delete_mcp_server(session, user, server_id)
+    await record_change(session, user, AuditEvent.MCP_SERVER_DELETED, result=name, mcp_server_id=server_id)

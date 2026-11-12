@@ -227,6 +227,9 @@ async def test_rotation_rewraps_the_dek_and_leaves_ciphertext_unchanged(client, 
     assert refreshed["payload"]["envelope"]["org_key_version"] == 2
     opened = decrypt_payload(new_private, org, requested["id"], "audit", refreshed["payload"]["envelope"])
     assert opened["arguments"]["repo"] == "saturn"
+    names = [item["event"] for item in (await client.get("/org/payload-keys/audit")).json()["events"]]
+    assert names.count("payload_rotation_started") == 1
+    assert names.count("payload_rotation_activated") == 1
 
 
 async def test_member_cannot_read_another_members_envelope(client):
