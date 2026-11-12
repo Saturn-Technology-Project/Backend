@@ -146,22 +146,29 @@ class ApprovalPolicyService:
         expires_minutes: int | None = None,
         resubmit_minutes: int | None = None,
     ) -> ApprovalPolicy:
+        from app.features.execution.approvals.services.expiration import check_minutes
+
         policy = await self.get_policy(session, organization_id, policy_id)
+        # Everything is checked before anything is changed. A refused request is still
+        # committed, so a change made before a later check failed would be saved silently:
+        # no new version, no audit record, and a 400 that says nothing happened.
+        next_name = policy.name
         if name is not None:
-            cleaned = name.strip()
-            if not cleaned:
+            next_name = name.strip()
+            if not next_name:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name is required")
-            policy.name = cleaned
+        next_status = policy.status
         if status_name is not None:
-            cleaned_status = status_name.strip().lower()
-            if cleaned_status not in {"active", "disabled"}:
+            next_status = status_name.strip().lower()
+            if next_status not in {"active", "disabled"}:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Status must be active or disabled")
-            policy.status = cleaned_status
+        next_count = policy.required_count
         if required_count is not None:
-            count = int(required_count)
-            if count < 1 or count > 20:
+            next_count = int(required_count)
+            if next_count < 1 or next_count > 20:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Required approvals must be from 1 to 20")
-            policy.required_count = count
+        next_group = policy.group_id
+        grouped: list[tuple[str, int]] | None = None
         if requirements is not None:
             if requirements and (group_id or clear_group):
                 raise HTTPException(
@@ -169,6 +176,33 @@ class ApprovalPolicyService:
                     "Choose one group or a list of groups",
                 )
             grouped = await self._clean_requirements(session, organization_id, requirements)
+            if grouped:
+                next_group = None
+                next_count = sum(item[1] for item in grouped)
+        elif clear_group:
+            next_group = None
+        elif group_id is not None:
+            await self._group(session, organization_id, group_id)
+            next_group = group_id
+        next_expires = check_minutes(expires_minutes) if expires_minutes is not None else policy.expires_minutes
+        next_resubmit = check_minutes(resubmit_minutes) if resubmit_minutes is not None else policy.resubmit_minutes
+        await self._require_capability(
+            session,
+            organization_id,
+            count=next_count,
+            group_id=next_group,
+            grouped=bool(grouped) if grouped is not None else bool(policy.requirements),
+        )
+
+        policy.name = next_name
+        policy.status = next_status
+        policy.required_count = next_count
+        policy.group_id = next_group
+        policy.expires_minutes = next_expires
+        policy.resubmit_minutes = next_resubmit
+        if allow_requester is not None:
+            policy.allow_requester = allow_requester
+        if grouped is not None:
             policy.requirements.clear()
             await session.flush()
             for index, (requirement_group_id, requirement_count) in enumerate(grouped):
@@ -181,29 +215,6 @@ class ApprovalPolicyService:
                         position=index,
                     )
                 )
-            if grouped:
-                policy.group_id = None
-                policy.required_count = sum(item[1] for item in grouped)
-        elif clear_group:
-            policy.group_id = None
-        elif group_id is not None:
-            await self._group(session, organization_id, group_id)
-            policy.group_id = group_id
-        if allow_requester is not None:
-            policy.allow_requester = allow_requester
-        from app.features.execution.approvals.services.expiration import check_minutes
-
-        if expires_minutes is not None:
-            policy.expires_minutes = check_minutes(expires_minutes)
-        if resubmit_minutes is not None:
-            policy.resubmit_minutes = check_minutes(resubmit_minutes)
-        await self._require_capability(
-            session,
-            organization_id,
-            count=policy.required_count,
-            group_id=policy.group_id,
-            grouped=bool(policy.requirements),
-        )
         policy.version = (policy.version or 1) + 1
         policy.updated_at = utcnow()
         await session.flush()

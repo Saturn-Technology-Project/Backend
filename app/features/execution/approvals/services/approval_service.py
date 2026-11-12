@@ -26,7 +26,7 @@ from app.features.organization.org.models.group import Group, GroupMember
 from app.features.organization.org.services.access import is_org_admin
 from app.features.execution.activity.services.zero_access import action_digest, is_zero_access
 from app.features.mcp.servers.services.mcp_remote import McpTimeout
-from app.models import Action, Agent, Approval, Employee, Run, Tool
+from app.models import Action, Agent, Approval, Employee, Run, Tool, User
 from app.core.enums import (
     ActionStatus,
     ActorType,
@@ -403,6 +403,9 @@ class ApprovalService:
         employee: Employee,
         execution_arguments: dict | None = None,
     ) -> tuple[Run, Action, str, str | None]:
+        # One vote at a time per approval. Two final votes counted side by side would each see
+        # only themselves, both report "pending", and neither member could vote again.
+        await session.execute(select(Approval.id).where(Approval.id == approval.id).with_for_update())
         duplicate = await session.scalar(
             select(ApprovalDecision).where(
                 ApprovalDecision.approval_id == approval.id,
@@ -521,6 +524,9 @@ class ApprovalService:
         agent: Agent,
         execution_arguments: dict | None,
     ) -> _Prepared:
+        # The last vote runs the call on the requester's behalf, with nobody signed in as them.
+        if approval.requester_user_id and not await self._still_active(session, approval.requester_user_id):
+            await self._invalidate(session, approval, action, "requester is no longer active")
         tool = await run_service.get_tool(session, agent.organization_id, action.tool)
         gateway = bool(getattr(tool, "mcp_server_id", None) or getattr(tool, "mcp_endpoint", None))
         if not gateway and settings.in_process_runtime:
@@ -718,6 +724,13 @@ class ApprovalService:
         await session.flush()
         raise HTTPException(status.HTTP_409_CONFLICT, "Approval no longer matches this operation")
 
+    async def _still_active(self, session: AsyncSession, user_id: str) -> bool:
+        user = await session.get(User, user_id)
+        if user is None or user.status != "active":
+            return False
+        employee = await session.scalar(select(Employee).where(Employee.user_id == user_id))
+        return employee is not None and employee.status == "active"
+
     async def _ensure_open(self, session: AsyncSession, approval: Approval) -> None:
         if await expire_if_due(session, approval, utcnow()):
             raise HTTPException(status.HTTP_409_CONFLICT, "Approval expired")
@@ -754,9 +767,12 @@ class ApprovalService:
         if not specs:
             return
         member = await session.scalar(
-            select(GroupMember).where(
+            select(GroupMember)
+            .join(Group, Group.id == GroupMember.group_id)
+            .where(
                 GroupMember.group_id.in_([item["group_id"] for item in specs]),
                 GroupMember.employee_id == employee.id,
+                Group.status == "active",
             )
         )
         if member is None:
@@ -804,10 +820,14 @@ class ApprovalService:
         specs = _requirement_specs(approval)
         if not specs:
             return [(len(votes), int(approval.required_count or 1))]
+        # A disabled group fills no seats, so its requirement cannot be met until it is active again.
         rows = await session.execute(
-            select(GroupMember).where(
+            select(GroupMember)
+            .join(Group, Group.id == GroupMember.group_id)
+            .where(
                 GroupMember.group_id.in_([item["group_id"] for item in specs]),
                 GroupMember.employee_id.in_([item.employee_id for item in votes] or [""]),
+                Group.status == "active",
             )
         )
         memberships: dict[str, set[str]] = {}

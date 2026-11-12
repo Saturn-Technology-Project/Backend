@@ -871,6 +871,7 @@ class SaturnMcp:
     ) -> dict[str, Any]:
         from app.features.execution.approvals.services.approval_service import (
             _uncertain,
+            approval_service,
             record_unrecorded_outcome,
             settle_claim,
         )
@@ -915,6 +916,20 @@ class SaturnMcp:
             from app.features.mcp.saturn.services.agent_messages import deny_error
 
             return deny_error(request_id, reason=fresh.reason, policy_id=fresh.policy_id)
+        try:
+            # The same check a vote makes: the policy and approval policy people approved under
+            # must still be the ones in force, so a rule tightened since then is not skipped.
+            await approval_service._revalidate_versions(session, approval, action, fresh)
+        except HTTPException:
+            return _approval_notice(
+                request_id,
+                -32002,
+                f'approval_invalidated. saturnRunId "{approval.run_id}" is closed because the policy changed. '
+                "Leave saturnRunId out to start a separate request.",
+                approval,
+                tool.name,
+                status=ApprovalStatus.INVALIDATED.value,
+            )
         claimed = await session.execute(
             update(Approval)
             .where(
