@@ -10,7 +10,7 @@ from app.core.public_origin import public_origin
 from app.features.identity.auth.controllers.deps import SessionDep
 from app.models import Organization, User
 from app.features.identity.oauth.services.oauth_service import oauth_service
-from app.features.organization.org.services.plans import allows_saturn_cloud, profile_identity
+from app.features.organization.org.services.plans import allows_saturn_cloud, profile_identity, suspended
 from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 from app.features.mcp.saturn.services.saturn_mcp import rpc_error, saturn_mcp
 
@@ -50,6 +50,8 @@ async def _caller(request: Request, session: SessionDep) -> tuple[User, str, str
     org = user.organization or await session.get(Organization, user.organization_id)
     if org is None or not allows_saturn_cloud(org.plan):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Saturn MCP is unavailable")
+    if suspended(org):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Organization is suspended")
     return user, client_name, client_id
 
 

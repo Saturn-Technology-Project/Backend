@@ -13,7 +13,7 @@ from app.db.database import get_session
 from app.models import Employee, Organization, User
 from app.features.organization.org.services.access import allows
 from app.features.organization.org.services.mapping_service import mapping_service
-from app.features.organization.org.services.plans import PRO_REQUIRED, allows_pro, allows_saturn_cloud
+from app.features.organization.org.services.plans import PRO_REQUIRED, allows_pro, allows_saturn_cloud, suspended
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 _bearer = HTTPBearer(auto_error=False)
@@ -80,9 +80,21 @@ async def get_current_user(
             "Invalid or expired session",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not _mfa_exempt(request_path(request)) and await _admin_needs_mfa(session, user):
+    path = request_path(request)
+    if (
+        suspended(user.organization)
+        and not user.is_platform_admin
+        and path not in _SUSPENDED_ALLOWED
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Organization is suspended")
+    if not _mfa_exempt(path) and await _admin_needs_mfa(session, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "MFA setup is required")
     return user
+
+
+# A member of a suspended organization can still see who they are and sign out. A platform
+# admin is never locked out, because they are the ones who lift the suspension.
+_SUSPENDED_ALLOWED = frozenset({"/auth/me", "/auth/logout"})
 
 
 # Routes an admin still needs before a factor exists: setting one up, and the fresh sign-in that takes.

@@ -73,3 +73,8 @@ def profile_identity(
     if resolved == "personal":
         return user_id
     return f"{organization_id}:{user_id}"
+
+
+def suspended(org) -> bool:
+    """A platform admin turned this organization off. Its members and agents are refused until it is active again."""
+    return str(getattr(org, "status", "") or "").strip().lower() == "suspended"

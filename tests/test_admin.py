@@ -225,3 +225,52 @@ async def test_onboard_rejects_duplicate_email(client):
         },
     )
     assert response.status_code == 409
+
+
+async def test_a_suspended_organization_is_refused_everywhere(client):
+    from tests.oauth_access import oauth_access
+    from tests.totp_access import finish_totp
+
+    created = await client.post(
+        "/admin/orgs",
+        json={
+            "name": "Halted",
+            "admin_email": "owner@halted.test",
+            "admin_name": "Owner",
+            "admin_password": "password1",
+            "plan": "enterprise",
+        },
+    )
+    assert created.status_code == 201, created.text
+    org_id = created.json()["id"]
+    login = await client.post("/auth/login", json={"email": "owner@halted.test", "password": "password1"})
+    assert login.status_code == 200, login.text
+    member = {"Authorization": f"Bearer {login.json()['token']}"}
+    # An organization admin needs a second factor before the console answers.
+    await finish_totp(client, member)
+    assert (await client.get("/agents", headers=member)).status_code == 200
+    access = await oauth_access(client, "Halted Agent", email="owner@halted.test", password="password1")
+    agent = {"Authorization": f"Bearer {access}"}
+    opened = await client.post("/mcp", headers=agent, json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    assert opened.status_code == 200, opened.text
+
+    suspended = await client.patch(f"/admin/orgs/{org_id}", json={"status": "suspended"})
+    assert suspended.status_code == 200, suspended.text
+
+    for path in ("/agents", "/org", "/policies", "/approvals"):
+        refused = await client.get(path, headers=member)
+        assert refused.status_code == 403, (path, refused.text)
+        assert refused.json()["detail"] == "Organization is suspended"
+    # The member can still see who they are and sign out.
+    assert (await client.get("/auth/me", headers=member)).status_code == 200
+    call = await client.post("/mcp", headers=agent, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    assert call.status_code == 403, call.text
+    # The platform admin who suspended it is not locked out of anything.
+    assert (await client.get("/admin/orgs")).status_code == 200
+    assert (await client.get("/agents")).status_code == 200
+
+    restored = await client.patch(f"/admin/orgs/{org_id}", json={"status": "active"})
+    assert restored.status_code == 200, restored.text
+    assert (await client.get("/agents", headers=member)).status_code == 200
+    call = await client.post("/mcp", headers=agent, json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
+    assert call.status_code == 200, call.text

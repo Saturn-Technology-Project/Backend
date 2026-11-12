@@ -31,7 +31,7 @@ from app.features.identity.oauth.services.oauth_service import (
     oauth_service,
     redirect_allowed,
 )
-from app.features.organization.org.services.plans import profile_identity
+from app.features.organization.org.services.plans import profile_identity, suspended
 from app.models import Agent, Policy, ToolSet, ToolSetItem
 
 router = APIRouter(tags=["oauth"])
@@ -394,6 +394,8 @@ async def authorize(request: Request, session: SessionDep):
         return _page("Saturn", "<h1>無法連線</h1><p>This sign-in request is invalid. Start again from the agent.</p>", 400)
     token, _csrf = _cookie_parts(request)
     user = await auth_service.user_from_token(session, token, purpose=_SESSION_PURPOSE) if token else None
+    if user is not None and suspended(user.organization):
+        return _page("Saturn", "<h1>無法連線</h1><p>This organization is suspended. Agents cannot connect to it.</p>", 403)
     if user is None or user.organization is None:
         return _page(
             "Connect Agents",
