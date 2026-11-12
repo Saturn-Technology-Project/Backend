@@ -149,7 +149,7 @@ async def test_an_email_change_with_a_wrong_password_does_not_change_the_email(c
 
 
 async def test_an_email_change_without_a_password_still_works_as_before(client, monkeypatch):
-    old, new = "member@saturn.ai", "moved@saturn.ai"
+    new = "moved@saturn.ai"
     headers, _key_id = await _account(client, monkeypatch)
     current, nxt = await _start_email_change(client, monkeypatch, headers, new)
     done = await client.post("/auth/email/confirm", headers=headers, json={"current_code": current, "next_code": nxt})
