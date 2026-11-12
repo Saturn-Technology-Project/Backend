@@ -185,7 +185,8 @@ async def serialize_user(session, user: User) -> UserRead:
             user.organization.plan,
         ),
         locale=normalize_locale(user.locale),
-        mfa_setup_required=(not user.totp_enabled) and (user.is_platform_admin or is_org_admin(permissions)),
+        mfa_setup_required=(user.is_platform_admin or is_org_admin(permissions))
+        and not await mfa_service.has_strong_factor(session, user),
     )
 
 
@@ -334,7 +335,10 @@ async def login(body: LoginRequest, request: Request, response: Response, sessio
 @router.post("/login/email", response_model=LoginResponse)
 async def login_email(body: LoginEmailRequest, request: Request, response: Response, session: SessionDep):
     _require_code_check(request)
-    user = await mfa_service.finish_email(session, body.challenge, body.code)
+    user, further = await mfa_service.finish_email(session, body.challenge, body.code)
+    if further:
+        # An admin with a passkey or an authenticator app still has to use it.
+        return LoginResponse(mfa_required=True, challenge=body.challenge, methods=further)
     return await _issue_login(session, request, response, user)
 
 

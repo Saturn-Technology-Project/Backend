@@ -107,3 +107,52 @@ async def test_totp_confirm_locks_out_after_five_failed_attempts(client):
     # Even a valid code is rejected once locked out until setup is restarted.
     late = await client.post("/auth/totp/confirm", json={"code": current_code(secret)})
     assert late.status_code in {400, 429}
+
+
+async def test_admin_with_a_passkey_does_not_need_totp(client):
+    from app.core.ids import new_id
+    from app.models import Passkey, User
+
+    actor = get_settings().default_actor_id
+    session, generator = await _session()
+    try:
+        user = await session.get(User, actor)
+        user.totp_enabled = False
+        user.totp_secret = ""
+        await session.commit()
+    finally:
+        await generator.aclose()
+
+    blocked = await client.get("/admin/orgs")
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"] == "MFA setup is required"
+    # The routes that add a passkey stay reachable, or an admin could never enrol one.
+    options = await client.post("/auth/passkeys/options", headers={"Origin": "http://localhost:3000"})
+    assert options.status_code == 200, options.text
+
+    session, generator = await _session()
+    try:
+        session.add(
+            Passkey(
+                id=new_id("pkey"),
+                user_id=actor,
+                credential_id="admin-passkey-credential",
+                public_key="public-key",
+                sign_count=0,
+            )
+        )
+        await session.commit()
+    finally:
+        await generator.aclose()
+
+    allowed = await client.get("/admin/orgs")
+    assert allowed.status_code == 200, allowed.text
+    me = await client.get("/auth/me")
+    assert me.json()["mfa_setup_required"] is False
+
+    # Removing the only factor puts the requirement back.
+    listed = await client.get("/auth/mfa")
+    removed = await client.delete(f"/auth/passkeys/{listed.json()['passkeys'][0]['id']}")
+    assert removed.status_code == 204, removed.text
+    again = await client.get("/admin/orgs")
+    assert again.status_code == 403

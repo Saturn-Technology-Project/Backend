@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import select
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME
@@ -81,26 +80,30 @@ async def get_current_user(
             "Invalid or expired session",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not _totp_exempt(request_path(request)) and await _admin_needs_totp(session, user):
+    if not _mfa_exempt(request_path(request)) and await _admin_needs_mfa(session, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "MFA setup is required")
     return user
 
 
-def _totp_exempt(path: str) -> bool:
+# Routes an admin still needs before a factor exists: setting one up, and the fresh sign-in that takes.
+_MFA_SETUP_PREFIXES = ("/auth/logout", "/auth/mfa", "/auth/totp", "/auth/passkeys", "/auth/reauth")
+
+
+def _mfa_exempt(path: str) -> bool:
     if path in {"/", "/health", "/healthz", "/auth/me"}:
         return True
-    return path.startswith("/auth/logout") or path.startswith("/auth/mfa") or path.startswith("/auth/totp")
+    return path.startswith(_MFA_SETUP_PREFIXES)
 
 
-async def _admin_needs_totp(session: AsyncSession, user: User) -> bool:
+async def _admin_needs_mfa(session: AsyncSession, user: User) -> bool:
+    """An admin needs an authenticator app or a passkey. Either one is enough."""
     if user.totp_enabled:
         return False
-    if user.is_platform_admin:
-        return True
-    from app.features.organization.org.services.access import is_org_admin
+    from app.features.identity.auth.services.mfa import mfa_service
 
-    employee = await session.scalar(select(Employee).where(Employee.user_id == user.id))
-    return employee is not None and is_org_admin(employee.permissions)
+    if not await mfa_service.is_admin(session, user):
+        return False
+    return not await mfa_service.has_strong_factor(session, user)
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
