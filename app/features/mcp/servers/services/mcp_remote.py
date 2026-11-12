@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -19,6 +20,18 @@ class McpTimeout(HTTPException):
 
     def __init__(self, detail: str = "MCP server did not answer in time") -> None:
         super().__init__(status.HTTP_504_GATEWAY_TIMEOUT, detail)
+
+
+class McpOutcomeUnknown(McpTimeout):
+    """tools/call reached the server and something came back that cannot be used as the result.
+
+    The server may well have run the call, so this is treated like a timeout: recorded as
+    uncertain and never retried automatically.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status.HTTP_502_BAD_GATEWAY
 
 
 def redact(text: str, *secrets: str) -> str:
@@ -70,10 +83,19 @@ def _headers(authorization: str, session_id: str = "") -> dict[str, str]:
     return headers
 
 
-def _payload(response: httpx.Response) -> dict[str, Any]:
+def _unreadable(detail: str, call: bool) -> HTTPException:
+    # After tools/call the server has had the request, whatever it then sent back.
+    return McpOutcomeUnknown(detail) if call else HTTPException(status.HTTP_502_BAD_GATEWAY, detail)
+
+
+def _payload(response: httpx.Response, *, call: bool = False) -> dict[str, Any]:
     content_type = response.headers.get("content-type", "")
     if "text/event-stream" in content_type:
-        for line in response.text.splitlines():
+        try:
+            text = response.text
+        except ValueError:
+            text = ""
+        for line in text.splitlines():
             if not line.startswith("data:"):
                 continue
             raw = line[5:].strip()
@@ -81,17 +103,18 @@ def _payload(response: httpx.Response) -> dict[str, Any]:
                 continue
             try:
                 parsed = json.loads(raw)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 continue
             if isinstance(parsed, dict) and ("result" in parsed or "error" in parsed):
                 return parsed
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server returned an empty stream")
+        raise _unreadable("MCP server returned an empty stream", call)
     try:
         body = response.json()
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server did not return JSON") from exc
+    except (ValueError, RecursionError) as exc:
+        # ValueError covers bad JSON and bytes that are not text; very deep nesting raises RecursionError.
+        raise _unreadable("MCP server did not return JSON", call) from exc
     if not isinstance(body, dict):
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server did not return JSON")
+        raise _unreadable("MCP server did not return JSON", call)
     return body
 
 
@@ -146,6 +169,9 @@ def _raise_for_status(response: httpx.Response, endpoint: str, *, call: bool = F
     _unauthorized(response, endpoint)
     if call and response.status_code in {504, 524}:
         raise McpTimeout(f"MCP server returned HTTP {response.status_code}")
+    if call and response.status_code >= 500:
+        # A server error after it received the call does not say whether the call ran.
+        raise McpOutcomeUnknown(f"MCP server returned HTTP {response.status_code}")
     if response.status_code >= 400:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"MCP server returned HTTP {response.status_code}")
 
@@ -177,7 +203,7 @@ async def _rpc(
             async for chunk in response.aiter_bytes():
                 body.extend(chunk)
                 if len(body) > MAX_RESPONSE_BYTES:
-                    raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server response is too large")
+                    raise _unreadable("MCP server response is too large", method == "tools/call")
         finally:
             await response.aclose()
     except HTTPException:
@@ -196,10 +222,16 @@ async def _rpc(
     return httpx.Response(response.status_code, headers=kept, content=bytes(body), request=request)
 
 
-async def list_remote_tools(endpoint: str, authorization: str = "") -> list[dict[str, Any]]:
+def _target(endpoint: str, authorization: str) -> tuple[str, str, str, str]:
+    """Check the endpoint and pin it to an address. Both steps resolve DNS, which blocks."""
     url = require_mcp_endpoint(endpoint)
     request_url, header_auth = sec_api_request(url, authorization)
     request_url, host = pin_mcp_url(request_url)
+    return url, request_url, header_auth, host
+
+
+async def list_remote_tools(endpoint: str, authorization: str = "") -> list[dict[str, Any]]:
+    url, request_url, header_auth, host = await asyncio.to_thread(_target, endpoint, authorization)
     headers = {**_headers(header_auth), "Host": host}
     async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
         init = await _rpc(
@@ -233,9 +265,7 @@ async def call_remote_tool(
     arguments: dict[str, Any],
     authorization: str = "",
 ) -> dict[str, Any]:
-    url = require_mcp_endpoint(endpoint)
-    request_url, header_auth = sec_api_request(url, authorization)
-    request_url, host = pin_mcp_url(request_url)
+    url, request_url, header_auth, host = await asyncio.to_thread(_target, endpoint, authorization)
     headers = {**_headers(header_auth), "Host": host}
     async with httpx.AsyncClient(timeout=60, follow_redirects=False, trust_env=False) as client:
         init = await _rpc(
@@ -265,7 +295,7 @@ async def call_remote_tool(
             host,
         )
     _raise_for_status(called, url, call=True)
-    body = _payload(called)
+    body = _payload(called, call=True)
     if body.get("error"):
         message = body["error"].get("message") if isinstance(body["error"], dict) else "MCP tools/call failed"
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, redact(str(message or "MCP tools/call failed"), authorization)[:500])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from app.shared.threads import in_thread
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -287,16 +288,16 @@ async def login_migration(body: LoginRequest, request: Request, session: Session
     if user is None or user.status != "active":
         from app.features.identity.auth.services.auth_service import _DUMMY_HASH
 
-        verify_password(body.password, _DUMMY_HASH)
+        await in_thread(verify_password, body.password, _DUMMY_HASH)
         return {}
     stored = user.password_hash
-    if verify_password(body.password, stored):
+    if await in_thread(verify_password, body.password, stored):
         return {}
-    if body.legacy_v1 and verify_password(body.legacy_v1, stored):
+    if body.legacy_v1 and await in_thread(verify_password, body.legacy_v1, stored):
         return {}
     from app.features.identity.auth.services.auth_service import legacy_password_allowed
 
-    if body.legacy_password and _pbkdf2_ok(body.legacy_password, stored):
+    if body.legacy_password and await in_thread(_pbkdf2_ok, body.legacy_password, stored):
         if not legacy_password_allowed():
             return {"migration": "reset"}
         return {}
@@ -538,7 +539,7 @@ async def reauthenticate(
     if not reauth_allowed(user.id):
         raise _too_many("900")
     if body.password:
-        if not verify_password(body.password, user.password_hash):
+        if not await in_thread(verify_password, body.password, user.password_hash):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
     elif body.code:
         await mfa_service.consume_reauth_code(session, user, body.code)

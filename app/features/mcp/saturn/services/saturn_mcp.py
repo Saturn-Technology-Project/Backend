@@ -645,7 +645,27 @@ class SaturnMcp:
                 audit_no=audit_no,
                 decision=decision,
             )
-        raw_response = await self._proxy(session, tool, arguments)
+        try:
+            raw_response = await self._proxy(session, tool, arguments)
+        except Exception as exc:
+            # The request record is already committed. Say how the call ended, so an attempt
+            # that reached the upstream does not look like one that is still running.
+            from app.features.execution.approvals.services.approval_service import _uncertain
+
+            outcome = "uncertain" if _uncertain(exc) else "failed"
+            detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, str) else type(exc).__name__
+            await self._audit(
+                session,
+                event=AuditEvent.TOOL_EXECUTED,
+                actor_type=ActorType.AGENT,
+                actor_id=agent.id,
+                organization_id=agent.organization_id,
+                tool=tool.name,
+                result=outcome,
+                payload={**stamp, "reason": detail[:300]},
+            )
+            await session.commit()
+            raise
         raw_response, result = _split_remote(raw_response)
         reply = rpc_result(request_id, result)
         # saturnRunId is the only caller-supplied run id. Link the audit row when that run belongs to this agent.

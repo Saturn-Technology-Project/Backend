@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timezone
 
+from app.shared.threads import in_thread
 from fastapi import HTTPException, status as http_status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -592,7 +593,7 @@ class AdminService:
 
         reset_code: str | None = None
         if use_password:
-            password_hash = hash_password(password or "")
+            password_hash = await in_thread(hash_password, password or "")
         else:
             password_hash = unusable_password_hash()
             if cleaned_status == "active":

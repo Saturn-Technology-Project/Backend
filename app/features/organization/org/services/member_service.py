@@ -4,6 +4,7 @@ import logging
 import secrets
 from datetime import timedelta, timezone
 
+from app.shared.threads import in_thread
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -318,7 +319,7 @@ class MemberService:
             organization_id=org.id,
             email=invite.email,
             name=invite.name,
-            password_hash=hash_password(password),
+            password_hash=await in_thread(hash_password, password),
             status="active",
         )
         session.add(user)
@@ -479,7 +480,7 @@ class MemberService:
             PasswordReset(
                 id=new_id("rst"),
                 email=email,
-                code_hash=hash_password(code),
+                code_hash=await in_thread(hash_password, code),
                 expires_at=now + timedelta(minutes=RESET_TTL_MINUTES),
                 attempts=0,
             )

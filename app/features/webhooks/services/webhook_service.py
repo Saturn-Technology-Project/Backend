@@ -18,7 +18,12 @@ from app.features.credentials.vault.services.secret_vault import get_secret, put
 from app.features.organization.org.services.plans import PRO_REQUIRED, allows_pro
 from app.models import Organization
 from app.features.webhooks.models.webhook import WebhookAttempt, WebhookDelivery, WebhookEndpoint
-from app.features.webhooks.services.destinations import pin_webhook_url, require_webhook_url
+from app.features.webhooks.services.destinations import (
+    WebhookUnresolved,
+    pin_webhook_url,
+    require_webhook_shape,
+    require_webhook_url,
+)
 from app.features.webhooks.services.signing import SCHEMA, canonical_body, signed_headers
 
 logger = logging.getLogger(__name__)
@@ -85,6 +90,9 @@ def _public_error(text: str, secret: str) -> str:
 async def _post_pinned(url: str, body: bytes, headers: dict[str, str]) -> int:
     try:
         target = await asyncio.to_thread(pin_webhook_url, url)
+    except WebhookUnresolved:
+        # A name that does not resolve right now is a network failure like any other.
+        raise
     except HTTPException as exc:
         raise _DestinationRefused() from exc
     sent_headers = dict(headers)
@@ -119,6 +127,8 @@ async def send_webhook(url: str, body: bytes, headers: dict[str, str]) -> tuple[
         code = await asyncio.wait_for(_post_pinned(url, body, headers), TOTAL_TIMEOUT_SECONDS)
     except _DestinationRefused:
         return None, "destination not allowed"
+    except WebhookUnresolved:
+        return None, "host did not resolve"
     except (httpx.TimeoutException, asyncio.TimeoutError):
         return None, "timeout"
     except Exception as exc:
@@ -166,7 +176,9 @@ async def create_endpoint(
             status.HTTP_409_CONFLICT,
             f"An organization can have at most {MAX_ENDPOINTS_PER_ORG} webhook endpoints",
         )
-    checked = require_webhook_url(url)
+    # The lookup blocks, and the host is the caller's choice: a name server that never answers
+    # must tie up a worker thread, not the event loop every other request runs on.
+    checked = await asyncio.to_thread(require_webhook_url, url)
     chosen = clean_events(events)
     import secrets
 
@@ -200,7 +212,7 @@ async def update_endpoint(
 ) -> WebhookEndpoint:
     row = await _endpoint(session, organization_id, endpoint_id)
     if url is not None:
-        row.url = require_webhook_url(url)
+        row.url = await asyncio.to_thread(require_webhook_url, url)
     if events is not None:
         row.events = clean_events(events)
     if enabled is not None:
@@ -573,7 +585,9 @@ async def _prepare(session: AsyncSession, row: WebhookDelivery, now: datetime) -
         return None
     secret = ""
     try:
-        require_webhook_url(endpoint.url)
+        # No lookup here. The send resolves the name once, off the event loop, and connects to
+        # the address it checked; a name that does not resolve then counts as a failed attempt.
+        require_webhook_shape(endpoint.url)
         secret = await get_secret(session, endpoint.secret_id, row.organization_id)
     except HTTPException:
         await _finish(session, row, now, None, "destination not allowed", secret, dead=True)

@@ -192,9 +192,16 @@ async def _request(method: str, url: str, **kwargs: Any) -> httpx.Response:
                         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP authorization server response is too large")
             finally:
                 await response.aclose()
+            # The body was already decoded while it was read. Keeping content-encoding would make
+            # httpx decode it a second time and fail on every server that compresses its answers.
+            kept = {
+                key: value
+                for key, value in response.headers.items()
+                if key.lower() not in {"content-encoding", "content-length", "transfer-encoding"}
+            }
             return httpx.Response(
                 response.status_code,
-                headers=response.headers,
+                headers=kept,
                 content=bytes(body),
                 request=request,
             )
