@@ -453,6 +453,7 @@ async def mfa_status(user: CurrentUser, session: SessionDep):
     records = await passkey_service.list_passkeys(session, user)
     return MfaStatus(
         email_mfa=user.email_mfa,
+        totp=bool(user.totp_enabled and user.totp_secret),
         passkeys=[PasskeyRead(id=item.id, created_at=item.created_at) for item in records],
     )
 

@@ -32,10 +32,13 @@ async def test_admin_without_totp_is_blocked_until_setup(client):
     me = await client.get("/auth/me")
     assert me.status_code == 200
     assert me.json()["mfa_setup_required"] is True
+    assert (await client.get("/auth/mfa")).json()["totp"] is False
 
     setup = await client.post("/auth/totp/setup")
     assert setup.status_code == 200, setup.text
     body = setup.json()
+    # Started but not confirmed: the account does not have an authenticator yet.
+    assert (await client.get("/auth/mfa")).json()["totp"] is False
     assert body["secret"]
     assert body["otpauth_url"].startswith("otpauth://totp/")
     assert len(body["backup_codes"]) == 8
@@ -63,6 +66,7 @@ async def test_admin_without_totp_is_blocked_until_setup(client):
     assert allowed.status_code == 200, allowed.text
     finished = await client.get("/auth/me")
     assert finished.json()["mfa_setup_required"] is False
+    assert (await client.get("/auth/mfa")).json()["totp"] is True
 
     # Replaying the same code within the 90-second window is rejected.
     replayed = await client.post("/auth/totp/verify", json={"code": code})
