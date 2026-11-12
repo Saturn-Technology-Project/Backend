@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from datetime import datetime
+from typing import Annotated
+
+from fastapi import APIRouter, Query, Response, status
 
 from app.features.agent.agents.controllers.agents import serialize_agent as _serialize_tenant_agent
 
@@ -328,13 +331,35 @@ async def get_mcp(session: SessionDep, _admin: PlatformAdmin):
 
 
 @router.get("/usage", response_model=list[AdminUsageRow])
-async def get_usage(session: SessionDep, _admin: PlatformAdmin):
-    return [AdminUsageRow(**item) for item in await admin_service.usage(session)]
+async def get_usage(
+    session: SessionDep,
+    _admin: PlatformAdmin,
+    days: Annotated[int | None, Query(ge=1, le=366)] = None,
+):
+    return [AdminUsageRow(**item) for item in await admin_service.usage(session, days=days)]
 
 
 @router.get("/audit", response_model=list[AdminEventRead])
-async def get_audit(session: SessionDep, _admin: PlatformAdmin):
-    return [serialize_event(item) for item in await admin_service.list_events(session, limit=100)]
+async def get_audit(
+    session: SessionDep,
+    _admin: PlatformAdmin,
+    response: Response,
+    page: Page,
+    organization_id: Annotated[str | None, Query(max_length=64)] = None,
+    event: Annotated[str | None, Query(max_length=64)] = None,
+    since: datetime | None = None,
+):
+    """Newest first. The body stays a plain list; X-Total-Count carries how many events match."""
+    filters = {"organization_id": organization_id, "event": event, "since": since}
+    response.headers["X-Total-Count"] = str(await admin_service.count_events(session, **filters))
+    events = await admin_service.list_events(session, limit=page.limit, offset=page.offset, **filters)
+    return [serialize_event(item) for item in events]
+
+
+@router.get("/audit/events", response_model=list[str])
+async def list_audit_event_names(session: SessionDep, _admin: PlatformAdmin):
+    """Every event name present in the audit log, for the audit view's filter."""
+    return await admin_service.event_names(session)
 
 
 @router.get("/settings", response_model=AdminSettingsRead)

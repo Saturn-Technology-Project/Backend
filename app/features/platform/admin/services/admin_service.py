@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status as http_status
 from sqlalchemy import func, select
@@ -48,6 +48,12 @@ def _aware(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+def _utc(value: datetime) -> datetime:
+    aware = _aware(value)
+    assert aware is not None
+    return aware.astimezone(timezone.utc)
 
 
 class AdminService:
@@ -336,14 +342,64 @@ class AdminService:
         result = await session.execute(statement)
         return list(result.scalars().unique().all())
 
-    async def list_events(self, session: AsyncSession, limit: int = 50) -> list[AuditLog]:
+    @staticmethod
+    def _event_filters(
+        statement,
+        *,
+        organization_id: str | None = None,
+        event: str | None = None,
+        since: datetime | None = None,
+    ):
+        if organization_id:
+            statement = statement.where(AuditLog.organization_id == organization_id)
+        if event:
+            statement = statement.where(AuditLog.event == event)
+        if since is not None:
+            statement = statement.where(AuditLog.created_at >= _utc(since))
+        return statement
+
+    async def list_events(
+        self,
+        session: AsyncSession,
+        limit: int = 50,
+        *,
+        offset: int = 0,
+        organization_id: str | None = None,
+        event: str | None = None,
+        since: datetime | None = None,
+    ) -> list[AuditLog]:
+        statement = self._event_filters(
+            select(AuditLog).options(selectinload(AuditLog.organization)),
+            organization_id=organization_id,
+            event=event,
+            since=since,
+        )
         result = await session.execute(
-            select(AuditLog)
-            .options(selectinload(AuditLog.organization))
-            .order_by(AuditLog.created_at.desc())
+            statement.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
             .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().unique().all())
+
+    async def count_events(
+        self,
+        session: AsyncSession,
+        *,
+        organization_id: str | None = None,
+        event: str | None = None,
+        since: datetime | None = None,
+    ) -> int:
+        statement = self._event_filters(
+            select(func.count()).select_from(AuditLog),
+            organization_id=organization_id,
+            event=event,
+            since=since,
+        )
+        return int(await session.scalar(statement) or 0)
+
+    async def event_names(self, session: AsyncSession) -> list[str]:
+        result = await session.execute(select(AuditLog.event).distinct().order_by(AuditLog.event.asc()))
+        return [str(name) for name in result.scalars().all()]
 
     async def connections(self, session: AsyncSession) -> list[dict]:
         rows = []
@@ -469,24 +525,21 @@ class AdminService:
             "items": items,
         }
 
-    async def usage(self, session: AsyncSession) -> list[dict]:
+    async def usage(self, session: AsyncSession, *, days: int | None = None) -> list[dict]:
+        """Runs and tool calls per organization: all time, or only the last `days` days."""
+        runs = select(Run.organization_id, func.count(Run.id))
+        calls = select(Run.organization_id, func.count(Action.id)).join(Action, Action.run_id == Run.id)
+        if days is not None:
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            runs = runs.where(Run.created_at >= since)
+            calls = calls.where(Action.created_at >= since)
         run_rows = {
             row[0]: int(row[1])
-            for row in (
-                await session.execute(
-                    select(Run.organization_id, func.count(Run.id)).group_by(Run.organization_id)
-                )
-            ).all()
+            for row in (await session.execute(runs.group_by(Run.organization_id))).all()
         }
         call_rows = {
             row[0]: int(row[1])
-            for row in (
-                await session.execute(
-                    select(Run.organization_id, func.count(Action.id))
-                    .join(Action, Action.run_id == Run.id)
-                    .group_by(Run.organization_id)
-                )
-            ).all()
+            for row in (await session.execute(calls.group_by(Run.organization_id))).all()
         }
         orgs = (await session.execute(select(Organization).order_by(Organization.name.asc()))).scalars()
         rows = []
