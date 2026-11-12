@@ -9,7 +9,7 @@ Agent 只呼叫一個 MCP 端點。Saturn 只讓每個 Agent 看到自己的工�
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE.md)
 ![Python](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688.svg?logo=fastapi&logoColor=white)
-[![Test](https://github.com/Saturn-Technology-Project/Backend/actions/workflows/test.yml/badge.svg)](https://github.com/Saturn-Technology-Project/Backend/actions/workflows/test.yml)
+[![Test](https://github.com/Saturn-Technology-Project/Saturn-MCP-Backend/actions/workflows/test.yml/badge.svg)](https://github.com/Saturn-Technology-Project/Saturn-MCP-Backend/actions/workflows/test.yml)
 
 [功能](#功能) · [架構](#架構) · [快速開始](#快速開始) · [政策](#政策與核准) · [安全](#安全) · [設定](#設定) · [部署](#部署) · [English](README.md)
 
@@ -21,7 +21,7 @@ Agent 只呼叫一個 MCP 端點。Saturn 只讓每個 Agent 看到自己的工�
 
 Saturn MCP 位在 AI Agent 與它們使用的 MCP 伺服器之間。Agent 不再直接連到各個伺服器，而是連到 Saturn，以 OAuth 登入，並且只看得到組織放進它工具集的工具。每一次呼叫在送到上游伺服器之前都會先經過評估。
 
-這個 repository 是 API：在 Cloud Run 上執行的 FastAPI 應用程式，搭配 Postgres 與 Redis。主控台 [dashboard.saturn-core.com](https://dashboard.saturn-core.com) 是另一個 repository（Frontend），產品介紹在 [saturn-core.com](https://saturn-core.com)。桌面 Agent Saturn App 也可以像其他 MCP 用戶端一樣連到 Saturn MCP。
+這個 repository 是 API：在 Cloud Run 上執行的 FastAPI 應用程式，搭配 Postgres 與 Redis。主控台 [dashboard.saturn-core.com](https://dashboard.saturn-core.com) 是另一個 repository（[Saturn-MCP-Frontend](https://github.com/Saturn-Technology-Project/Saturn-MCP-Frontend)），產品介紹在 [saturn-core.com](https://saturn-core.com)。桌面 Agent Saturn App 也可以像其他 MCP 用戶端一樣連到 Saturn MCP。
 
 - **每個組織一個端點。** `POST /mcp` 以 HTTP 提供 MCP（`initialize`、`tools/list`、`tools/call`）。每個連上來的 OAuth 用戶端，都會成為登入成員的一個 Agent。
 - **預設拒絕。** 沒有任何適用政策的呼叫會被拒絕；某個工具有規則但沒有任何規則符合時，也會被拒絕。

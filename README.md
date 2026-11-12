@@ -9,7 +9,7 @@ Agents call one MCP endpoint. Saturn shows each agent only its tool set, checks 
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE.md)
 ![Python](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688.svg?logo=fastapi&logoColor=white)
-[![Test](https://github.com/Saturn-Technology-Project/Backend/actions/workflows/test.yml/badge.svg)](https://github.com/Saturn-Technology-Project/Backend/actions/workflows/test.yml)
+[![Test](https://github.com/Saturn-Technology-Project/Saturn-MCP-Backend/actions/workflows/test.yml/badge.svg)](https://github.com/Saturn-Technology-Project/Saturn-MCP-Backend/actions/workflows/test.yml)
 
 [Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [Policies](#policies-and-approvals) · [Security](#security) · [Configuration](#configuration) · [Deploy](#deploy) · [中文](README_ZH.md)
 
@@ -21,7 +21,7 @@ Agents call one MCP endpoint. Saturn shows each agent only its tool set, checks 
 
 Saturn MCP sits between AI agents and the MCP servers they use. An agent connects to Saturn instead of to each server, signs in with OAuth, and sees only the tools its organization put in its tool set. Every call is evaluated before anything reaches the upstream server.
 
-This repository is the API: a FastAPI app on Cloud Run with Postgres and Redis. The console at [dashboard.saturn-core.com](https://dashboard.saturn-core.com) is a separate repository (Frontend), and [saturn-core.com](https://saturn-core.com) describes the product. Saturn App, the desktop agent, can be pointed at Saturn MCP like any other MCP client.
+This repository is the API: a FastAPI app on Cloud Run with Postgres and Redis. The console at [dashboard.saturn-core.com](https://dashboard.saturn-core.com) is a separate repository ([Saturn-MCP-Frontend](https://github.com/Saturn-Technology-Project/Saturn-MCP-Frontend)), and [saturn-core.com](https://saturn-core.com) describes the product. Saturn App, the desktop agent, can be pointed at Saturn MCP like any other MCP client.
 
 - **One endpoint per organization.** `POST /mcp` speaks MCP over HTTP (`initialize`, `tools/list`, `tools/call`). Each OAuth client that connects becomes an agent of the signed-in member.
 - **Default deny.** A call with no applicable policy is denied, and a tool that has rules but no matching rule is denied.
