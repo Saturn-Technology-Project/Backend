@@ -12,6 +12,7 @@ from app.models import (
     Employee,
     Invitation,
     McpServer,
+    Policy,
     Run,
     Tool,
     ToolSetItem,
@@ -50,6 +51,7 @@ class RemovalService:
             await session.execute(delete(Run).where(Run.id.in_(run_ids)))
         await session.execute(delete(employee_agents).where(employee_agents.c.agent_id == agent.id))
         await session.execute(delete(agent_mcp_servers).where(agent_mcp_servers.c.agent_id == agent.id))
+        await self._pause_policies_left_unscoped(session, user, agent)
         await session.execute(delete(agent_policies).where(agent_policies.c.agent_id == agent.id))
         await self._drop_json_id(session, agent.organization_id, "agent", agent.id)
         self._unlink_loaded(session, agent, ("agents",))
@@ -59,6 +61,52 @@ class RemovalService:
                 session.expire(obj, ["agents"])
         await session.delete(agent)
         await session.flush()
+
+    async def _pause_policies_left_unscoped(self, session: AsyncSession, user: User, agent: Agent) -> None:
+        """A policy with no agents applies to every agent. One that named only this agent
+        must stop applying when the agent goes, not widen to the whole organization."""
+        linked = list(
+            await session.scalars(select(agent_policies.c.policy_id).where(agent_policies.c.agent_id == agent.id))
+        )
+        if not linked:
+            return
+        shared = set(
+            await session.scalars(
+                select(agent_policies.c.policy_id).where(
+                    agent_policies.c.policy_id.in_(linked),
+                    agent_policies.c.agent_id != agent.id,
+                )
+            )
+        )
+        from app.core.enums import ActorType, AuditEvent
+        from app.core.ids import utcnow
+        from app.features.execution.activity.services.audit_service import audit_service
+
+        for policy_id in linked:
+            if policy_id in shared:
+                continue
+            policy = await session.get(Policy, policy_id)
+            if policy is None or policy.organization_id != agent.organization_id or policy.status == "paused":
+                continue
+            previous = policy.status
+            policy.status = "paused"
+            policy.version = (policy.version or 1) + 1
+            policy.updated_at = utcnow()
+            await audit_service.log(
+                session,
+                event=AuditEvent.POLICY_PAUSED,
+                actor_type=ActorType.USER,
+                actor_id=user.id,
+                organization_id=agent.organization_id,
+                result="paused",
+                payload={
+                    "policy_id": policy.id,
+                    "policy_name": policy.name,
+                    "previous_status": previous,
+                    "reason": "its only agent was removed",
+                    "agent_id": agent.id,
+                },
+            )
 
     async def delete_mcp_server(self, session: AsyncSession, user: User, server_id: str) -> None:
         server = await session.get(McpServer, server_id)

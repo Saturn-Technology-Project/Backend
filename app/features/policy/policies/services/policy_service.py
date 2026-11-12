@@ -479,8 +479,9 @@ class PolicyService:
         organization_id: str,
         agent_ids: list[str],
     ) -> None:
-        await session.execute(delete(agent_policies).where(agent_policies.c.policy_id == policy_id))
+        # Check the ids before anything is removed: a refused request is still committed.
         agents = await self._load_agents(session, organization_id, agent_ids)
+        await session.execute(delete(agent_policies).where(agent_policies.c.policy_id == policy_id))
         if agents:
             await session.execute(
                 insert(agent_policies),
@@ -492,13 +493,19 @@ class PolicyService:
     ) -> list[Agent]:
         if not agent_ids:
             return []
+        wanted = list(dict.fromkeys(agent_ids))
         result = await session.execute(
             select(Agent).where(
                 Agent.organization_id == organization_id,
-                Agent.id.in_(agent_ids),
+                Agent.id.in_(wanted),
             )
         )
-        return list(result.scalars().all())
+        agents = list(result.scalars().all())
+        # An empty agent list means every agent. Dropping an id that does not exist would
+        # turn a policy meant for one agent into one that applies to all of them.
+        if len(agents) != len(wanted):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Agent not found")
+        return agents
 
     async def _replace_rules(
         self,
