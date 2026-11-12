@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.ids import utcnow
@@ -20,6 +20,11 @@ class AuditCounter(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        # The activity list: one organization, newest first.
+        Index("ix_audit_logs_org_created", "organization_id", "created_at", "id"),
+        Index("ix_audit_logs_action_id", "action_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     event: Mapped[str] = mapped_column(String(64), nullable=False, index=True)

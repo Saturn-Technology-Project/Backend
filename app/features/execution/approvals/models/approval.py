@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.ids import utcnow
@@ -12,6 +12,16 @@ from app.db.database import Base
 
 class Approval(Base):
     __tablename__ = "approvals"
+    __table_args__ = (
+        # What the expiry worker looks for every few seconds: open approvals past a deadline.
+        Index("ix_approvals_pending_expiry", "expires_at", postgresql_where=text("status = 'pending'"), sqlite_where=text("status = 'pending'")),
+        Index(
+            "ix_approvals_resubmit_expiry",
+            "resubmit_expires_at",
+            postgresql_where=text("status = 'approved' AND execution_state = 'none'"),
+            sqlite_where=text("status = 'approved' AND execution_state = 'none'"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)

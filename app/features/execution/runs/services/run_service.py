@@ -39,7 +39,8 @@ def _aware(value):
 
 
 class RunService:
-    async def list_runs(self, session: AsyncSession, user: User) -> list[Run]:
+    async def list_runs(self, session: AsyncSession, user: User, *, limit: int = 200, offset: int = 0) -> list[Run]:
+        """The newest runs of the agents this member is mapped to, one page at a time."""
         agent_ids = await mapping_service.agent_ids_for(session, user)
         if not agent_ids:
             return []
@@ -47,7 +48,9 @@ class RunService:
             select(Run)
             .options(selectinload(Run.actions), selectinload(Run.approvals))
             .where(Run.agent_id.in_(agent_ids))
-            .order_by(Run.created_at.desc())
+            .order_by(Run.created_at.desc(), Run.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
         runs = list(result.scalars().unique().all())
         for run in runs:

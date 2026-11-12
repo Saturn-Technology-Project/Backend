@@ -80,7 +80,7 @@ flowchart LR
 | **Execute** | 核准（或允許）後，呼叫以原子操作取得執行權，再帶著金庫中的憑證送到上游 MCP 伺服器。 | `features/mcp/servers`、`features/credentials` |
 | **Audit** | 每個步驟（`tool_requested`、`policy_evaluated`、`approval_requested`、`approval_granted`、`execution_claimed`、`tool_executed`……）都寫入審計紀錄。 | `features/execution/activity` |
 
-Agent 錢包與 x402 付款以前是這個迴圈的一部分。遷移 `039_drop_wallets_x402` 已將它們移除；空的 `billing/wallets` 與 `billing/x402` 套件是留下來的部分。
+Agent 錢包與 x402 付款以前是這個迴圈的一部分。遷移 `039_drop_wallets_x402` 已將它們移除。
 
 ### 目錄結構
 

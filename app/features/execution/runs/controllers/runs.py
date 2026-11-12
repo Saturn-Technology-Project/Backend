@@ -8,6 +8,7 @@ from app.features.organization.org.services.access import may_edit_agent
 from app.models import Agent
 from app.features.identity.auth.services.notices import finish_task_notice
 from app.schemas import ActionRead, RunCreate, RunRead
+from app.shared.pagination import Page
 from app.features.execution.runs.services.run_service import pending_approval_id, run_service
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -27,8 +28,10 @@ def serialize_run(run) -> RunRead:
 
 
 @router.get("", response_model=list[RunRead])
-async def list_runs(session: SessionDep, user: CurrentUser, _access: AgentsRead):
-    runs = await run_service.list_runs(session, user)
+async def list_runs(session: SessionDep, user: CurrentUser, _access: AgentsRead, page: Page):
+    # Every run carries its actions and approvals, and each one is reconciled. Without a limit
+    # this loaded an organization's whole history on each call.
+    runs = await run_service.list_runs(session, user, limit=page.limit, offset=page.offset)
     return [serialize_run(run) for run in runs]
 
 

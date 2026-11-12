@@ -80,7 +80,7 @@ flowchart LR
 | **Execute** | Once approved (or allowed), the call is claimed atomically and sent to the upstream MCP server with its credential from the vault. | `features/mcp/servers`, `features/credentials` |
 | **Audit** | Each step (`tool_requested`, `policy_evaluated`, `approval_requested`, `approval_granted`, `execution_claimed`, `tool_executed`, …) is written to the audit log. | `features/execution/activity` |
 
-Agent wallets and x402 payments were part of this loop earlier. Migration `039_drop_wallets_x402` removed them; the empty `billing/wallets` and `billing/x402` packages are what is left.
+Agent wallets and x402 payments were part of this loop earlier. Migration `039_drop_wallets_x402` removed them.
 
 ### Layout
 

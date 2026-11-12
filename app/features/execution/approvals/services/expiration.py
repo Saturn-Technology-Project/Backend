@@ -11,7 +11,7 @@ from app.core.ids import utcnow
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.execution.approvals.models.approval import Approval, ApprovalPolicy, ApprovalWindow
 from app.features.webhooks.services.webhook_service import publish_approval
-from app.models import Action, AuditLog, Run
+from app.models import Action, Run
 
 DEFAULT_TTL_MINUTES = 24 * 60
 MAX_TTL_MINUTES = 7 * 24 * 60
@@ -168,48 +168,42 @@ async def expire_if_due(session: AsyncSession, approval: Approval, now: datetime
     return phase
 
 
+EXPIRE_BATCH = 500
+
+
 async def expire_due(
     session: AsyncSession,
     organization_id: str | None = None,
     now: datetime | None = None,
 ) -> int:
+    """Expire approvals whose deadline has passed. At most EXPIRE_BATCH of each kind per call.
+
+    The deadline is compared in the query. The worker calls this every few seconds; loading
+    every open approval of every organization to compare dates in Python did not scale.
+    """
     moment = now or utcnow()
-    pending = select(Approval).where(Approval.status == "pending", Approval.expires_at.is_not(None))
+    pending = select(Approval).where(
+        Approval.status == "pending",
+        Approval.expires_at.is_not(None),
+        Approval.expires_at <= moment,
+    )
     waiting = select(Approval).where(
         Approval.status == "approved",
         Approval.execution_state == "none",
         Approval.resubmit_expires_at.is_not(None),
+        Approval.resubmit_expires_at <= moment,
     )
     if organization_id:
         pending = pending.join(Run, Approval.run_id == Run.id).where(Run.organization_id == organization_id)
         waiting = waiting.join(Run, Approval.run_id == Run.id).where(Run.organization_id == organization_id)
     changed = 0
-    for approval in list(await session.scalars(pending)):
+    for approval in list(await session.scalars(pending.order_by(Approval.expires_at).limit(EXPIRE_BATCH))):
         if await expire_if_due(session, approval, moment):
             changed += 1
-    for approval in list(await session.scalars(waiting)):
+    for approval in list(await session.scalars(waiting.order_by(Approval.resubmit_expires_at).limit(EXPIRE_BATCH))):
         if await expire_if_due(session, approval, moment):
             changed += 1
     return changed
-
-
-async def drop_expired_content(session: AsyncSession, now: datetime | None = None) -> int:
-    moment = now or utcnow()
-    rows = list(
-        await session.scalars(
-            select(AuditLog)
-            .where(AuditLog.content_until.is_not(None), AuditLog.content_until <= moment)
-            .limit(100)
-        )
-    )
-    for row in rows:
-        payload = dict(row.payload or {})
-        payload.pop("sealed", None)
-        payload.pop("shown", None)
-        payload["content_expired"] = True
-        row.payload = payload
-        row.content_until = None
-    return len(rows)
 
 
 async def _record_expiry(session: AsyncSession, approval: Approval, phase: str, now: datetime) -> None:

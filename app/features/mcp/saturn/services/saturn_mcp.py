@@ -686,7 +686,6 @@ class SaturnMcp:
                 "arguments": arguments,
                 "raw_response": raw_response,
                 "server_result": result,
-                "agent_result": reply,
             },
         )
         return reply
@@ -1033,8 +1032,7 @@ class SaturnMcp:
                     "approval_id": approval.id,
                     "raw_response": raw_response,
                     "server_result": result,
-                    "agent_result": reply,
-                },
+                    },
             )
             await session.commit()
         except Exception:
