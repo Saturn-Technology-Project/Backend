@@ -334,23 +334,32 @@ async def authorization_server_metadata(request: Request) -> dict:
     return metadata(origin_of(request))
 
 
+MAX_REDIRECT_URI_LENGTH = 2048
+
+
 @router.post("/oauth/register", status_code=201)
 async def register_client(request: Request, session: SessionDep) -> dict:
     if not registration_allowed(request):
         raise HTTPException(status_code=429, detail="Too many registrations", headers={"Retry-After": "600"})
     try:
         body = await request.json()
+    except HTTPException:
+        # The body limit. Say so instead of answering as if the body were empty.
+        raise
     except Exception:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    name = str(body.get("client_name") or "Agent").strip() or "Agent"
+    name = str(body.get("client_name") or "Agent").strip()[:255] or "Agent"
     uris = body.get("redirect_uris")
     if not isinstance(uris, list) or not uris or len(uris) > 8:
         raise HTTPException(400, "redirect_uris are required")
     cleaned = []
     for item in uris:
         uri = str(item or "").strip()
+        # Anyone can register a client, and each one is stored and read back on every authorize.
+        if len(uri) > MAX_REDIRECT_URI_LENGTH:
+            raise HTTPException(400, "redirect_uri is too long")
         if not redirect_allowed(uri):
             raise HTTPException(400, "redirect_uri must be https, localhost, or an app callback")
         cleaned.append(uri)

@@ -8,6 +8,7 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import get_settings
+from app.core.body_limit import BodyLimitMiddleware
 from app.core.http_security import HttpSecurityMiddleware
 from app.core.origin_auth import OriginAuthMiddleware
 from app.features.agent.agents.routes import router as agents_router
@@ -98,6 +99,9 @@ app = FastAPI(
 )
 
 _origins = _cors_origins()
+# Added first, so it is the innermost layer: it runs after the origin check, the security
+# headers and CORS, and its 413 answers carry their headers.
+app.add_middleware(BodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
