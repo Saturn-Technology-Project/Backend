@@ -11,7 +11,7 @@ REGION="${GCP_REGION:-asia-east1}"
 NEW="${REDIS_INSTANCE:-saturn-redis-tls}"
 NETWORK="${VPC_NETWORK:-default}"
 RUNTIME_SA="${RUNTIME_SA:-saturn-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com}"
-REPO="${GITHUB_REPO:-Saturn-Technology-Project/Backend}"
+REPO="${GITHUB_REPO:-Saturn-Technology-Project/Saturn-MCP-Backend}"
 
 if ! gcloud redis instances describe "${NEW}" --project "${GCP_PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
   echo "Creating ${NEW} (about 5 minutes)"

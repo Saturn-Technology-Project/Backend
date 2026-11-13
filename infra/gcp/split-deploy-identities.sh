@@ -12,6 +12,8 @@ REGION="${GCP_REGION:-asia-east1}"
 GAR_LOCATION="${GAR_LOCATION:-asia-east1}"
 GAR_REPOSITORY="${GAR_REPOSITORY:-saturn}"
 POOL="${WIF_POOL:-github}"
+BACKEND_REPO="${BACKEND_REPO:-Saturn-MCP-Backend}"
+FRONTEND_REPO="${FRONTEND_REPO:-Saturn-MCP-Frontend}"
 PROJECT_NUMBER="$(gcloud projects describe "${GCP_PROJECT_ID}" --format='value(projectNumber)')"
 
 email() { echo "$1@${GCP_PROJECT_ID}.iam.gserviceaccount.com"; }
@@ -88,7 +90,7 @@ retry gcloud secrets add-iam-policy-binding ORIGIN_AUTH_SECRET --project "${GCP_
   --member "serviceAccount:$(email saturn-frontend-runtime)" --role roles/secretmanager.secretAccessor
 
 echo "Backend deployer"
-bind_repo github-deployer-backend Backend
+bind_repo github-deployer-backend "${BACKEND_REPO}"
 project_role github-deployer-backend roles/run.developer
 project_role github-deployer-backend roles/vpcaccess.user
 registry_writer github-deployer-backend
@@ -97,7 +99,7 @@ service_admin github-deployer-backend saturn-backend
 service_admin github-deployer-backend saturn-worker
 
 echo "Backend provisioner"
-bind_repo github-provisioner Backend
+bind_repo github-provisioner "${BACKEND_REPO}"
 for role in roles/cloudsql.admin roles/redis.admin roles/compute.networkAdmin roles/vpcaccess.admin \
   roles/artifactregistry.admin roles/serviceusage.serviceUsageAdmin; do
   project_role github-provisioner "${role}"
@@ -112,7 +114,7 @@ deployer() {
   act_as "${name}" "${runtime}"
   service_admin "${name}" "${service}"
 }
-deployer github-deployer-frontend Frontend saturn-frontend-runtime saturn-frontend
+deployer github-deployer-frontend "${FRONTEND_REPO}" saturn-frontend-runtime saturn-frontend
 deployer github-deployer-dashboard Dashboard saturn-dashboard-runtime saturn-dashboard
 # demosystem pushes its image to its own registry, acme.
 deployer github-deployer-demosystem demosystem acme-demo-runtime acme-demo acme
@@ -121,10 +123,10 @@ cat <<EOF
 
 Done. Point each repo at its own identities:
 
-  gh secret set GCP_SERVICE_ACCOUNT_EMAIL -R ${GITHUB_ORG}/Backend --body $(email github-deployer-backend)
-  gh secret set GCP_PROVISION_SERVICE_ACCOUNT_EMAIL -R ${GITHUB_ORG}/Backend --body $(email github-provisioner)
-  gh secret set GCP_SERVICE_ACCOUNT_EMAIL -R ${GITHUB_ORG}/Frontend --body $(email github-deployer-frontend)
-  gh variable set RUNTIME_SERVICE_ACCOUNT -R ${GITHUB_ORG}/Frontend --body $(email saturn-frontend-runtime)
+  gh secret set GCP_SERVICE_ACCOUNT_EMAIL -R ${GITHUB_ORG}/${BACKEND_REPO} --body $(email github-deployer-backend)
+  gh secret set GCP_PROVISION_SERVICE_ACCOUNT_EMAIL -R ${GITHUB_ORG}/${BACKEND_REPO} --body $(email github-provisioner)
+  gh secret set GCP_SERVICE_ACCOUNT_EMAIL -R ${GITHUB_ORG}/${FRONTEND_REPO} --body $(email github-deployer-frontend)
+  gh variable set RUNTIME_SERVICE_ACCOUNT -R ${GITHUB_ORG}/${FRONTEND_REPO} --body $(email saturn-frontend-runtime)
   gh secret set GCP_SERVICE_ACCOUNT_EMAIL -R ${GITHUB_ORG}/Dashboard --body $(email github-deployer-dashboard)
   gh variable set RUNTIME_SERVICE_ACCOUNT -R ${GITHUB_ORG}/Dashboard --body $(email saturn-dashboard-runtime)
   gh secret set GCP_SERVICE_ACCOUNT -R ${GITHUB_ORG}/demosystem --body $(email github-deployer-demosystem)
