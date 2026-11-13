@@ -38,7 +38,7 @@ principal() {
 members() {
   gcloud iam service-accounts get-iam-policy "$(email "$1")" --project "${GCP_PROJECT_ID}" \
     --flatten=bindings --filter='bindings.role:roles/iam.workloadIdentityUser' \
-    --format='value(bindings.members)'
+    --format='value(bindings.members)' | tr ';' '\n' | sed '/^$/d'
 }
 
 for move in "${MOVES[@]}"; do
