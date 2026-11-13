@@ -7,7 +7,7 @@
 -c requirements.txt
 -r requirements.in
 pytest==9.2.0
-pytest-asyncio==1.4.1
+pytest-asyncio==1.4.1.post1
 # 0.22 keeps its worker threads alive at interpreter exit: the suite passes and then waits about
 # five minutes before the process ends. Stay on 0.21 until the test engine setup is changed for it.
 aiosqlite==0.21.0
