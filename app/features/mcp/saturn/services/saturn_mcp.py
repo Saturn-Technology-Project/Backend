@@ -15,7 +15,7 @@ from app.core.enums import ActionStatus, ActorType, ApprovalStatus, AuditEvent, 
 from app.features.execution.activity.services.audit_service import audit_service
 from app.features.execution.activity.services.zero_access import PAYLOAD_ENCRYPTION, action_digest, is_zero_access
 from app.features.execution.activity.services.content_seal import policy_fields
-from app.features.execution.approvals.services.approval_arguments import digest_matches, server_sealed
+from app.features.execution.approvals.services.approval_arguments import digest_matches, open_result, seal_result, server_sealed
 from app.features.mcp.saturn.services.mcp_sessions import mcp_sessions
 from app.features.mcp.servers.services.mcp_remote import call_remote_tool
 from app.features.policy.policies.services.policy_engine import policy_engine
@@ -175,6 +175,7 @@ MAX_AGENTS_PER_USER = 25
 
 
 MAX_PENDING_APPROVALS_PER_AGENT = 100
+LAST_SEEN_EVERY_SECONDS = 30
 
 class SaturnMcp:
     async def handle(
@@ -212,8 +213,15 @@ class SaturnMcp:
                 return rpc_error(request_id, -32000, refused, {"reason": "AGENT_LIMIT"})
             agent = await self._client_for_call(session, user, "", profile_id, client_name, client_id)
         if agent is not None and str((agent.settings or {}).get("origin") or "") == "saturn_mcp":
-            agent.last_seen_at = utcnow()
-            await session.flush()
+            # "Connected" in the console means seen in the last two minutes, so one write every
+            # half minute is enough. Writing on every call made each call update the agent row.
+            now = utcnow()
+            seen = agent.last_seen_at
+            if seen is not None and seen.tzinfo is None:
+                seen = seen.replace(tzinfo=now.tzinfo)
+            if seen is None or (now - seen).total_seconds() >= LAST_SEEN_EVERY_SECONDS:
+                agent.last_seen_at = now
+                await session.flush()
         owned = agent if agent is not None and self._owns(agent, user, client_id) else None
         if mcp_session_id and method == "initialize":
             # The controller issued this id for this initialize; nothing else creates a session record.
@@ -498,6 +506,21 @@ class SaturnMcp:
 
     async def _next_audit_no(self, session: AsyncSession, organization_id: str) -> int:
         event = AuditEvent.TOOL_REQUESTED.value
+        # The counter row exists after an organization's first call, so this is the usual path.
+        value = await session.scalar(
+            text(
+                """
+                UPDATE audit_counters SET value = value + 1
+                WHERE organization_id = :org AND event = :event
+                RETURNING value
+                """
+            ),
+            {"org": organization_id, "event": event},
+        )
+        if value is not None:
+            return int(value)
+        # First call: start from the rows that already exist. This count ran on every call
+        # before, against the largest table, even when the row was there.
         value = await session.scalar(
             text(
                 """
@@ -622,7 +645,27 @@ class SaturnMcp:
                 audit_no=audit_no,
                 decision=decision,
             )
-        raw_response = await self._proxy(session, tool, arguments)
+        try:
+            raw_response = await self._proxy(session, tool, arguments)
+        except Exception as exc:
+            # The request record is already committed. Say how the call ended, so an attempt
+            # that reached the upstream does not look like one that is still running.
+            from app.features.execution.approvals.services.approval_service import _uncertain
+
+            outcome = "uncertain" if _uncertain(exc) else "failed"
+            detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, str) else type(exc).__name__
+            await self._audit(
+                session,
+                event=AuditEvent.TOOL_EXECUTED,
+                actor_type=ActorType.AGENT,
+                actor_id=agent.id,
+                organization_id=agent.organization_id,
+                tool=tool.name,
+                result=outcome,
+                payload={**stamp, "reason": detail[:300]},
+            )
+            await session.commit()
+            raise
         raw_response, result = _split_remote(raw_response)
         reply = rpc_result(request_id, result)
         # saturnRunId is the only caller-supplied run id. Link the audit row when that run belongs to this agent.
@@ -643,7 +686,6 @@ class SaturnMcp:
                 "arguments": arguments,
                 "raw_response": raw_response,
                 "server_result": result,
-                "agent_result": reply,
             },
         )
         return reply
@@ -679,8 +721,11 @@ class SaturnMcp:
 
                     return mismatch_error(request_id, policy_id=getattr(decision, "policy_id", None))
                 if approval.execution_state == "executed":
-                    cached = action.result if isinstance(action.result, dict) else {}
-                    return rpc_result(request_id, cached)
+                    cached = open_result(agent.organization_id, action.result)
+                    if cached is None and action.result is not None:
+                        # It ran, but what it returned can no longer be opened. Do not answer with an empty success.
+                        return rpc_error(request_id, -32005, "execution_recorded: this call already ran and its result is no longer available")
+                    return rpc_result(request_id, cached or {})
                 if approval.execution_state == "uncertain":
                     return rpc_error(request_id, -32005, "execution_uncertain")
                 if approval.execution_state == "failed":
@@ -868,6 +913,7 @@ class SaturnMcp:
     ) -> dict[str, Any]:
         from app.features.execution.approvals.services.approval_service import (
             _uncertain,
+            approval_service,
             record_unrecorded_outcome,
             settle_claim,
         )
@@ -912,6 +958,20 @@ class SaturnMcp:
             from app.features.mcp.saturn.services.agent_messages import deny_error
 
             return deny_error(request_id, reason=fresh.reason, policy_id=fresh.policy_id)
+        try:
+            # The same check a vote makes: the policy and approval policy people approved under
+            # must still be the ones in force, so a rule tightened since then is not skipped.
+            await approval_service._revalidate_versions(session, approval, action, fresh)
+        except HTTPException:
+            return _approval_notice(
+                request_id,
+                -32002,
+                f'approval_invalidated. saturnRunId "{approval.run_id}" is closed because the policy changed. '
+                "Leave saturnRunId out to start a separate request.",
+                approval,
+                tool.name,
+                status=ApprovalStatus.INVALIDATED.value,
+            )
         claimed = await session.execute(
             update(Approval)
             .where(
@@ -950,7 +1010,7 @@ class SaturnMcp:
             raw_response, result = _split_remote(raw_response)
             reply = rpc_result(request_id, result)
             action.status = ActionStatus.COMPLETED.value
-            action.result = result
+            action.result = seal_result(agent.organization_id, result)
             if run is not None:
                 run.status = RunStatus.COMPLETED.value
                 run.updated_at = utcnow()
@@ -972,8 +1032,7 @@ class SaturnMcp:
                     "approval_id": approval.id,
                     "raw_response": raw_response,
                     "server_result": result,
-                    "agent_result": reply,
-                },
+                    },
             )
             await session.commit()
         except Exception:
@@ -990,12 +1049,18 @@ class SaturnMcp:
         endpoint = (server.endpoint if server is not None else "") or tool.mcp_endpoint
         secret = await mcp_oauth.authorization_for(session, server)
         upstream = tool.upstream_name or tool.name
+        # End the transaction before waiting on the upstream, which can take a minute. It holds a
+        # pooled connection and this organization's audit counter row, so a slow tool would stall
+        # the organization's other calls and a few of them would use up the pool for everyone.
+        # What is committed here is the record that the call was requested and a refreshed token.
+        await session.commit()
         try:
             return await call_remote_tool(endpoint, upstream, arguments, secret)
         except McpUnauthorized:
             secret = await mcp_oauth.refresh_after_reject(session, server)
             if not secret:
-                raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server returned HTTP 401")
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY, "MCP server returned HTTP 401") from None
+            await session.commit()
             try:
                 return await call_remote_tool(endpoint, upstream, arguments, secret)
             except McpUnauthorized as exc:

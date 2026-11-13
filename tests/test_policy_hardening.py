@@ -594,3 +594,88 @@ async def test_a_condition_on_an_unknown_argument_is_reported(client, monkeypatc
     unknown = [item for item in report["issues"] if item["code"] == "unknown_field"]
     assert [item["level"] for item in unknown] == ["warning"]
     assert "payment.amount" in unknown[0]["message"]
+
+
+# --- Several approval policies asked for at once ---------------------------
+
+
+def test_merge_keeps_the_other_approval_policies_for_comparison():
+    merged = merge_results(
+        [
+            EvaluationResult(decision=PolicyDecision.APPROVAL_REQUIRED, policy_id="ops", approval_policy_id="one"),
+            EvaluationResult(decision=PolicyDecision.APPROVAL_REQUIRED, policy_id="fin", approval_policy_id="two"),
+            EvaluationResult(decision=PolicyDecision.ALLOW, policy_id="open"),
+        ]
+    )
+    assert merged.approval_policy_id == "one"
+    assert [item.approval_policy_id for item in merged.alternatives] == ["two"]
+    denied = merge_results(
+        [
+            EvaluationResult(decision=PolicyDecision.DENY, policy_id="block"),
+            EvaluationResult(decision=PolicyDecision.APPROVAL_REQUIRED, policy_id="fin", approval_policy_id="two"),
+        ]
+    )
+    assert denied.decision == PolicyDecision.DENY and denied.alternatives == ()
+
+
+async def test_the_stricter_approval_policy_wins_when_two_rules_match(client):
+    from app.models import Agent
+
+    group = await client.post("/org/groups", json={"name": "Finance", "description": ""})
+    assert group.status_code == 201, group.text
+    one = await client.post("/org/approval-policies", json={"name": "Ops", "required_count": 1, "allow_requester": True})
+    assert one.status_code == 201, one.text
+    two = await client.post(
+        "/org/approval-policies",
+        json={"name": "Finance", "required_count": 2, "group_id": group.json()["id"], "allow_requester": False},
+    )
+    assert two.status_code == 201, two.text
+    # Created first, so it used to win every tie. The seeded refund policy also asks for a plain
+    # approval between 100 and 1000, and denies above that.
+    await activate_created(
+        client,
+        await client.post(
+            "/policies",
+            json={
+                "name": "Any refund",
+                "rules": [
+                    {
+                        "tool": "billing.refund",
+                        "condition": "amount > 150",
+                        "decision": "approval_required",
+                        "approval_policy_id": one.json()["id"],
+                    }
+                ],
+            },
+        ),
+    )
+    large = await activate_created(
+        client,
+        await client.post(
+            "/policies",
+            json={
+                "name": "Large refund",
+                "rules": [
+                    {
+                        "tool": "billing.refund",
+                        "condition": "amount > 500",
+                        "decision": "approval_required",
+                        "approval_policy_id": two.json()["id"],
+                    }
+                ],
+            },
+        ),
+    )
+    org_id = (await client.get("/auth/me")).json()["organization"]["id"]
+    generator, session = await _db_session()
+    try:
+        agent = await session.get(Agent, "agent_customer_ops")
+        big = await policy_engine.evaluate_named(
+            session, organization_id=org_id, agent=agent, tool_name="billing.refund", arguments={"amount": 800}
+        )
+    finally:
+        await generator.aclose()
+    assert big.decision == PolicyDecision.APPROVAL_REQUIRED
+    assert big.approval_policy_id == two.json()["id"]
+    assert big.policy_id == large["id"] and big.policy_version == large["version"]
+    assert big.alternatives == ()

@@ -170,10 +170,32 @@ class GroupService:
         remaining = await session.scalar(
             select(func.count()).select_from(GroupMember).where(GroupMember.group_id == group.id)
         )
-        if int(remaining or 0) == 0:
+        if int(remaining or 0) == 0 and not await self._sole_group_of(session, organization_id, group.id):
             await self.delete_group(session, organization_id, group.id, actor_id=actor_id)
             return None
+        # An empty group that an approval policy depends on stays. Requests under that policy
+        # then wait for a member instead of being approved by anyone.
         return await self.get_group(session, organization_id, group.id)
+
+    async def _sole_group_of(self, session: AsyncSession, organization_id: str, group_id: str) -> list[str]:
+        """Names of active approval policies whose only group is this one."""
+        names: list[str] = []
+        policies = await session.scalars(
+            select(ApprovalPolicy).where(
+                ApprovalPolicy.organization_id == organization_id,
+                ApprovalPolicy.status == "active",
+            )
+        )
+        for policy in policies.all():
+            required = list(
+                await session.scalars(
+                    select(ApprovalRequirement.group_id).where(ApprovalRequirement.approval_policy_id == policy.id)
+                )
+            )
+            groups = set(required) | ({policy.group_id} if policy.group_id else set())
+            if groups == {group_id}:
+                names.append(policy.name)
+        return names
 
     async def delete_group(
         self,
@@ -184,6 +206,13 @@ class GroupService:
         actor_id: str,
     ) -> None:
         group = await self.get_group(session, organization_id, group_id)
+        blocking = await self._sole_group_of(session, organization_id, group.id)
+        if blocking:
+            # Removing its last group would leave "one approval from anyone". Make that an explicit edit.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Approval policy \"{blocking[0]}\" requires this group. Change or disable that policy first.",
+            )
         requirements = list(
             (
                 await session.scalars(

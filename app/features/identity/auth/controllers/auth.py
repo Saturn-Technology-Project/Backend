@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from app.shared.threads import in_thread
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -12,12 +13,12 @@ from app.core.rate_limit import (
     accept_invite_allowed,
     code_check_allowed,
     login_allowed,
-    login_failed,
+    login_succeeded,
     migration_allowed,
     reauth_allowed,
     signup_allowed,
 )
-from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep
+from app.features.identity.auth.controllers.deps import CurrentUser, SessionDep, require_same_origin
 from app.features.identity.auth.controllers.session_cookie import COOKIE_NAME, clear_session_cookie, set_session_cookie
 from app.features.mcp.servers.controllers.mcp_servers import serialize_mcp_server
 from app.features.tooling.tool_sets.controllers.tool_sets import serialize_tool_set
@@ -287,16 +288,16 @@ async def login_migration(body: LoginRequest, request: Request, session: Session
     if user is None or user.status != "active":
         from app.features.identity.auth.services.auth_service import _DUMMY_HASH
 
-        verify_password(body.password, _DUMMY_HASH)
+        await in_thread(verify_password, body.password, _DUMMY_HASH)
         return {}
     stored = user.password_hash
-    if verify_password(body.password, stored):
+    if await in_thread(verify_password, body.password, stored):
         return {}
-    if body.legacy_v1 and verify_password(body.legacy_v1, stored):
+    if body.legacy_v1 and await in_thread(verify_password, body.legacy_v1, stored):
         return {}
     from app.features.identity.auth.services.auth_service import legacy_password_allowed
 
-    if body.legacy_password and _pbkdf2_ok(body.legacy_password, stored):
+    if body.legacy_password and await in_thread(_pbkdf2_ok, body.legacy_password, stored):
         if not legacy_password_allowed():
             return {"migration": "reset"}
         return {}
@@ -323,9 +324,11 @@ async def login(body: LoginRequest, request: Request, response: Response, sessio
             legacy_v1=body.legacy_v1,
         )
     except HTTPException as exc:
-        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
-            login_failed(body.email)
+        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            # Not a wrong password, so it does not count against the account.
+            login_succeeded(body.email)
         raise
+    login_succeeded(body.email)
     pending = await _begin_mfa(session, user, body.locale)
     if pending is not None:
         return pending
@@ -539,7 +542,7 @@ async def reauthenticate(
     if not reauth_allowed(user.id):
         raise _too_many("900")
     if body.password:
-        if not verify_password(body.password, user.password_hash):
+        if not await in_thread(verify_password, body.password, user.password_hash):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
     elif body.code:
         await mfa_service.consume_reauth_code(session, user, body.code)
@@ -574,7 +577,24 @@ async def confirm_email_change(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
     _require_code_check(request, user.id)
+    from app.features.execution.activity.services import payload_key_service as keys
+
+    # Everything that can refuse the request is checked before the address changes.
+    rekey = body.current_password is not None or body.new_password is not None
+    if rekey:
+        await auth_service.check_rekey(user, body.current_password or "", body.new_password or "")
+    backup = await keys.prepare_member_backup(
+        session,
+        organization_id=user.organization_id,
+        user_id=user.id,
+        backup=body.member_backup.model_dump() if body.member_backup is not None and rekey else None,
+    )
     await mfa_service.confirm_email_change(session, user, body.current_code, body.next_code)
+    if rekey:
+        # The console derives the stored value from the password and the email. Keeping the old
+        # one would make the password stop working the moment the address changed.
+        await auth_service.store_password(user, body.new_password or "")
+        await keys.store_member_backup(session, backup)
     token = _presented_token(request, creds)
     await auth_service.revoke_user_sessions(
         session,
@@ -608,6 +628,10 @@ async def logout(
     session: SessionDep,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
+    if creds is None and request.cookies.get(COOKIE_NAME):
+        # The cookie is sent on cross-site requests too. Without this, any page could sign a
+        # visitor out, for example right before showing them a look-alike sign-in page.
+        require_same_origin(request)
     token = _presented_token(request, creds)
     if token:
         await auth_service.logout(session, token)
@@ -695,6 +719,16 @@ async def change_password(
     session: SessionDep,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
+    from app.features.execution.activity.services import payload_key_service as keys
+
+    # Checked before the password changes: a refused request is still committed, and a new
+    # password with the old backup would leave the member unable to open their own key.
+    backup = await keys.prepare_member_backup(
+        session,
+        organization_id=user.organization_id,
+        user_id=user.id,
+        backup=body.member_backup.model_dump() if body.member_backup is not None else None,
+    )
     await auth_service.change_password(
         session,
         user,
@@ -702,3 +736,4 @@ async def change_password(
         body.new_password,
         keep_token=_presented_token(request, creds) or None,
     )
+    await keys.store_member_backup(session, backup)

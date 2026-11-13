@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -376,13 +375,7 @@ async def activate_rotation(body: ActivateBody, session: SessionDep, user: Curre
 
 @router.post("/transfer")
 async def transfer_owner(body: TransferBody, session: SessionDep, user: CurrentUser, _team: TeamWrite):
-    key = await keys.active_key(session, user.organization_id)
-    if key is None or key.owner_user_id != user.id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the payload owner can transfer ownership")
-    envelope = await keys.own_envelope(session, organization_id=user.organization_id, user_id=body.user_id)
-    if envelope is None or envelope.org_key_version != key.version:
-        raise HTTPException(status.HTTP_409_CONFLICT, "The new owner has no envelope for the active key")
-    await keys._member(session, body.user_id, user.organization_id)
-    key.owner_user_id = body.user_id
-    await session.flush()
+    key = await keys.transfer_owner(
+        session, organization_id=user.organization_id, actor_user_id=user.id, user_id=body.user_id
+    )
     return {"owner_user_id": key.owner_user_id, "version": key.version}

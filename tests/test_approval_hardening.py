@@ -732,3 +732,55 @@ async def test_an_agent_cannot_flood_the_approval_queue(client, monkeypatch):
     assert "too_many_pending_approvals" in refused["error"]["message"]
     listed = await client.get("/approvals", params={"limit": 1})
     assert listed.status_code == 200 and len(listed.json()) == 1
+
+
+# Stored results ------------------------------------------------------------------------------------
+
+
+async def test_an_executed_result_is_stored_sealed_and_still_replays(client, monkeypatch):
+
+    from app.cli.seal_results import seal_plain_results
+    from app.models import Action
+    from app.schemas import ActionRead
+
+    calls, seen = {"n": 0}, []
+    people, _groups, access, agent_id = await _payments(client, monkeypatch, calls, seen)
+    body = await _request(client, access, agent_id, {"amount": 900})
+    approval_id = body["error"]["data"]["approval_id"]
+    run_id = body["error"]["data"]["saturnRunId"]
+    assert (await client.post(f"/approvals/{approval_id}/approve", headers=_auth(people[0][1]))).status_code == 200
+    ran = await _request(client, access, agent_id, {"amount": 900}, run_id=run_id)
+    assert ran["result"]["echo"] == {"amount": 900}
+
+    generator, session = await _db()
+    try:
+        action = (await session.scalars(select(Action).where(Action.run_id == run_id))).one()
+        # What the upstream answered is not readable in the database.
+        assert set(action.result) == {"sealed", "encryption"}
+        assert "echo" not in str(action.result) and "900" not in str(action.result)
+        # A run response carries a marker, not the result or its ciphertext.
+        assert ActionRead.model_validate(action).result == {"sealed": True}
+    finally:
+        await _close(generator)
+
+    # A repeated call is answered from the sealed copy and does not run again.
+    again = await _request(client, access, agent_id, {"amount": 900}, run_id=run_id)
+    assert again["result"]["echo"] == {"amount": 900}
+    assert calls["n"] == 1
+
+    # A row from before results were sealed is sealed by the one-off command, and still replays.
+    generator, session = await _db()
+    try:
+        action = (await session.scalars(select(Action).where(Action.run_id == run_id))).one()
+        action.result = {"echo": {"amount": 900}, "tool": "pay.send"}
+        await session.commit()
+        assert await seal_plain_results(session, apply=False) == 1
+        assert await seal_plain_results(session, apply=True) == 1
+        assert await seal_plain_results(session, apply=True) == 0
+        await session.refresh(action)
+        assert set(action.result) == {"sealed", "encryption"}
+    finally:
+        await _close(generator)
+    replay = await _request(client, access, agent_id, {"amount": 900}, run_id=run_id)
+    assert replay["result"]["echo"] == {"amount": 900}
+    assert calls["n"] == 1

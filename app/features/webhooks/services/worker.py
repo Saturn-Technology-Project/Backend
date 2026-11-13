@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from app.db.database import SessionLocal
-from app.features.execution.approvals.services.expiration import drop_expired_content, expire_due
+from app.features.execution.approvals.services.expiration import expire_due
 from app.features.webhooks.services.webhook_service import deliver_due
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,6 @@ async def run_webhook_worker() -> None:
         try:
             async with SessionLocal() as session:
                 await expire_due(session)
-                await drop_expired_content(session)
                 await deliver_due(session)
                 await session.commit()
         except asyncio.CancelledError:

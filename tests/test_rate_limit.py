@@ -134,12 +134,24 @@ def test_login_is_limited_per_account_across_addresses():
 
     results = []
     for n in range(12):
-        allowed = rate_limit.login_allowed(Request(f"10.0.0.{n}"), "victim@example.com")
-        results.append(allowed)
-        if allowed:
-            rate_limit.login_failed("victim@example.com")
+        # A wrong password: the slot login_allowed took is not given back.
+        results.append(rate_limit.login_allowed(Request(f"10.0.0.{n}"), "victim@example.com"))
     assert results[:10] == [True] * 10
     assert results[10:] == [False, False]
+
+
+def test_a_burst_of_guesses_cannot_pass_the_account_limit():
+    from app.core import rate_limit
+
+    class Request:
+        def __init__(self, ip: str) -> None:
+            self.headers = {"x-forwarded-for": ip}
+            self.client = None
+
+    # Thirty requests all checked before any password has been verified. Counting failures only
+    # afterwards let every one of them through.
+    in_flight = [rate_limit.login_allowed(Request(f"10.1.0.{n}"), "burst@example.com") for n in range(30)]
+    assert in_flight.count(True) == rate_limit.LOGIN_ACCOUNT_FAILURES
 
 
 def test_successful_sign_ins_do_not_count_against_the_account():
@@ -151,7 +163,43 @@ def test_successful_sign_ins_do_not_count_against_the_account():
             self.client = None
 
     # Fifteen good sign-ins from different addresses, none of them failures.
-    assert all(rate_limit.login_allowed(Request(f"10.3.0.{n}"), "busy@example.com") for n in range(15))
+    for n in range(15):
+        assert rate_limit.login_allowed(Request(f"10.3.0.{n}"), "busy@example.com")
+        rate_limit.login_succeeded("busy@example.com")
+
+
+def test_ipv6_addresses_are_counted_per_64(monkeypatch):
+    from app.core import rate_limit
+
+    monkeypatch.delenv("ORIGIN_AUTH_SECRET", raising=False)
+
+    class Request:
+        def __init__(self, ip: str) -> None:
+            self.headers = {"x-forwarded-for": ip}
+            self.client = None
+
+    assert rate_limit.limit_address(Request("2001:db8:1:2:aaaa::1")) == "2001:db8:1:2::/64"
+    assert rate_limit.limit_address(Request("2001:db8:1:2:ffff:ffff:ffff:ffff")) == "2001:db8:1:2::/64"
+    assert rate_limit.limit_address(Request("2001:db8:1:3::1")) == "2001:db8:1:3::/64"
+    assert rate_limit.limit_address(Request("203.0.113.8")) == "203.0.113.8"
+    assert rate_limit.limit_address(Request("::ffff:203.0.113.8")) == "203.0.113.8"
+    # One customer rotating through their own /64 shares a single login bucket.
+    answers = [rate_limit.login_allowed(Request(f"2001:db8:9:9::{n:x}")) for n in range(1, 26)]
+    assert answers.count(True) == rate_limit.MAX_HITS
+    # A different /64 is not affected.
+    assert rate_limit.login_allowed(Request("2001:db8:9:a::1")) is True
+
+
+def test_release_never_goes_below_zero_or_frees_more_than_it_took():
+    from app.core import rate_limit
+
+    rate_limit.release("nothing-here")
+    assert rate_limit.allow("slot", limit=1) is True
+    assert rate_limit.allow("slot", limit=1) is False
+    rate_limit.release("slot")
+    rate_limit.release("slot")
+    assert rate_limit.allow("slot", limit=1) is True
+    assert rate_limit.allow("slot", limit=1) is False
 
 
 def test_client_ip_trusts_the_console_address_only_with_the_console_secret(monkeypatch):

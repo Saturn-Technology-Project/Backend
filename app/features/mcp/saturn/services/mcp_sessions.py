@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 
 from app.core.config import get_settings
@@ -13,6 +14,15 @@ logger = logging.getLogger(__name__)
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
 CHANNEL = "saturn:mcp:events"
 SESSION_TTL = 86_400
+# What one process keeps in memory. A record is small, but nothing else ever removed one.
+MAX_LOCAL_SESSIONS = 10_000
+# Sessions one client may hold before it has an agent: an initialize that names no agent of
+# its own opens one each time, and those have no agent to be replaced by.
+MAX_UNBOUND_PER_CLIENT = 4
+# With Redis, a local record is only a cache of the Redis one and can be rebuilt from it.
+LOCAL_CACHE_IDLE = 900
+# Every notice says the same thing ("the tool list changed"), so a few waiting are plenty.
+MAX_QUEUED_NOTICES = 16
 
 
 @dataclass
@@ -21,7 +31,8 @@ class McpSession:
     user_id: str
     agent_id: str
     client_id: str
-    queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=MAX_QUEUED_NOTICES))
+    touched: float = field(default_factory=time.monotonic)
 
 
 class McpSessionHub:
@@ -184,12 +195,36 @@ class McpSessionHub:
             client_id=client_id,
         )
         self._items[session_id] = record
+        self._trim(record)
         return record
+
+    def _trim(self, newest: McpSession) -> None:
+        """Keep the in-memory records bounded. The newest one is never the one removed."""
+        now = time.monotonic()
+        idle_limit = LOCAL_CACHE_IDLE if self._redis is not None else SESSION_TTL
+        unbound: list[str] = []
+        for sid, item in list(self._items.items()):
+            if item is newest:
+                continue
+            if now - item.touched > idle_limit:
+                self._close_local(sid)
+            elif not item.agent_id and item.user_id == newest.user_id and item.client_id == newest.client_id:
+                unbound.append(sid)
+        if not newest.agent_id:
+            # Oldest first: dicts keep insertion order.
+            for sid in unbound[: max(0, len(unbound) + 1 - MAX_UNBOUND_PER_CLIENT)]:
+                self._close_local(sid)
+        while len(self._items) > MAX_LOCAL_SESSIONS:
+            oldest = next(iter(self._items))
+            if self._items[oldest] is newest:
+                break
+            self._close_local(oldest)
 
     def _local_get(self, session_id: str, user_id: str, client_id: str) -> McpSession | None:
         record = self._items.get(session_id)
         if record is None or record.user_id != user_id or record.client_id != client_id:
             return None
+        record.touched = time.monotonic()
         return record
 
     def _notify_local(self, agent_ids: list[str]) -> None:
@@ -198,12 +233,26 @@ class McpSessionHub:
             return
         for record in self._items.values():
             if record.agent_id in wanted:
-                record.queue.put_nowait(dict(LIST_CHANGED))
+                try:
+                    record.queue.put_nowait(dict(LIST_CHANGED))
+                except asyncio.QueueFull:
+                    # Nobody is reading this stream. The notices already waiting say the same thing.
+                    pass
 
     def _close_local(self, session_id: str) -> None:
         record = self._items.pop(session_id, None)
-        if record is not None:
-            record.queue.put_nowait(None)
+        if record is None:
+            return
+        # The end marker must get through even when the queue is full of unread notices.
+        while True:
+            try:
+                record.queue.put_nowait(None)
+                return
+            except asyncio.QueueFull:
+                try:
+                    record.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
 
     async def _listen(self) -> None:
         assert self._redis is not None

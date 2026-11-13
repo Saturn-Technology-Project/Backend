@@ -7,6 +7,7 @@ from datetime import timedelta, timezone
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from app.shared.threads import in_thread
 from fastapi import HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -151,10 +152,10 @@ class AuthService:
         user = result.scalar_one_or_none()
         stored = user.password_hash if user is not None else _DUMMY_HASH
         active = user is not None and user.status == "active"
-        ok = verify_password(password, stored) and active
-        if not ok and active and legacy_v1 and verify_password(legacy_v1, stored):
+        ok = await in_thread(verify_password, password, stored) and active
+        if not ok and active and legacy_v1 and await in_thread(verify_password, legacy_v1, stored):
             ok = True
-        legacy_match = bool(active and legacy_password and _pbkdf2_ok(legacy_password, stored))
+        legacy_match = bool(active and legacy_password and await in_thread(_pbkdf2_ok, legacy_password, stored))
         if not ok and legacy_match and legacy_password_allowed():
             ok = True
         if not ok or user is None:
@@ -174,7 +175,7 @@ class AuthService:
         # Only a v2 verifier replaces the stored hash. A v1 sign-in keeps the old hash so the
         # browser can still prove it and move the account onto the split key.
         if password.startswith(_V2_PREFIX) and not _stores_verifier(user.password_hash, password):
-            user.password_hash = hash_password(password)
+            user.password_hash = await in_thread(hash_password, password)
             await session.flush()
         return user
 
@@ -288,7 +289,7 @@ class AuthService:
         await consume(session, request, "reset", normalized)
         user = await self._active_user(session, normalized)
         if user is None:
-            hash_password(f"{secrets.randbelow(1_000_000):06d}")
+            await in_thread(hash_password, f"{secrets.randbelow(1_000_000):06d}")
             return None
         open_codes = await session.execute(
             select(PasswordReset).where(
@@ -304,7 +305,7 @@ class AuthService:
             PasswordReset(
                 id=new_id("rst"),
                 email=normalized,
-                code_hash=hash_password(code),
+                code_hash=await in_thread(hash_password, code),
                 expires_at=now + timedelta(minutes=10),
                 attempts=0,
             )
@@ -350,7 +351,7 @@ class AuthService:
         from app.features.identity.auth.services.attempts import reserve_attempt
 
         used = await reserve_attempt(session, record, "attempts", 5)
-        if used is None or not verify_password(code.strip(), record.code_hash):
+        if used is None or not await in_thread(verify_password, code.strip(), record.code_hash):
             if used is None or used >= 5:
                 record.used_at = now
             await session.flush()
@@ -360,7 +361,7 @@ class AuthService:
             record.used_at = now
             await session.flush()
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
-        user.password_hash = hash_password(password)
+        user.password_hash = await in_thread(hash_password, password)
         record.used_at = now
         await self.revoke_user_sessions(session, user.id)
         await self._revoke_oauth(session, user.id)
@@ -378,15 +379,28 @@ class AuthService:
 
         if not reauth_allowed(user.id):
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts", headers={"Retry-After": "900"})
-        if not verify_password(current_password, user.password_hash):
+        if not await in_thread(verify_password, current_password, user.password_hash):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
         self._require_password(new_password)
-        user.password_hash = hash_password(new_password)
+        user.password_hash = await in_thread(hash_password, new_password)
         keep_hash = hash_token(keep_token) if keep_token else None
         await self.revoke_user_sessions(session, user.id, keep_hash=keep_hash)
         if keep_token:
             await self.mark_session_authenticated(session, keep_token)
         await self._revoke_oauth(session, user.id)
+
+    async def check_rekey(self, user: User, current_password: str, new_password: str) -> None:
+        """Whether the caller may replace the stored password value. Changes nothing."""
+        from app.core.rate_limit import reauth_allowed
+
+        if not reauth_allowed(user.id):
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts", headers={"Retry-After": "900"})
+        if not current_password or not await in_thread(verify_password, current_password, user.password_hash):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
+        self._require_password(new_password)
+
+    async def store_password(self, user: User, new_password: str) -> None:
+        user.password_hash = await in_thread(hash_password, new_password)
 
     async def _session_record(self, session: AsyncSession, token: str) -> AuthSession | None:
         if not token:
@@ -458,7 +472,7 @@ class AuthService:
                 organization_id=org.id,
                 email=email,
                 name=(settings.seed_user_name or "Admin").strip() or "Admin",
-                password_hash=hash_password(password),
+                password_hash=await in_thread(hash_password, password),
                 status="active",
                 is_platform_admin=True,
             )

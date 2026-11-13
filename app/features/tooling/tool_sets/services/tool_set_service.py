@@ -103,8 +103,10 @@ class ToolSetService:
         await session.flush()
         return await self._load(session, tool_set.id)
 
-    async def delete(self, session: AsyncSession, user: User, tool_set_id: str) -> None:
+    async def delete(self, session: AsyncSession, user: User, tool_set_id: str) -> dict:
+        """Remove the set. Returns its name and the agents that lost it, for the audit record."""
         tool_set = await self._owned(session, user, tool_set_id)
+        name = tool_set.name
         agent_ids = list(
             await session.scalars(select(Agent.id).where(Agent.tool_set_id == tool_set.id))
         )
@@ -114,6 +116,7 @@ class ToolSetService:
         await session.delete(tool_set)
         await session.flush()
         await self._notify_tools(agent_ids)
+        return {"name": name, "agent_ids": sorted(agent_ids)}
 
     def owns_profile(self, user: User, agent: Agent) -> bool:
         if str((agent.settings or {}).get("origin") or "") != "saturn_mcp":
@@ -146,6 +149,19 @@ class ToolSetService:
         else:
             agent.tool_set_id = None
         if agent.tool_set_id != previous:
+            from app.core.enums import AuditEvent
+            from app.features.execution.activity.services.change_log import record_change
+
+            # This is what decides which tools an agent can see, so who changed it is kept.
+            await record_change(
+                session,
+                user,
+                AuditEvent.TOOL_SET_ASSIGNED,
+                result=agent.name,
+                agent_id=agent.id,
+                tool_set_id=agent.tool_set_id or "",
+                previous_tool_set_id=previous or "",
+            )
             await self._notify_tools([agent.id])
 
     async def _replace_items(self, session: AsyncSession, user: User, tool_set: ToolSet, items: list[dict]) -> None:

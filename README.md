@@ -8,7 +8,7 @@ Agents call one MCP endpoint. Saturn shows each agent only its tool set, checks 
 
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE.md)
 ![Python](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688.svg?logo=fastapi&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.162-009688.svg?logo=fastapi&logoColor=white)
 [![Test](https://github.com/Saturn-Technology-Project/Saturn-MCP-Backend/actions/workflows/test.yml/badge.svg)](https://github.com/Saturn-Technology-Project/Saturn-MCP-Backend/actions/workflows/test.yml)
 
 [Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [Policies](#policies-and-approvals) · [Security](#security) · [Configuration](#configuration) · [Deploy](#deploy) · [中文](README_ZH.md)
@@ -80,7 +80,7 @@ flowchart LR
 | **Execute** | Once approved (or allowed), the call is claimed atomically and sent to the upstream MCP server with its credential from the vault. | `features/mcp/servers`, `features/credentials` |
 | **Audit** | Each step (`tool_requested`, `policy_evaluated`, `approval_requested`, `approval_granted`, `execution_claimed`, `tool_executed`, …) is written to the audit log. | `features/execution/activity` |
 
-Agent wallets and x402 payments were part of this loop earlier. Migration `039_drop_wallets_x402` removed them; the empty `billing/wallets` and `billing/x402` packages are what is left.
+Agent wallets and x402 payments were part of this loop earlier. Migration `039_drop_wallets_x402` removed them.
 
 ### Layout
 
@@ -276,6 +276,12 @@ Settings come from the environment (or `.env`); see `.env.example`. App settings
 |---|---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://saturn:saturn@localhost:5432/saturn` | Database. Compose sets it from `POSTGRES_PASSWORD`. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Rate limits and MCP sessions. Compose sets it from `REDIS_PASSWORD`. |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | Connections each process keeps, and how many more it may open under load. Instances × the sum must stay under the database's connection limit. |
+| `DB_POOL_TIMEOUT` | `10` | Seconds a request waits for a free connection before it fails |
+| `DB_POOL_RECYCLE` | `1800` | Seconds before a pooled connection is replaced |
+| `DB_COMMAND_TIMEOUT` | `60` | Seconds one statement may run. `0` turns the limit off. |
+| `LOG_LEVEL` | `INFO` | Lowest level written to stdout |
+| `LOG_FORMAT` | `json` on Cloud Run, `text` elsewhere | One JSON object per line with `severity`, `request_id` and the Cloud Trace id, or plain text. Each request is logged once with method, path, status and duration; the query string is never logged. |
 | `DEFAULT_ORG_ID` | `org_saturn` | ID of the bootstrap organization |
 | `DEFAULT_ACTOR_ID` | `user_operator` | ID of the bootstrap platform admin |
 | `SEED_USER_EMAIL` / `SEED_USER_PASSWORD` | empty | Create the platform admin on first boot; empty skips seeding. On Cloud Run the password must be 16 characters or more. |
@@ -333,7 +339,9 @@ Credentials and upstream OAuth tokens are sealed with ML-KEM-1024 and AES-256-GC
 
 ### Audit content
 
-Tool arguments, raw requests and upstream responses in the audit log are encrypted to the organization's ML-KEM-1024 payload key and to the keys of approved members. The server encapsulates a data key to each public key and discards it; it never stores or accepts an organization private key, a member private key or a recovery key (`/org/payload-keys`). If no key is registered, that content is not stored. Platform admin responses never receive it. When an organization has no payload key, the arguments a pending approval will run are sealed with a per-organization key derived from KMS instead, and the digest that binds an approval to them is an HMAC with a KMS-derived key, so a database copy cannot be used to confirm guesses such as an amount.
+Tool arguments, raw requests and upstream responses in the audit log are encrypted to the organization's ML-KEM-1024 payload key and to the keys of approved members. The server encapsulates a data key to each public key and discards it; it never stores or accepts an organization private key, a member private key or a recovery key (`/org/payload-keys`). If no key is registered, that content is not stored. Platform admin responses never receive it. When an organization has no payload key, the arguments a pending approval will run are sealed with a per-organization key derived from KMS instead, and the digest that binds an approval to them is an HMAC with a KMS-derived key, so a database copy cannot be used to confirm guesses such as an amount. The result an approved call keeps for replays is sealed the same way; `python -m app.cli.seal_results --apply` seals the ones older versions stored readable.
+
+Changes to the rules are recorded too: creating, editing, activating, pausing or deleting a policy, changing a tool set or assigning one to an agent, inviting a member or changing their role, status or assignments, and removing an agent or MCP server. `GET /activity/changes` lists them for members with team access. These records hold ids, names and before/after states, never tool content.
 
 ### Network exposure
 
@@ -341,6 +349,7 @@ Tool arguments, raw requests and upstream responses in the audit log are encrypt
 - **Inbound.** On Cloud Run every request except `/healthz` must carry `ORIGIN_AUTH_SECRET`, so only the edge proxy can reach the service. `/healthz` reports only up or down.
 - **Client addresses.** uvicorn does not trust `X-Forwarded-*` from any peer but 127.0.0.1. Rate limits use `CF-Connecting-IP` only when origin auth proves the request came through Cloudflare, otherwise the rightmost `X-Forwarded-For` entry.
 - **Rate limits** are counted in Redis and fail closed: if Redis cannot be reached, limited routes refuse the request.
+- **Request size.** A request body over 4 MiB is refused, and over 64 KiB on the sign-in and OAuth routes, before any handler reads it.
 - **Headers.** Every response carries a restrictive Content-Security-Policy (`default-src 'none'` for the API, a per-request nonce for the OAuth pages), `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer` and a Permissions-Policy; HTTPS responses add HSTS. Unhandled errors return a generic 500.
 - **Local.** Compose binds Postgres and Redis to 127.0.0.1 and requires passwords for both.
 
@@ -357,7 +366,7 @@ pytest
 
 Tests run against in-memory SQLite with `IN_PROCESS_RUNTIME=true` and a fixed local vault key, so they need no Postgres, Redis, KMS or network. Pytest loads a local catalog fixture (`tests/catalog.py`) so the execution-loop tests do not depend on production seed data. DNS for MCP endpoints is stubbed to a public address.
 
-The [Test workflow](.github/workflows/test.yml) runs on every push to `main` and every pull request: gitleaks over the tree and the full history (the binary checked against a pinned SHA-256), then the hashed install and `pytest`.
+The [Test workflow](.github/workflows/test.yml) runs on every push to `main` and every pull request: gitleaks over the tree and the full history (the binary checked against a pinned SHA-256), then the hashed install, `ruff check`, `pip-audit` on the production lock, and `pytest`. A second job applies every migration to PostgreSQL 16, then reverses and reapplies the newest one.
 
 ## Dependencies and supply chain
 

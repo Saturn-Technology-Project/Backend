@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.ids import new_id, utcnow
+from app.core.ids import new_id
 from app.models import Agent, Employee, User
 from app.core.enums import ActorType, AuditEvent
 from app.schemas import AgentUpdate

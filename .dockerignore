@@ -22,3 +22,4 @@ docker-compose.yml
 docs
 cloud-run*.env.yaml
 pytest.ini
+ruff.toml

@@ -21,6 +21,13 @@ _METADATA_HOSTS = frozenset(
 WEBHOOK_PORT = 443
 
 
+class WebhookUnresolved(HTTPException):
+    """The host name did not resolve just now. Unlike a refused address, this can pass on a retry."""
+
+    def __init__(self) -> None:
+        super().__init__(status.HTTP_400_BAD_REQUEST, "Webhook URL could not be resolved")
+
+
 @dataclass(frozen=True)
 class PinnedTarget:
     """Where a delivery connects: the checked IP, with the hostname kept for Host, SNI and the certificate."""
@@ -62,15 +69,22 @@ def _allowed_addresses(host: str) -> list[str]:
     try:
         found = mcp_endpoint.addresses_for(host, WEBHOOK_PORT)
     except HTTPException:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Webhook URL could not be resolved") from None
+        raise WebhookUnresolved() from None
     if not found or any(mcp_endpoint.address_blocked(item) for item in found):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Webhook URL address is not allowed")
     return found
 
 
 def require_webhook_url(url: str) -> str:
+    """Check the URL and resolve its host. This blocks on DNS: call it through asyncio.to_thread."""
     raw, _parts, host = _split(url)
     _allowed_addresses(host)
+    return raw
+
+
+def require_webhook_shape(url: str) -> str:
+    """The checks that need no network: scheme, port, credentials and refused host names."""
+    raw, _parts, _host = _split(url)
     return raw
 
 

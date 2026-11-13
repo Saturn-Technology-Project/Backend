@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, HTTPException, Request
@@ -8,7 +9,9 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import get_settings
+from app.core.body_limit import BodyLimitMiddleware
 from app.core.http_security import HttpSecurityMiddleware
+from app.core.logs import RequestLogMiddleware, configure_logging
 from app.core.origin_auth import OriginAuthMiddleware
 from app.features.agent.agents.routes import router as agents_router
 from app.features.billing.payments.routes import router as payments_router
@@ -34,11 +37,16 @@ from app.db.seed import seed_if_empty
 from app.models import *  # noqa: F401,F403
 
 settings = get_settings()
+configure_logging()
 
 
 def _cors_origins() -> list[str]:
     raw = (settings.cors_origins or "").strip()
     if not raw:
+        # On Cloud Run the setting keeps https origins only. If that leaves nothing, trust
+        # nothing: falling back to localhost would trust any page a user runs on their own machine.
+        if os.environ.get("K_SERVICE", "").strip():
+            return []
         return ["http://localhost:3000", "http://localhost:3001"]
     if raw == "*":
         return ["*"]
@@ -98,6 +106,9 @@ app = FastAPI(
 )
 
 _origins = _cors_origins()
+# Added first, so it is the innermost layer: it runs after the origin check, the security
+# headers and CORS, and its 413 answers carry their headers.
+app.add_middleware(BodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
@@ -107,10 +118,15 @@ app.add_middleware(
 )
 app.add_middleware(HttpSecurityMiddleware)
 app.add_middleware(OriginAuthMiddleware)
+# Added last, so it is the outermost layer: every request gets an id and a log line,
+# including the ones the origin check refuses.
+app.add_middleware(RequestLogMiddleware)
 
 
 @app.exception_handler(Exception)
 async def unhandled_error(_request: Request, exc: Exception):
+    # RequestLogMiddleware answers and logs unexpected errors. This stays as the last resort for
+    # anything raised outside it.
     if isinstance(exc, (HTTPException, StarletteHTTPException)):
         raise exc
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})

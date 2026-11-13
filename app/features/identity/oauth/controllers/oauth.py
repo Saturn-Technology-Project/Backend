@@ -31,7 +31,7 @@ from app.features.identity.oauth.services.oauth_service import (
     oauth_service,
     redirect_allowed,
 )
-from app.features.organization.org.services.plans import profile_identity
+from app.features.organization.org.services.plans import profile_identity, suspended
 from app.models import Agent, Policy, ToolSet, ToolSetItem
 
 router = APIRouter(tags=["oauth"])
@@ -128,7 +128,9 @@ def _page(title: str, body: str, status_code: int = 200, *, wide: bool = False, 
 <body><main>{body}</main>
 <script nonce="{nonce}">{_ONE_SUBMIT}</script></body>
 </html>"""
-    return HTMLResponse(html, status_code=status_code)
+    # Sign-in and consent pages carry per-request tokens and must not be kept by a cache or
+    # shown again from the browser's back button after sign-out.
+    return HTMLResponse(html, status_code=status_code, headers={"Cache-Control": "no-store"})
 
 
 def _hidden(fields: dict[str, str]) -> str:
@@ -334,23 +336,32 @@ async def authorization_server_metadata(request: Request) -> dict:
     return metadata(origin_of(request))
 
 
+MAX_REDIRECT_URI_LENGTH = 2048
+
+
 @router.post("/oauth/register", status_code=201)
 async def register_client(request: Request, session: SessionDep) -> dict:
     if not registration_allowed(request):
         raise HTTPException(status_code=429, detail="Too many registrations", headers={"Retry-After": "600"})
     try:
         body = await request.json()
+    except HTTPException:
+        # The body limit. Say so instead of answering as if the body were empty.
+        raise
     except Exception:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    name = str(body.get("client_name") or "Agent").strip() or "Agent"
+    name = str(body.get("client_name") or "Agent").strip()[:255] or "Agent"
     uris = body.get("redirect_uris")
     if not isinstance(uris, list) or not uris or len(uris) > 8:
         raise HTTPException(400, "redirect_uris are required")
     cleaned = []
     for item in uris:
         uri = str(item or "").strip()
+        # Anyone can register a client, and each one is stored and read back on every authorize.
+        if len(uri) > MAX_REDIRECT_URI_LENGTH:
+            raise HTTPException(400, "redirect_uri is too long")
         if not redirect_allowed(uri):
             raise HTTPException(400, "redirect_uri must be https, localhost, or an app callback")
         cleaned.append(uri)
@@ -394,6 +405,8 @@ async def authorize(request: Request, session: SessionDep):
         return _page("Saturn", "<h1>無法連線</h1><p>This sign-in request is invalid. Start again from the agent.</p>", 400)
     token, _csrf = _cookie_parts(request)
     user = await auth_service.user_from_token(session, token, purpose=_SESSION_PURPOSE) if token else None
+    if user is not None and suspended(user.organization):
+        return _page("Saturn", "<h1>無法連線</h1><p>This organization is suspended. Agents cannot connect to it.</p>", 403)
     if user is None or user.organization is None:
         return _page(
             "Connect Agents",
@@ -534,6 +547,25 @@ def _code_page(fields: dict[str, str], challenge: str, method: str, *, passkey: 
     )
 
 
+def _cross_site(request: Request):
+    """Refuse a sign-in form posted from another site.
+
+    These forms only ever come from this origin's own sign-in page. Without this, a page on any
+    site could post an attacker's credentials from the victim's browser and leave the attacker's
+    consent session behind; the victim's next agent would then be connected to the attacker's
+    workspace. A browser states where a POST came from, and a cross-site one cannot hide it.
+    Clients that send neither header are not browsers and cannot be used this way.
+    """
+    from app.features.identity.auth.controllers.deps import _origin_of, _trusted_origins
+
+    site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    origin = (request.headers.get("origin") or "").strip()
+    foreign = site == "cross-site" or (bool(origin) and _origin_of(origin) not in _trusted_origins(request))
+    if not foreign:
+        return None
+    return _page("Saturn", "<h1>無法連線</h1><p>Start again from the agent to sign in.</p>", 403)
+
+
 async def _consent_redirect(session, request: Request, user, fields: dict[str, str]) -> RedirectResponse:
     # A short session that only the consent pages accept. It is not a console or API session.
     token, _user = await auth_service.issue_session(session, user, purpose=_SESSION_PURPOSE, ttl=OAUTH_SESSION_TTL)
@@ -549,8 +581,11 @@ def _posted_fields(form: dict[str, str]) -> dict[str, str]:
 
 @router.post("/oauth/login")
 async def oauth_login(request: Request, session: SessionDep):
-    from app.core.rate_limit import login_allowed, login_failed
+    from app.core.rate_limit import login_allowed, login_succeeded
 
+    refused = _cross_site(request)
+    if refused is not None:
+        return refused
     form = await _posted(request)
     if not login_allowed(request, form.get("email", "")):
         return _page("Connect Agents", "<h1>請稍後再試</h1><p>Too many sign-in attempts.</p>", 429)
@@ -564,8 +599,8 @@ async def oauth_login(request: Request, session: SessionDep):
             legacy_v1=form.get("legacy_v1") or None,
         )
     except HTTPException:
-        login_failed(form.get("email", ""))
         return _page("Connect Agents", "<h1>登入失敗</h1><p>Email or password is incorrect.</p>", 401)
+    login_succeeded(form.get("email", ""))
     try:
         # The same factors as the console sign-in. An emailed code is never added as a fallback.
         pending = await mfa_service.start_login(session, user)
@@ -591,6 +626,9 @@ async def oauth_login(request: Request, session: SessionDep):
 async def oauth_login_code(request: Request, session: SessionDep):
     from app.core.rate_limit import code_check_allowed
 
+    refused = _cross_site(request)
+    if refused is not None:
+        return refused
     form = await _posted(request)
     fields = _posted_fields(form)
     if not code_check_allowed(request):

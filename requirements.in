@@ -6,32 +6,34 @@
 #     --generate-hashes --exclude-newer "$EXCLUDE_NEWER" -o requirements.txt
 #   uv pip compile requirements-dev.in --universal --python-version 3.12 \
 #     --generate-hashes --exclude-newer "$EXCLUDE_NEWER" -o requirements-dev.txt
-# For the pyasn1 security fix released within that window, include
-# `--exclude-newer-package pyasn1=2026-11-04T00:00:00Z` in both commands.
+# For security fixes released within that window, include in both commands:
+#   --exclude-newer-package pyasn1=2026-11-04T00:00:00Z
+#   --exclude-newer-package pydantic=2026-10-30T00:00:00Z
+#   --exclude-newer-package pydantic-core=2026-10-30T00:00:00Z
+# (pydantic 2.14.2 fixes GHSA-qpmf-fgh3-ff25 and GHSA-3r8g-cqwr-jr29.)
 #
 # Install with `pip install --require-hashes -r requirements.txt`.
 # Test-only packages live in requirements-dev.in.
-fastapi==0.141.1
+fastapi==0.162.0
 # fastapi allows any starlette >=0.46. Pin it explicitly so the version that
 # carries the Host-header and FileResponse Range fixes cannot float.
-starlette==1.7.0
-uvicorn[standard]==0.34.0
-sqlalchemy==2.0.38
-asyncpg==0.30.0
-alembic==1.14.1
-pydantic==2.14.1
-pydantic-settings==2.8.1
+starlette==1.10.0
+uvicorn[standard]==0.54.0
+sqlalchemy==2.1.6
+asyncpg==0.32.0
+alembic==1.20.1
+pydantic==2.14.2
+pydantic-settings==2.16.2
 python-dotenv==1.2.4
-greenlet==3.1.1
+greenlet==3.5.6
 httpx==0.28.1
-eval-type-backport==0.2.2
 cryptography==50.0.2
 argon2-cffi==25.1.0
 webauthn==3.0.1
 google-cloud-secret-manager==2.31.0
 google-cloud-kms==3.18.0
-redis==5.2.1
+redis==8.1.0
 # Security fixes for shared TLS trust and parsers used by transitive dependencies.
-certifi==2026.10.19
+certifi==2026.10.23
 opentelemetry-api==1.45.1
 pyasn1==0.6.5

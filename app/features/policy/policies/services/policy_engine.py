@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Agent, Policy, PolicyRule, Tool
+from app.models import Agent, ApprovalPolicy, ApprovalRequirement, Policy, PolicyRule, Tool
 from app.core.enums import PolicyDecision
 
 _CONDITION = re.compile(
@@ -56,6 +56,9 @@ class EvaluationResult:
     matched_rule_id: str | None = None
     reason: str | None = None
     approval_policy_id: str | None = None
+    # Other approval-required matches that name a different approval policy. These functions
+    # cannot read approval policies, so evaluate_named picks the strictest of them afterwards.
+    alternatives: tuple["EvaluationResult", ...] = ()
 
 
 def normalize_decision(raw: str) -> PolicyDecision:
@@ -438,7 +441,17 @@ def evaluate_graph_rules(
     # A restriction the engine cannot rule out counts as matched, so it can only make the result stricter.
     matched = [rule for rule, truth in truths if truth is True or (truth is None and _restrictive(rule))]
     winner = max(matched, key=lambda rule: _RESTRICTIVENESS[normalize_decision(rule.decision)])
-    return _result_for(winner, arguments)
+    result = _result_for(winner, arguments)
+    if result.decision != PolicyDecision.APPROVAL_REQUIRED:
+        return result
+    others = tuple(
+        _result_for(rule, arguments)
+        for rule in matched
+        if rule is not winner
+        and normalize_decision(rule.decision) == PolicyDecision.APPROVAL_REQUIRED
+        and _linked_approval_policy(rule) != result.approval_policy_id
+    )
+    return replace(result, alternatives=others)
 
 
 def merge_results(results: list[EvaluationResult]) -> EvaluationResult:
@@ -451,13 +464,37 @@ def merge_results(results: list[EvaluationResult]) -> EvaluationResult:
     # Most restrictive wins. Between equally restrictive opinions, one that names
     # an approval policy beats one that does not, so a generic approval from
     # another policy cannot drop a stricter linked approval policy.
-    return max(
+    best = max(
         results,
         key=lambda item: (
             _RESTRICTIVENESS[item.decision],
             bool(item.approval_policy_id),
             bool(item.policy_id),
         ),
+    )
+    if best.decision != PolicyDecision.APPROVAL_REQUIRED:
+        return best
+    # Keep every other approval policy that was asked for, so the caller can compare them.
+    seen = {best.approval_policy_id}
+    others: list[EvaluationResult] = []
+    for item in results:
+        for candidate in (item, *item.alternatives):
+            if candidate.decision != PolicyDecision.APPROVAL_REQUIRED or candidate.approval_policy_id in seen:
+                continue
+            seen.add(candidate.approval_policy_id)
+            others.append(replace(candidate, alternatives=()))
+    return replace(best, alternatives=tuple(others))
+
+
+def _stamp(opinion: EvaluationResult, policy: Policy) -> EvaluationResult:
+    fields = {"policy_name": policy.name, "policy_version": policy.version or 1}
+    return replace(
+        opinion,
+        policy_id=opinion.policy_id or policy.id,
+        alternatives=tuple(
+            replace(item, policy_id=item.policy_id or policy.id, **fields) for item in opinion.alternatives
+        ),
+        **fields,
     )
 
 
@@ -509,36 +546,67 @@ class PolicyEngine:
             if definition and definition.get("nodes"):
                 if not tool_rules:
                     continue
-                opinion = evaluate_graph_rules(tool_rules, arguments, agent.id)
-                opinions.append(
-                    replace(
-                        opinion,
-                        policy_id=opinion.policy_id or policy.id,
-                        policy_name=policy.name,
-                        policy_version=policy.version or 1,
-                    )
-                )
+                opinions.append(_stamp(evaluate_graph_rules(tool_rules, arguments, agent.id), policy))
             elif tool_rules:
                 # Each legacy policy reaches its own decision, first match by
                 # position inside that policy only. Positions are never compared
                 # across policies, so one policy's priority cannot pre-empt
                 # another's rules; the merge below keeps the most restrictive.
-                opinion = evaluate_rules(tool_rules, arguments)
-                opinions.append(
-                    replace(
-                        opinion,
-                        policy_id=opinion.policy_id or policy.id,
-                        policy_name=policy.name,
-                        policy_version=policy.version or 1,
-                    )
-                )
+                opinions.append(_stamp(evaluate_rules(tool_rules, arguments), policy))
         if not opinions and applicable:
             opinions.append(EvaluationResult(decision=PolicyDecision.DENY, reason="No policy rule"))
         result = merge_results(opinions)
+        if result.alternatives:
+            result = await self._strictest_approval(session, organization_id, result)
         if result.policy_id and result.policy_id in applicable and result.policy_name is None:
             policy = applicable[result.policy_id]
             result = replace(result, policy_version=policy.version or 1, policy_name=policy.name)
         return result
+
+    async def _strictest_approval(
+        self, session: AsyncSession, organization_id: str, result: EvaluationResult
+    ) -> EvaluationResult:
+        """Several matching rules asked for approval under different approval policies.
+
+        The one that needs the most approvers wins, then the one with more group requirements,
+        then one that bars the requester. An equal pair keeps the engine's original pick, so the
+        answer is the same when the request is checked again at approval and at execution.
+        """
+        candidates = [replace(result, alternatives=()), *result.alternatives]
+        ids = {item.approval_policy_id for item in candidates if item.approval_policy_id}
+        policies: dict[str, ApprovalPolicy] = {}
+        needed: dict[str, list[int]] = {}
+        if ids:
+            rows = await session.scalars(
+                select(ApprovalPolicy).where(
+                    ApprovalPolicy.organization_id == organization_id,
+                    ApprovalPolicy.id.in_(ids),
+                    ApprovalPolicy.status == "active",
+                )
+            )
+            policies = {row.id: row for row in rows}
+        if policies:
+            requirements = await session.scalars(
+                select(ApprovalRequirement).where(ApprovalRequirement.approval_policy_id.in_(policies))
+            )
+            for item in requirements:
+                needed.setdefault(item.approval_policy_id, []).append(int(item.required_count or 0))
+
+        def strictness(item: EvaluationResult) -> tuple[int, int, int]:
+            if not item.approval_policy_id:
+                # One approver, who may be the requester.
+                return (1, 0, 0)
+            policy = policies.get(item.approval_policy_id)
+            if policy is None:
+                # Gone or turned off: the request falls back to one approver who is not the requester.
+                return (1, 0, 1)
+            counts = needed.get(policy.id) or []
+            if counts:
+                return (sum(counts), len(counts), 0 if policy.allow_requester else 1)
+            groups = 1 if policy.group_id else 0
+            return (max(int(policy.required_count or 1), 1), groups, 0 if policy.allow_requester else 1)
+
+        return max(candidates, key=strictness)
 
     async def _policies(self, session: AsyncSession, organization_id: str) -> list[Policy]:
         result = await session.execute(

@@ -5,7 +5,6 @@ from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.ids import utcnow

@@ -17,6 +17,15 @@ _hits: dict[str, list[float]] = defaultdict(list)
 _calls = 0
 _redis = None
 
+# Give one hit back, never below zero and never creating the key.
+_DECR_FLOOR = """
+local count = tonumber(redis.call('GET', KEYS[1]) or '0')
+if count > 0 then
+  return redis.call('DECR', KEYS[1])
+end
+return 0
+"""
+
 # INCR and EXPIRE in one step, so a key can never be left without a TTL.
 _INCR_WITH_TTL = """
 local count = redis.call('INCR', KEYS[1])
@@ -83,6 +92,25 @@ def client_ip(request: Request) -> str:
     if request.client is not None and request.client.host:
         return request.client.host
     return "unknown"
+
+
+def limit_address(request: Request) -> str:
+    """The address a limit is counted against.
+
+    One IPv6 customer is normally given a whole /64, and can pick any of its 2^64 addresses per
+    request. Counting each address separately would give them unlimited buckets, so IPv6 is
+    counted per /64. An IPv4 address written as IPv6 is counted as that IPv4 address.
+    """
+    value = client_ip(request)
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return value
+    if address.version == 4:
+        return str(address)
+    if address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    return f"{ipaddress.ip_network(f'{address}/64', strict=False).network_address}/64"
 
 
 def _use_redis() -> bool:
@@ -163,35 +191,60 @@ def allow(key: str, *, limit: int = MAX_HITS, window: int = WINDOW_SECONDS) -> b
     return _memory_allow(key, limit=limit, window=window)
 
 
+def release(key: str) -> None:
+    """Hand back one hit that allow() counted. Used when the attempt turned out not to be a failure."""
+    if _use_redis():
+        try:
+            _redis_client().eval(_DECR_FLOOR, 1, f"saturn:rate:{key}")
+        except Exception:  # noqa: S110
+            # The hit stays counted and expires with its window: the safe direction.
+            pass
+        return
+    bucket = _hits.get(key)
+    if bucket:
+        bucket.pop()
+
+
 def registration_allowed(request: Request) -> bool:
-    return allow(f"oauth-register:{client_ip(request)}")
+    return allow(f"oauth-register:{limit_address(request)}")
 
 
 def signup_allowed(request: Request) -> bool:
     """Account sign-up. Its own budget, so agent client registrations cannot use it up."""
-    return allow(f"signup:{client_ip(request)}")
+    return allow(f"signup:{limit_address(request)}")
 
 
 LOGIN_ACCOUNT_FAILURES = 10
 
 
 def login_allowed(request: Request, email: str | None = None) -> bool:
-    if not allow(f"login:{client_ip(request)}"):
+    """Whether this sign-in attempt may go ahead. With an email, it also takes one of the account's slots.
+
+    Per account, so rotating addresses does not give unlimited guesses against one user. The slot
+    is taken here, before the password is checked: counting a failure only afterwards let every
+    request that was already in flight through, so a burst of guesses passed a limit of ten.
+    A correct password gives its slot back (login_succeeded), so an owner who signs in often is
+    never locked out.
+    """
+    if not allow(f"login:{limit_address(request)}"):
         return False
-    if email is None:
+    if not (email or "").strip():
         return True
-    # Per account, so rotating addresses does not give unlimited guesses against one user. Only
-    # failed sign-ins count (login_failed), so an owner who signs in often is never locked out.
-    return under_limit(f"login-account:{email.strip().lower()}", limit=LOGIN_ACCOUNT_FAILURES)
+    return allow(_login_account_key(email), limit=LOGIN_ACCOUNT_FAILURES)
 
 
-def login_failed(email: str | None) -> None:
+def _login_account_key(email: str) -> str:
+    return f"login-account:{email.strip().lower()}"
+
+
+def login_succeeded(email: str | None) -> None:
+    """The password was right, or the attempt failed for a reason that was not a wrong password."""
     if email:
-        allow(f"login-account:{email.strip().lower()}", limit=LOGIN_ACCOUNT_FAILURES * 10, window=WINDOW_SECONDS)
+        release(_login_account_key(email))
 
 
 def migration_allowed(request: Request, email: str | None = None) -> bool:
-    if not allow(f"login-migration:{client_ip(request)}", limit=24):
+    if not allow(f"login-migration:{limit_address(request)}", limit=24):
         return False
     if email is None:
         return True
@@ -205,11 +258,26 @@ def code_check_allowed(request: Request, subject: str | None = None) -> bool:
     Each code is also capped at a few guesses; this stops one address from spreading guesses
     over many codes and accounts.
     """
-    if not allow(f"code-check:{client_ip(request)}", limit=30):
+    if not allow(f"code-check:{limit_address(request)}", limit=30):
         return False
     if not subject:
         return True
     return allow(f"code-check-account:{subject.strip().lower()}", limit=15)
+
+
+# Wrong emailed sign-in codes one account may collect in a day, across every challenge and
+# address. Each code already allows only a few guesses, but a new code can be requested once
+# those are spent, and whoever is guessing already has the password.
+LOGIN_CODE_DAILY_FAILURES = 30
+_DAY_SECONDS = 86_400
+
+
+def login_code_open(user_id: str) -> bool:
+    return under_limit(f"login-code-fail:{user_id}", limit=LOGIN_CODE_DAILY_FAILURES, window=_DAY_SECONDS)
+
+
+def login_code_failed(user_id: str) -> None:
+    allow(f"login-code-fail:{user_id}", limit=LOGIN_CODE_DAILY_FAILURES * 10, window=_DAY_SECONDS)
 
 
 def reauth_allowed(user_id: str) -> bool:
@@ -217,7 +285,7 @@ def reauth_allowed(user_id: str) -> bool:
 
 
 def accept_invite_allowed(request: Request) -> bool:
-    return allow(f"accept-invite:{client_ip(request)}", limit=20)
+    return allow(f"accept-invite:{limit_address(request)}", limit=20)
 
 
 def reset() -> None:

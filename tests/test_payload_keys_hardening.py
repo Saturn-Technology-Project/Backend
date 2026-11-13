@@ -738,3 +738,77 @@ async def test_only_a_recipient_or_admin_can_share_a_legacy_record(client):
         json={"member_key_id": keys["b"], "records": [{"id": record_id, "type": "audit", "wrapped_dek": junk, "content_sha256": legacy_hash}]},
     )
     assert by_admin.status_code == 200, by_admin.text
+
+
+# Lifecycle -----------------------------------------------------------------------------------
+
+
+async def test_a_disabled_member_receives_no_new_wraps(client, monkeypatch):
+    await _org_key(client)
+    call = await _gateway(client, monkeypatch)
+    people = await _people(client)
+    _private, public = generate_mlkem()
+    member = _auth(people[0][1])
+    key_id = (await client.post("/org/payload-keys/member", json={"public_key": public.hex()}, headers=member)).json()["id"]
+    assert (await client.post(f"/org/payload-keys/member/{key_id}/approve")).status_code == 200
+
+    def wrapped(record) -> bool:
+        return any(item["member_key_id"] == key_id for item in record["payload"]["envelope"]["recipient_wraps"])
+
+    assert wrapped(await call({"repo": "while active"}))
+    assert (await client.patch(f"/org/members/{people[0][0]}", json={"status": "disabled"})).status_code == 200
+    assert not wrapped(await call({"repo": "while disabled"}))
+    # The key itself was not revoked, so access returns with the member.
+    assert (await client.patch(f"/org/members/{people[0][0]}", json={"status": "active"})).status_code == 200
+    assert wrapped(await call({"repo": "active again"}))
+
+
+async def test_an_admin_can_take_the_key_over_from_an_owner_who_left(client):
+    from tests.totp_access import finish_totp
+
+    # A second admin creates the organization key, so they own it.
+    invited = await client.post("/org/invites", json={"email": "owner@saturn.ai", "name": "Owner", "role": "admin"})
+    assert invited.status_code == 201, invited.text
+    accepted = await client.post("/auth/accept-invite", json={"token": invited.json()["token"], "password": "password1"})
+    assert accepted.status_code == 200, accepted.text
+    owner = _auth(accepted.json()["token"])
+    owner_user = accepted.json()["user"]["id"]
+    owner_employee = accepted.json()["user"]["employee"]["id"]
+    await finish_totp(client, owner)
+    private, public = generate_mlkem()
+    created = await client.post(
+        "/org/payload-keys",
+        json={"public_key": public.hex(), "backup": recovery_backup(os.urandom(32), "org", 1, private)},
+        headers=owner,
+    )
+    assert created.status_code == 200, created.text
+
+    # The other admin holds an envelope for that key.
+    me = (await client.get("/auth/me")).json()["id"]
+    _mine, my_public = generate_mlkem()
+    key_id = (await client.post("/org/payload-keys/member", json={"public_key": my_public.hex()})).json()["id"]
+    granted = await client.post(
+        "/org/payload-keys/envelopes",
+        json={"user_id": me, "member_key_id": key_id, "org_key_version": 1, "wrapped_private_key": "aa" * 64},
+        headers=owner,
+    )
+    assert granted.status_code == 200, granted.text
+
+    # While the owner is an active member, nobody else can move ownership.
+    early = await client.post("/org/payload-keys/transfer", json={"user_id": me})
+    assert early.status_code == 403, early.text
+
+    disabled = await client.patch(f"/org/members/{owner_employee}", json={"status": "disabled"})
+    assert disabled.status_code == 200, disabled.text
+
+    # The remaining admin can take it for themselves, but not hand it to someone else.
+    other = await client.post("/org/payload-keys/transfer", json={"user_id": owner_user})
+    assert other.status_code == 403, other.text
+    taken = await client.post("/org/payload-keys/transfer", json={"user_id": me})
+    assert taken.status_code == 200, taken.text
+    assert taken.json()["owner_user_id"] == me
+
+    events = (await client.get("/org/payload-keys/audit")).json()["events"]
+    moved = [item for item in events if item["event"] == "payload_owner_transferred"]
+    assert len(moved) == 1
+    assert moved[0]["payload"]["from_user_id"] == owner_user and moved[0]["payload"]["to_user_id"] == me

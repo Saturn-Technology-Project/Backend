@@ -46,9 +46,14 @@ def verifier_valid(verifier: str) -> bool:
     return 43 <= len(verifier) <= 128 and all(char in _PKCE_CHARS for char in verifier)
 
 
+# A native app registers its own scheme (cursor://...), so schemes cannot be an allowlist.
+# These are the ones a browser would run or read as content instead of handing to an app.
+_UNSAFE_REDIRECT_SCHEMES = frozenset({"javascript", "data", "file", "blob", "filesystem", "vbscript", "about", "view-source"})
+
+
 def redirect_allowed(uri: str) -> bool:
     parsed = urlparse(uri)
-    if parsed.fragment or not parsed.scheme or parsed.scheme in {"javascript", "data", "file", "blob"}:
+    if parsed.fragment or not parsed.scheme or parsed.scheme.lower() in _UNSAFE_REDIRECT_SCHEMES:
         return False
     if parsed.scheme == "https":
         return bool(parsed.hostname)

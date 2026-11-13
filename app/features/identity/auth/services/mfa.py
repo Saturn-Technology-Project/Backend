@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import timedelta, timezone
 
+from app.shared.threads import in_thread
 from fastapi import HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,8 +78,8 @@ class MfaService:
                 email=normalized,
                 purpose="signup",
                 name=cleaned_name,
-                password_hash=hash_password(secret),
-                code_hash=hash_password(code),
+                password_hash=await in_thread(hash_password, secret),
+                code_hash=await in_thread(hash_password, code),
                 expires_at=utcnow() + CODE_TTL,
                 attempts=0,
             )
@@ -108,7 +109,7 @@ class MfaService:
             or pending.password_hash is None
             or _as_utc(pending.expires_at) <= now
             or pending.attempts >= MAX_ATTEMPTS
-            or not verify_password(password, pending.password_hash)
+            or not await in_thread(verify_password, password, pending.password_hash)
         ):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
         record = await self._consume_code(session, normalized, "signup", code)
@@ -129,7 +130,7 @@ class MfaService:
                 email=user.email,
                 purpose="mfa",
                 user_id=user.id,
-                code_hash=hash_password(code),
+                code_hash=await in_thread(hash_password, code),
                 expires_at=utcnow() + CODE_TTL,
                 attempts=0,
             )
@@ -181,13 +182,13 @@ class MfaService:
                 purpose="email_current",
                 user_id=user.id,
                 name=normalized,
-                code_hash=hash_password(current_code),
+                code_hash=await in_thread(hash_password, current_code),
                 expires_at=now + CODE_TTL,
                 attempts=0,
             )
         )
         if taken:
-            hash_password(next_code)
+            await in_thread(hash_password, next_code)
             await session.flush()
             return current_code, None
         session.add(
@@ -197,7 +198,7 @@ class MfaService:
                 purpose="email_next",
                 user_id=user.id,
                 name=normalized,
-                code_hash=hash_password(next_code),
+                code_hash=await in_thread(hash_password, next_code),
                 expires_at=now + CODE_TTL,
                 attempts=0,
             )
@@ -268,7 +269,7 @@ class MfaService:
                 email=user.email,
                 purpose="reauth",
                 user_id=user.id,
-                code_hash=hash_password(code),
+                code_hash=await in_thread(hash_password, code),
                 expires_at=utcnow() + CODE_TTL,
                 attempts=0,
             )
@@ -357,7 +358,7 @@ class MfaService:
                 id=new_id("mfa"),
                 user_id=user.id,
                 token_hash=hash_token(raw),
-                code_hash=hash_password(code) if code else None,
+                code_hash=await in_thread(hash_password, code) if code else None,
                 attempts=0,
                 expires_at=now + CHALLENGE_TTL,
             )
@@ -384,11 +385,21 @@ class MfaService:
         With methods left, the sign-in is not finished: the same challenge stays open for them
         and the emailed code cannot be presented again.
         """
+        from app.core.rate_limit import login_code_failed, login_code_open
+
         record = await self._live_challenge(session, token)
         if record.code_hash is None:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verification code is incorrect or expired")
+        if not login_code_open(record.user_id):
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Too many incorrect codes. Try again tomorrow or use another sign-in method.",
+                headers={"Retry-After": "3600"},
+            )
         used = await reserve_attempt(session, record, "attempts", MAX_ATTEMPTS)
-        if used is None or not verify_password(code.strip(), record.code_hash):
+        if used is None or not await in_thread(verify_password, code.strip(), record.code_hash):
+            if used is not None:
+                login_code_failed(record.user_id)
             if used is None or used >= MAX_ATTEMPTS:
                 record.used_at = utcnow()
             await session.flush()
@@ -503,7 +514,7 @@ class MfaService:
         if record is None or _as_utc(record.expires_at) <= now or record.attempts >= MAX_ATTEMPTS:
             return None
         used = await reserve_attempt(session, record, "attempts", MAX_ATTEMPTS)
-        if used is None or not verify_password(code.strip(), record.code_hash):
+        if used is None or not await in_thread(verify_password, code.strip(), record.code_hash):
             if used is None or used >= MAX_ATTEMPTS:
                 record.used_at = now
             await session.flush()

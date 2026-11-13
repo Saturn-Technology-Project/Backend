@@ -13,6 +13,8 @@ from app.features.identity.auth.controllers.deps import (
     SaturnCloud,
     SessionDep,
 )
+from app.core.enums import AuditEvent
+from app.features.execution.activity.services.change_log import record_change
 from app.models import Organization
 from app.features.organization.org.services.plans import allows_pro
 from app.schemas import (
@@ -52,7 +54,23 @@ async def generate_policy(
     policy = await policy_service.generate_from_set(
         session, user.organization_id, body.tool_set_id, body.name, body.instructions
     )
+    await _record(session, user, AuditEvent.POLICY_CREATED, policy, drafted_by="model")
     return serialize_policy(policy)
+
+
+async def _record(session, user, event: AuditEvent, policy, **details) -> None:
+    await record_change(
+        session,
+        user,
+        event,
+        result=policy.status,
+        policy_id=policy.id,
+        policy_name=policy.name,
+        version=policy.version,
+        agent_ids=sorted(agent.id for agent in policy.agents),
+        tool_set_id=policy.tool_set_id,
+        **details,
+    )
 
 
 def _sse(payload: dict) -> str:
@@ -71,6 +89,7 @@ async def generate_policy_stream(
                 session, user.organization_id, body.tool_set_id, body.name, body.instructions
             ):
                 if event.get("type") == "policy":
+                    await _record(session, user, AuditEvent.POLICY_CREATED, event["policy"], drafted_by="model")
                     yield _sse({"type": "policy", "policy": serialize_policy(event["policy"]).model_dump(mode="json")})
                 else:
                     yield _sse(event)
@@ -94,6 +113,7 @@ async def create_policy(
     if not body.name.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Name is required")
     policy = await policy_service.create_policy(session, user.organization_id, body)
+    await _record(session, user, AuditEvent.POLICY_CREATED, policy)
     return serialize_policy(policy)
 
 
@@ -107,7 +127,18 @@ async def update_policy(
     _cloud: SaturnCloud, _pro: ProPlan,
 ):
     policy = await policy_service.get_policy(session, policy_id, user.organization_id)
+    before = {"status": policy.status, "version": policy.version}
     policy = await policy_service.update_policy(session, policy, body)
+    if policy.version != before["version"]:
+        await _record(
+            session,
+            user,
+            AuditEvent.POLICY_UPDATED,
+            policy,
+            previous_status=before["status"],
+            previous_version=before["version"],
+            changed=sorted(body.model_fields_set),
+        )
     return serialize_policy(policy)
 
 
@@ -116,6 +147,7 @@ async def delete_policy(
     policy_id: str, session: SessionDep, user: CurrentUser, _access: PoliciesWrite, _cloud: SaturnCloud, _pro: ProPlan
 ):
     policy = await policy_service.get_policy(session, policy_id, user.organization_id)
+    await _record(session, user, AuditEvent.POLICY_DELETED, policy)
     await policy_service.delete_policy(session, policy)
 
 
@@ -139,7 +171,9 @@ async def activate_policy(
     _cloud: SaturnCloud, _pro: ProPlan,
 ):
     policy = await policy_service.get_policy(session, policy_id, user.organization_id)
+    previous = policy.status
     policy = await policy_service.activate_policy(session, policy, body.confirm)
+    await _record(session, user, AuditEvent.POLICY_ACTIVATED, policy, previous_status=previous)
     return serialize_policy(policy)
 
 

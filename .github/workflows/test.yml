@@ -48,5 +48,60 @@ jobs:
       - name: Install
         run: pip install --require-hashes -r requirements-dev.txt
 
+      - name: Lint
+        run: ruff check app tests alembic/env.py
+
+      # The production lock only: a known vulnerability in what ships fails the build.
+      # --disable-pip reads the hashed lock as written instead of resolving it again.
+      - name: Audit production dependencies
+        run: pip-audit --requirement requirements.txt --require-hashes --disable-pip
+
       - name: Pytest
         run: pytest
+
+  # The tests above run on SQLite. Migrations are PostgreSQL DDL and nothing else ran them
+  # before a deploy did, so a bad one was first seen in production.
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: saturn
+          POSTGRES_PASSWORD: saturn-ci
+          POSTGRES_DB: saturn
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U saturn -d saturn"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://saturn:saturn-ci@localhost:5432/saturn
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install
+        run: pip install --require-hashes -r requirements.txt
+
+      - name: Apply every migration
+        run: alembic upgrade head
+
+      # The newest migration must come off and go back on cleanly, and a second run must find nothing to do.
+      - name: Reverse and reapply the newest migration
+        run: |
+          set -euo pipefail
+          alembic downgrade -1
+          alembic upgrade head
+          alembic upgrade head

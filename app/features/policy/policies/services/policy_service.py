@@ -285,7 +285,8 @@ class PolicyService:
                 "The organization default policy cannot be deleted. Change its rules or pause it instead.",
             )
         await session.execute(delete(agent_policies).where(agent_policies.c.policy_id == policy.id))
-        await session.execute(delete(PolicyRule).where(PolicyRule.policy_id == policy.id))
+        # The rules go with the policy through the relationship's cascade. Deleting them here as
+        # well made the cascade delete rows that were already gone.
         await session.delete(policy)
         await session.flush()
 
@@ -479,8 +480,9 @@ class PolicyService:
         organization_id: str,
         agent_ids: list[str],
     ) -> None:
-        await session.execute(delete(agent_policies).where(agent_policies.c.policy_id == policy_id))
+        # Check the ids before anything is removed: a refused request is still committed.
         agents = await self._load_agents(session, organization_id, agent_ids)
+        await session.execute(delete(agent_policies).where(agent_policies.c.policy_id == policy_id))
         if agents:
             await session.execute(
                 insert(agent_policies),
@@ -492,13 +494,19 @@ class PolicyService:
     ) -> list[Agent]:
         if not agent_ids:
             return []
+        wanted = list(dict.fromkeys(agent_ids))
         result = await session.execute(
             select(Agent).where(
                 Agent.organization_id == organization_id,
-                Agent.id.in_(agent_ids),
+                Agent.id.in_(wanted),
             )
         )
-        return list(result.scalars().all())
+        agents = list(result.scalars().all())
+        # An empty agent list means every agent. Dropping an id that does not exist would
+        # turn a policy meant for one agent into one that applies to all of them.
+        if len(agents) != len(wanted):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Agent not found")
+        return agents
 
     async def _replace_rules(
         self,
@@ -591,6 +599,9 @@ class PolicyService:
         bounded_text(name, MAX_NAME, "Name")
         tool_set, inventory = await self.set_inventory(session, organization_id, tool_set_id)
         _cap_tools(len(inventory))
+        # The model can take minutes. Nothing is pending, so end the transaction and give the
+        # connection back to the pool while it thinks.
+        await session.commit()
         analyses, used_model = await analyze_tools(inventory, request)
         definition = definition_from_analyses(tool_set.id, analyses)
         return await self.create_policy(
@@ -608,6 +619,9 @@ class PolicyService:
         tool_set, inventory = await self.set_inventory(session, organization_id, tool_set_id)
         _cap_tools(len(inventory))
         yield {"type": "status", "code": "reading", "name": tool_set.name, "count": len(inventory)}
+        # The model can take minutes. Nothing is pending, so end the transaction and give the
+        # connection back to the pool while it thinks.
+        await session.commit()
         analyses = None
         used_model = False
         async for kind, payload in iter_tool_analysis(inventory, request):
@@ -647,6 +661,9 @@ class PolicyService:
         from app.features.policy.policies.services.policy_llm import optimize_definition
 
         document, inventory, request = await self._optimize_inputs(session, policy, definition, instructions)
+        # The model can take minutes. Nothing is pending, so end the transaction and give the
+        # connection back to the pool while it thinks.
+        await session.commit()
         optimized, diff = await optimize_definition(document, inventory, request)
         return {"definition": optimized, "diff": diff}
 
@@ -656,6 +673,9 @@ class PolicyService:
         document, inventory, request = await self._optimize_inputs(session, policy, definition, instructions)
         tool_count = len(inventory) or sum(1 for node in document.get("nodes") or [] if node.get("type") == "tool")
         yield {"type": "status", "code": "optimizing", "total": tool_count}
+        # The model can take minutes. Nothing is pending, so end the transaction and give the
+        # connection back to the pool while it thinks.
+        await session.commit()
         outcome = None
         async for kind, payload in iter_optimize_definition(document, inventory, request):
             if kind == "think":
@@ -668,7 +688,7 @@ class PolicyService:
         yield {"type": "result", "definition": optimized, "diff": diff}
 
     async def _set_tool_names(self, session: AsyncSession, organization_id: str, tool_set_id: str) -> list[str]:
-        from app.models import Tool, ToolSet, ToolSetItem
+        from app.models import ToolSet, ToolSetItem
 
         result = await session.execute(
             select(ToolSet)

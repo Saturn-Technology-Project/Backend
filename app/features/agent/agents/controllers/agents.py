@@ -154,4 +154,11 @@ async def update_agent(
 
 @router.delete("/{agent_id}", status_code=204)
 async def delete_agent(agent_id: str, session: SessionDep, user: CurrentUser, _access: TeamWrite):
+    agent = await agent_service.get_agent(session, user, agent_id)
+    name = agent.name
     await removal_service.delete_agent(session, user, agent_id)
+    from app.core.enums import AuditEvent
+    from app.features.execution.activity.services.change_log import record_change
+
+    # Its runs and approvals go with it, so this record is what remains.
+    await record_change(session, user, AuditEvent.AGENT_DELETED, result=name, agent_id=agent_id)

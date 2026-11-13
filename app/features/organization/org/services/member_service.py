@@ -4,6 +4,7 @@ import logging
 import secrets
 from datetime import timedelta, timezone
 
+from app.shared.threads import in_thread
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -137,6 +138,26 @@ class MemberService:
         agent_ids: list[str] | None,
         mcp_server_ids: list[str] | None,
     ) -> None:
+        agents, servers = await self._resolve_assignments(
+            session, organization_id=organization_id, agent_ids=agent_ids, mcp_server_ids=mcp_server_ids
+        )
+        if agents is not None:
+            employee.agents = agents
+        if servers is not None:
+            employee.mcp_servers = servers
+            employee.mcp_assignments_initialized = True
+        await session.flush()
+
+    async def _resolve_assignments(
+        self,
+        session: AsyncSession,
+        *,
+        organization_id: str,
+        agent_ids: list[str] | None,
+        mcp_server_ids: list[str] | None,
+    ) -> tuple[list[Agent] | None, list[McpServer] | None]:
+        """Look every id up. Raises 404 without changing anything."""
+        agents: list[Agent] | None = None
         if agent_ids is not None:
             agents = []
             for agent_id in agent_ids:
@@ -144,7 +165,7 @@ class MemberService:
                 if agent is None or agent.organization_id != organization_id:
                     raise HTTPException(status.HTTP_404_NOT_FOUND, f"Agent not found: {agent_id}")
                 agents.append(agent)
-            employee.agents = agents
+        servers: list[McpServer] | None = None
         if mcp_server_ids is not None:
             servers = []
             for server_id in mcp_server_ids:
@@ -154,9 +175,7 @@ class MemberService:
                         status.HTTP_404_NOT_FOUND, f"MCP server not found: {server_id}"
                     )
                 servers.append(server)
-            employee.mcp_servers = servers
-            employee.mcp_assignments_initialized = True
-        await session.flush()
+        return agents, servers
 
     async def invite(
         self,
@@ -300,7 +319,7 @@ class MemberService:
             organization_id=org.id,
             email=invite.email,
             name=invite.name,
-            password_hash=hash_password(password),
+            password_hash=await in_thread(hash_password, password),
             status="active",
         )
         session.add(user)
@@ -397,6 +416,12 @@ class MemberService:
                     "Organization must keep at least one admin",
                 )
 
+        # Checked before the role or status changes below. A refused request is still committed,
+        # so a 404 here after those changes would save them without revoking the member's tokens.
+        await self._resolve_assignments(
+            session, organization_id=org_id, agent_ids=agent_ids, mcp_server_ids=mcp_server_ids
+        )
+
         if name is not None and employee.user is not None:
             employee.user.name = name.strip() or employee.user.name
         if title is not None:
@@ -455,7 +480,7 @@ class MemberService:
             PasswordReset(
                 id=new_id("rst"),
                 email=email,
-                code_hash=hash_password(code),
+                code_hash=await in_thread(hash_password, code),
                 expires_at=now + timedelta(minutes=RESET_TTL_MINUTES),
                 attempts=0,
             )
