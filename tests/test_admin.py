@@ -274,3 +274,103 @@ async def test_a_suspended_organization_is_refused_everywhere(client):
     assert (await client.get("/agents", headers=member)).status_code == 200
     call = await client.post("/mcp", headers=agent, json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
     assert call.status_code == 200, call.text
+
+
+async def test_audit_filters_and_pages(client):
+    orgs = []
+    for name, email in (("Halo", "ops@halo.test"), ("Rings", "ops@rings.test")):
+        created = await client.post(
+            "/admin/orgs",
+            json={"name": name, "admin_email": email, "admin_name": name, "admin_password": "password1"},
+        )
+        assert created.status_code == 201, created.text
+        orgs.append(created.json())
+    halo, rings = orgs
+    patched = await client.patch(f"/admin/orgs/{halo['id']}", json={"status": "suspended"})
+    assert patched.status_code == 200, patched.text
+
+    everything = await client.get("/admin/audit")
+    assert everything.status_code == 200, everything.text
+    total = int(everything.headers["X-Total-Count"])
+    assert total == len(everything.json()) >= 3
+
+    for_halo = await client.get("/admin/audit", params={"organization_id": halo["id"]})
+    assert {item["organization_id"] for item in for_halo.json()} == {halo["id"]}
+    assert {item["event"] for item in for_halo.json()} == {"org_onboarded", "org_updated"}
+    assert int(for_halo.headers["X-Total-Count"]) == len(for_halo.json())
+
+    onboarded = await client.get("/admin/audit", params={"event": "org_onboarded"})
+    assert {item["event"] for item in onboarded.json()} == {"org_onboarded"}
+    assert {halo["id"], rings["id"]} <= {item["organization_id"] for item in onboarded.json()}
+
+    both = await client.get(
+        "/admin/audit", params={"organization_id": rings["id"], "event": "org_updated"}
+    )
+    assert both.json() == []
+    assert both.headers["X-Total-Count"] == "0"
+
+    first = await client.get("/admin/audit", params={"limit": 2})
+    second = await client.get("/admin/audit", params={"limit": 2, "offset": 2})
+    assert len(first.json()) == 2
+    assert int(first.headers["X-Total-Count"]) == total
+    assert [item["id"] for item in first.json() + second.json()] == [
+        item["id"] for item in everything.json()[:4]
+    ]
+
+    assert (await client.get("/admin/audit", params={"since": "2999-01-01T00:00:00Z"})).json() == []
+    recent = await client.get("/admin/audit", params={"since": "2000-01-01T08:00:00+08:00"})
+    assert int(recent.headers["X-Total-Count"]) == total
+
+    names = await client.get("/admin/audit/events")
+    assert names.status_code == 200, names.text
+    assert names.json() == sorted(names.json())
+    assert {"org_onboarded", "org_updated"} <= set(names.json())
+
+
+async def test_usage_counts_only_the_requested_range(client):
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import update
+
+    from app.db.database import get_session
+    from app.main import app
+    from app.models import Action, Run
+
+    created = await client.post(
+        "/runs",
+        json={"agent_id": "agent_customer_ops", "input": "Refund Acme's duplicate charge."},
+    )
+    assert created.status_code == 201, created.text
+    run = created.json()
+
+    everyone = (await client.get("/admin/usage")).json()
+    organization_id = next(item["organization_id"] for item in everyone if item["runs"])
+
+    def row(response):
+        assert response.status_code == 200, response.text
+        return next(item for item in response.json() if item["organization_id"] == organization_id)
+
+    all_time = row(await client.get("/admin/usage"))
+    assert all_time["runs"] == 1
+    assert all_time["tool_calls"] == len(run["actions"]) >= 1
+    assert row(await client.get("/admin/usage", params={"days": 7})) == all_time
+
+    long_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    session_gen = app.dependency_overrides[get_session]()
+    session = await session_gen.__anext__()
+    try:
+        await session.execute(update(Run).where(Run.id == run["id"]).values(created_at=long_ago))
+        await session.execute(
+            update(Action).where(Action.run_id == run["id"]).values(created_at=long_ago)
+        )
+        await session.commit()
+    finally:
+        await session_gen.aclose()
+
+    last_week = row(await client.get("/admin/usage", params={"days": 7}))
+    assert (last_week["runs"], last_week["tool_calls"]) == (0, 0)
+    assert row(await client.get("/admin/usage", params={"days": 90})) == all_time
+    assert row(await client.get("/admin/usage")) == all_time
+
+    assert (await client.get("/admin/usage", params={"days": 0})).status_code == 422
+    assert (await client.get("/admin/usage", params={"days": 9999})).status_code == 422

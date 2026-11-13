@@ -21,7 +21,7 @@ INSTANCE="${CLOUD_SQL_INSTANCE:-saturn-pg}"
 DB_USER="${CLOUD_SQL_USER:-saturn}"
 REGION="${GCP_REGION:-asia-east1}"
 SECRET="${DATABASE_URL_SECRET:-DATABASE_URL}"
-REPO="${GITHUB_REPO:-Saturn-Technology-Project/Backend}"
+REPO="${GITHUB_REPO:-Saturn-Technology-Project/Saturn-MCP-Backend}"
 SERVICES="${SERVICES:-saturn-backend saturn-worker}"
 USERS_URL="https://sqladmin.googleapis.com/v1/projects/${GCP_PROJECT_ID}/instances/${INSTANCE}/users?name=${DB_USER}"
 
