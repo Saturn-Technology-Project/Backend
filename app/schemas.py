@@ -808,6 +808,9 @@ class PasskeyRead(BaseModel):
 
 class MfaStatus(BaseModel):
     email_mfa: bool
+    # An authenticator app is confirmed and in use. A setup that was started but never
+    # confirmed does not count.
+    totp: bool = False
     passkeys: list[PasskeyRead] = Field(default_factory=list)
 
 
