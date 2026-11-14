@@ -10,7 +10,9 @@
 #   --exclude-newer-package pyasn1=2026-11-04T00:00:00Z
 #   --exclude-newer-package pydantic=2026-10-30T00:00:00Z
 #   --exclude-newer-package pydantic-core=2026-10-30T00:00:00Z
-# (pydantic 2.14.2 fixes GHSA-qpmf-fgh3-ff25 and GHSA-3r8g-cqwr-jr29.)
+#   --exclude-newer-package opentelemetry-api=2026-10-30T00:00:00Z
+# (pydantic 2.14.2 fixes GHSA-qpmf-fgh3-ff25 and GHSA-3r8g-cqwr-jr29.
+#  opentelemetry-api 1.45.2 fixes GHSA-mf5v-w3w3-f6cg / CVE-2026-126360.)
 #
 # Install with `pip install --require-hashes -r requirements.txt`.
 # Test-only packages live in requirements-dev.in.
@@ -35,5 +37,5 @@ google-cloud-kms==3.18.0
 redis==8.1.0
 # Security fixes for shared TLS trust and parsers used by transitive dependencies.
 certifi==2026.10.23
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
 pyasn1==0.6.5
